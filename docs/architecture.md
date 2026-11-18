@@ -1,8 +1,8 @@
 # StudyGraph 架构决策与不变量
 
 > 本文件记录「为什么这样做」。可执行的事实以 `packages/db/prisma/schema.prisma`、
-> `packages/db/sql/guards.sql` 与 `docs/milestone-N.md` 为准。
-> 最后更新：2026-11-18（M0 脚手架，尚无业务代码）
+> `packages/db/prisma/migrations/` 与 `docs/milestone-N.md` 为准。
+> 最后更新：2026-11-18（M1 开工前整改）
 
 ---
 
@@ -11,11 +11,13 @@
 | 项 | 状态 | 证据 |
 | --- | --- | --- |
 | Prisma schema 语法与关系完整 | ✅ 已验证 | `prisma validate` → valid |
-| Prisma Client 可生成 | ✅ 已验证 | `prisma generate` → `node_modules/@prisma/client` |
-| schema 能翻译成 PostgreSQL DDL | ✅ 已验证 | `prisma migrate diff` → 34 表 / 27 枚举 / 53 外键 / 65 索引 |
-| `vector(1536)` 与 `pg_trgm`/`vector` 扩展进入 DDL | ✅ 已验证 | migration.sql 含 `CREATE EXTENSION` 与 `vector(1536)` 列 |
-| 迁移在真实数据库上跑通 | ❌ 未验证 | 本机无 PostgreSQL 实例 |
-| `guards.sql` 的 CHECK / 触发器 / 视图执行通过 | ❌ 未验证 | 同上，仅文本评审 |
+| Prisma Client 可生成 | ✅ 已验证 | `prisma generate` |
+| schema 能翻译成 PostgreSQL DDL | ✅ 已验证 | `prisma migrate diff` → 34 表 / 27 枚举 / 53 外键 / 66 索引 |
+| `vector(1536)` 与扩展进入 DDL | ✅ 已验证 | migration.sql 含 `CREATE EXTENSION` 与 `vector(1536)` 列 |
+| 两个 migration 能在真实引擎上执行 | ✅ 已验证（PGlite/PG17 WASM） | `scripts/verify-sql.mjs`：init 186 条语句 + guards 23 条 |
+| CHECK / 触发器 / 视图行为正确 | ✅ 已验证（同上） | 7 个 CHECK、6 个触发器、4 个视图；四个负向/正向用例全绿 |
+| 跨画布连边被数据库拒绝 | ✅ 已验证（同上） | 复合外键 `Edge_canvasId_toNodeId_fkey` 报错 |
+| 迁移在 `pgvector/pgvector:pg16` 容器上执行 | ❌ 未验证 | 本机无 Docker（待用户安装） |
 | 任何 HTTP / UI / 节点执行器 | ❌ 未实现 | M1 起逐步落地 |
 
 **不要把上表的 ❌ 当成已完成。** 里程碑文档只写验收通过的行为。
@@ -103,7 +105,13 @@ proficiency     = clamp( (α₀ + Σ_{isCorrect} w_i) / (α₀ + β₀ + Σ_all 
 **第一层 · 数据层（不变量）**
 `ConceptCitation` / `MethodCitation` / `ProblemCitation` 三张引用表，
 把资产钉到 `Span(sourceId, page, charStart, charEnd)` 上。
-`guards.sql` 里的触发器规定：`status = 'VERIFIED'` 时若引用数为 0，写入直接失败。
+`20261118030100_guards` 里的两组触发器：
+
+- `BEFORE INSERT OR UPDATE OF status`：`status = 'VERIFIED'` 时若引用数为 0，写入直接失败；
+- `AFTER DELETE`（挂在三张引用表上）：删掉最后一条引用后，把父实体降级回 `UNVERIFIED`。
+
+只有前者是不够的——**删引用同样会让 VERIFIED 失守**，而降级方向不会被前者拦住。
+两个用例都在 `scripts/verify-sql.mjs` 里。
 
 **第二层 · 服务层（解析即校验）**
 executor 产出的每条论断都带 `spanIds`；`SpanResolver` 解析失败（span 不存在、
@@ -236,22 +244,49 @@ variant ──► distractor ──► check ──► (VERIFIED) 题库
   否则 `diagnose` 无法给出「哪一步该补什么」。
 - 错因 → 补丁的映射是产品逻辑，放在 `packages/contracts`，不让每个页面各写一套。
 
+### 7.1 与规格的三处有意偏离（已与监理确认）
+
+| 偏离 | 规格写法 | 实际 | 理由 |
+| --- | --- | --- | --- |
+| `Problem.options` 可空 | `options Json`（必填） | `Json?` | 证明题/计算题没有选项。选择题"≥2 个选项"由 `problem_choice_has_options` CHECK 保证，不是靠可空字段放水 |
+| `Attempt.isCorrect` 可空 | `Bool` | `Boolean?` | `RUBRIC` 判分是异步/人工的，作答当下无法确定对错；`null` 明确表示"待判" |
+| `Edge.canvasId` + 复合外键 | 无此字段 | 有 | 规格没有"创建边"端点，需要显式写入入口；没有 `canvasId` 时判断跨画布要 join 两次 Node，服务层漏写就是越权连边 |
+
+另外两处收窄（不涉及规格文本，属实现决策）：`CanvasRole` 只有 `EDITOR/VIEWER`（所有权由
+`Canvas.ownerId` 唯一表达）；`Edge` 增加 `fromPort/toPort`（端口校验的落点）。
+
 ---
 
 ## 8. 数据层守卫
 
-Prisma 表达不了的东西写在 `packages/db/sql/guards.sql`：
+Prisma 表达不了的东西在 `packages/db/prisma/migrations/20261118030100_guards/migration.sql`
+（`packages/db/sql/guards.sql` 是逐字节副本，`scripts/check-guards-sync.mjs` 防漂移）。
+**它是 migration，不是手工脚本**——`migrate deploy` 与 shadow database 都自带这些约束。
 
 | 守卫 | 形式 | 防的是什么 |
 | --- | --- | --- |
 | mastery / proficiency ∈ [0,1]、difficulty ∈ [0,5] | CHECK | 越界值让诊断失去意义 |
 | span 区间有序 | CHECK | 高亮指向不存在的位置 |
 | REJECTED 必须有理由、VERIFIED 必须无理由 | CHECK | 「悄悄入库」 |
-| VERIFIED 资产必须有 ≥1 条引用 | 触发器 | 无源生成 |
+| 选择题必须 ≥2 个选项 | CHECK | 坏数据进 UI |
+| VERIFIED 资产必须有 ≥1 条引用 | 触发器（写入） | 无源生成 |
+| 引用被删光后自动降级 | 触发器（删除） | 删引用绕过溯源约束 |
+| 跨画布连边 | 复合外键 | 越权连边 |
 | 干扰项缺 errorTag | 审计视图 | 凑数选项 |
 | 试卷 report 里有 gaps 仍标 READY | 审计视图 | 静默补齐缺口 |
+| `steps[].conceptIds` 与 `MethodConcept` 不一致 | 审计视图 | 两份数据悄悄漂移 |
 
 审计视图不阻塞写入，由 `scripts/check-gates.ts` 与 CI 扫描——写入路径的性能不该被审计拖累。
+
+**硬约束与 SQL 的对应关系**（可逐条查）：
+
+| 约束 | 落点 |
+| --- | --- |
+| 溯源是物理约束 | 三张 citation 表的写入/删除触发器 |
+| Edge 只有三种语义 | `CREATE TYPE "EdgeKind"` 三值 |
+| 干扰项必须绑定错因 | `v_problem_distractor_without_error_tag` |
+| 出题必须过闸门 | `Problem.status` + `problem_rejected_has_reason` |
+| 组卷不许静默补齐 | `v_paper_with_coverage_gap` |
 
 ---
 
@@ -259,11 +294,11 @@ Prisma 表达不了的东西写在 `packages/db/sql/guards.sql`：
 
 | 风险 | 影响 | 处置 |
 | --- | --- | --- |
-| 本机无 PostgreSQL / Redis / Docker | M1 迁移、M2 队列均无法端到端验证 | **需要用户决策**：装 Docker Desktop / 用远程实例 / 本地装 PG16+pgvector |
-| 沙箱禁止管道式子进程 | Prisma 引擎命令（migrate）需放宽权限才能跑；vitest 部分场景同理 | 已在 `docs/runbook.md` 记录；迁移类命令按需单次授权 |
-| `guards.sql` 未执行 | 触发器可能有语法问题 | M1 建库后立刻执行并记录到 `docs/milestone-1.md` |
+| 本机无 Docker / PostgreSQL / Redis | 迁移与任何连库验收无法执行 | **阻塞项，需用户安装 Docker Desktop**（`docker compose up -d postgres`） |
+| 沙箱禁止管道式子进程 | Prisma 引擎命令需放宽权限；`node --test` 多文件模式不可用 | 见 `docs/runbook.md` 坑 2；单测用 `node <file>.ts` |
+| 迁移尚未在 pgvector 容器上执行 | PGlite 与真实镜像的 pgvector 版本差异 | Docker 就绪后立刻 `migrate deploy` 并记录到 `docs/milestone-1.md` |
 | pgvector 维度写死 1536 | 换 embedding 模型要迁移 | `Concept.embeddingModel` 记录来源，切换时批量重建 |
-| Next 14 生态老化 | 装依赖可能撞 peer 冲突 | M1 首次安装时验证，必要时用 `--legacy-peer-deps` 等价的 pnpm 配置 |
+| Next 14 生态老化 | 装依赖可能撞 peer 冲突 | M1 首次安装时验证 |
 | Prisma 6 + Node 26 非官方矩阵 | 迁移环节未知 | M1 首次 `migrate deploy` 时验证 |
 
 ---

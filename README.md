@@ -17,23 +17,24 @@
 
 ## 当前状态
 
-**M0 · 脚手架**（本仓库目前只有这些）
+**M0 · 脚手架 + M1 开工前整改**（本仓库目前只有这些）
 
 | 已交付 | 路径 |
 | --- | --- |
-| 全量领域模型（34 表 / 27 枚举 / 53 外键） | `packages/db/prisma/schema.prisma` |
-| 初始迁移 SQL（尚未在库上执行） | `packages/db/prisma/migrations/20261118030000_init/` |
-| 物理约束（CHECK / 触发器 / 审计视图，尚未执行） | `packages/db/sql/guards.sql` |
+| 全量领域模型（34 表 / 27 枚举 / 55 外键） | `packages/db/prisma/schema.prisma` |
+| 初始迁移（表/枚举/外键/复合外键/扩展） | `packages/db/prisma/migrations/20261118030000_init/` |
+| 物理约束迁移（7 CHECK / 6 触发器 / 4 视图，**已进 migration 链路**） | `packages/db/prisma/migrations/20261118030100_guards/` |
+| SQL 验证器（无 Docker 时用 PGlite 跑迁移与负向用例） | `scripts/verify-sql.mjs` |
 | 架构决策与不变量 | `docs/architecture.md` |
 | 目录结构 | `docs/structure.md` |
-| 运行手册（含本机 5 个环境坑） | `docs/runbook.md` |
-| 本地依赖编排 | `docker-compose.yml` |
+| 运行手册（含本机 6 个环境坑） | `docs/runbook.md` |
+| M1 设计决定（边写入入口、端口矩阵、删除策略） | `docs/milestone-1.md` |
 
 **未实现**：任何 HTTP 接口、UI、节点执行器、LLM Gateway、队列、MCP。
-按 M1–M6 逐个落地，每个里程碑验收通过后写 `docs/milestone-N.md`。
 
-已验证：`prisma validate` 通过、Client 可生成、schema 能翻译成 PostgreSQL DDL。
-未验证：迁移与 `guards.sql` 未在真实数据库上跑过（本机无 PostgreSQL）。
+已验证：schema 合法、Client 可生成、schema 能翻译成 PostgreSQL DDL、
+两个 migration 在 PGlite(PostgreSQL 17 WASM) 上完整执行且四个正向/负向用例全绿。
+未验证：尚未在 `pgvector/pgvector:pg16` 容器上执行（本机没有 Docker —— 这是当前唯一的阻塞项）。
 
 ---
 

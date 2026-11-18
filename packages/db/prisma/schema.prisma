@@ -848,6 +848,8 @@ model Problem {
   stemMathml String?
 
   /// [{ key, text, errorTag }]：每个错误选项必须绑定一个 ErrorTag
+  /// 可空是有意为之：证明题/计算题没有选项。选择题的"必须 ≥2 个选项"
+  /// 由 guards migration 的 problem_choice_has_options CHECK 保证（SG-SUP-001 §8.2 已确认）
   options Json?
   answer  Json
 
