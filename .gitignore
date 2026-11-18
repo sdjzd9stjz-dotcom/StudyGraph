@@ -1,0 +1,22 @@
+# 依赖与构建产物
+node_modules/
+.pnpm-store/
+.next/
+out/
+dist/
+coverage/
+*.tsbuildinfo
+
+# 环境变量（.env.example 需要提交）
+.env
+.env.local
+.env.*.local
+
+# 日志与临时文件
+*.log
+tmp/
+.DS_Store
+Thumbs.db
+
+# DSH 探测写权限时留下的空文件；工作区禁止删除文件，故忽略而不删
+.dsh-write-probe

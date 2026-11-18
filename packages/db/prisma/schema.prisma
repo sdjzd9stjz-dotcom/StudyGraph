@@ -1,0 +1,1074 @@
+// =============================================================================
+// StudyGraph — 领域模型 v1
+// =============================================================================
+// 本文件是唯一事实来源（source of truth）。M1 起所有代码从它生成或与它对齐。
+//
+// 三条不可谈判的建模纪律：
+//   1. 只有四种领域概念：Node / Edge / Concept / Method。其余都是它们的证据层。
+//   2. Edge.kind 永远只有三值：DERIVED_FROM / PREREQUISITE / CITES。
+//      需要新的关系语义 → 新增独立关系表（ConceptEdge / MethodEdge 即此产物），
+//      绝不扩 Edge.kind。
+//   3. mastery（记忆）与 proficiency（解题）是两套状态变量，分别落在
+//      Concept 与 Method 上，不允许合并成一个字段。
+//
+// 物理约束（CHECK / 触发器）不在本文件内，见 packages/db/sql/guards.sql——
+// Prisma 无法表达它们，但它们必须随首个 migration 一起进库。
+//
+// 常用命令（在仓库根目录）：
+//   pnpm db:validate    校验本文件
+//   pnpm db:format      格式化并校验
+//   pnpm db:generate    生成 Prisma Client
+//   pnpm db:migrate     prisma migrate dev（需要 DATABASE_URL）
+// =============================================================================
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+  // 二进制引擎与 Node 版本解耦，不需要 binaryTargets
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  // pgvector 用于概念语义邻接；pg_trgm 用于概念名模糊检索。
+  // 二者都在 migration 中以 CREATE EXTENSION 落库。
+  extensions = [vector, pg_trgm]
+}
+
+// =============================================================================
+// 枚举
+// =============================================================================
+
+/// 17 个节点类型，分三批实现。禁止新增第四批或"临时类型"。
+/// 新增类型必须同时改 registry、端口声明与本文档。
+enum NodeType {
+  // ── 第一批 · 知识底座（9）
+  SOURCE
+  CHUNK
+  EXTRACT
+  CARD
+  PREREQ
+  QUIZ
+  GRADE
+  REVIEW
+  GATE
+  // ── 第二批 · 解题方法建模（4）
+  PROBE
+  METHOD
+  SOLVE
+  DIAGNOSE
+  // ── 第三批 · 出题与组卷（4）
+  VARIANT
+  DISTRACTOR
+  CHECK
+  PAPER
+}
+
+/// 节点三态 + 执行中 + 草稿。
+/// STALE 用琥珀色渲染，ERROR 才用红色——上游变更不是错误。
+enum NodeStatus {
+  DRAFT
+  READY
+  RUNNING
+  STALE
+  ERROR
+}
+
+/// 节点图唯三的边语义。第四个值出现即为架构违规。
+enum EdgeKind {
+  DERIVED_FROM
+  PREREQUISITE
+  CITES
+}
+
+enum RunStatus {
+  QUEUED
+  RUNNING
+  /// gate 节点批量执行前等待人工确认成本与质量
+  AWAITING_APPROVAL
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+enum ArtifactKind {
+  SOURCE_TEXT
+  SPAN_INDEX
+  CHUNKS
+  CONCEPT_CLAIMS
+  CONCEPT_CARD
+  PREREQ_PROPOSAL
+  PROBLEM_DRAFT
+  GRADING
+  REVIEW_PLAN
+  COST_ESTIMATE
+  PROBE_PROFILE
+  METHOD_CARD
+  SOLUTION_TRACE
+  DIAGNOSIS
+  VARIANT_SET
+  DISTRACTOR_SET
+  CHECK_VERDICT
+  PAPER_SPEC
+  OUTLINE_SKELETON
+  DRAFT_SKELETON
+}
+
+/// 概念之间的关系不进 Edge，进独立关系表。
+enum ConceptEdgeKind {
+  PREREQUISITE
+  CONTRAST
+  CONTAINS
+  APPLIES_TO
+  VARIANT_OF
+}
+
+enum MethodEdgeKind {
+  SPECIALIZES
+  COMBINES_WITH
+  CONTRASTS_WITH
+}
+
+/// 由模型推断出的关系必须经人工闸门才生效。
+enum EdgeReviewStatus {
+  PROPOSED
+  CONFIRMED
+  REJECTED
+}
+
+/// UNVERIFIED 资产不得进入卡片、不得作为出题依据。
+enum VerificationStatus {
+  UNVERIFIED
+  VERIFIED
+  MERGED
+}
+
+enum ProblemType {
+  SINGLE_CHOICE
+  MULTI_CHOICE
+  TRUE_FALSE
+  FILL_BLANK
+  NUMERIC
+  COMPUTATION
+  SHORT_ANSWER
+  PROOF
+}
+
+/// 判分必须机械可执行：无"酌情给分"。
+enum JudgeRule {
+  EXACT
+  NUMERIC_TOL
+  RUBRIC
+  CHOICE
+}
+
+enum BloomLevel {
+  REMEMBER
+  UNDERSTAND
+  APPLY
+  ANALYZE
+  EVALUATE
+  CREATE
+}
+
+enum ProblemStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+/// 错因分类决定补丁动作，不是标签墙。
+enum ErrorCategory {
+  CONCEPT_GAP
+  METHOD_MISMATCH
+  CONDITION_MISSED
+  COMPUTE_SLIP
+  READING_SLIP
+  CHECK_OMITTED
+}
+
+/// 一道题里某个方法是主方法、辅助方法，还是刻意设置的诱饵方法。
+enum RoleInProblem {
+  REQUIRED
+  OPTIONAL
+  DECOY
+}
+
+/// 变式六维，可多选；CONDITION 必须产出"条件失效"陷阱题。
+enum VariantAxis {
+  NUMERIC
+  CONTEXT
+  CONDITION
+  DIRECTION
+  REPRESENTATION
+  COMPOSITE
+}
+
+enum CanvasVisibility {
+  PRIVATE
+  UNLISTED
+  PUBLIC
+}
+
+/// 三视图是同一份数据的投影，不是三套数据。
+enum CanvasView {
+  PIPELINE
+  KNOWLEDGE
+  METHOD
+}
+
+/// 成员角色不含 OWNER：所有权由 Canvas.ownerId 唯一表达，避免双写。
+enum CanvasRole {
+  EDITOR
+  VIEWER
+}
+
+enum Scope {
+  CANVAS_READ
+  CANVAS_WRITE
+  RUN_EXECUTE
+  PROBLEM_READ
+}
+
+enum WebhookEvent {
+  NODE_RUN_COMPLETED
+  CONCEPT_MASTERY_CHANGED
+  METHOD_PROFICIENCY_CHANGED
+  REVIEW_DUE
+  PROBLEM_REJECTED
+}
+
+enum DeliveryStatus {
+  PENDING
+  DELIVERED
+  FAILED
+  EXHAUSTED
+}
+
+/// FSRS 评分与卡片状态，ReviewLog 需要它们做参数拟合。
+enum ReviewGrade {
+  AGAIN
+  HARD
+  GOOD
+  EASY
+}
+
+enum FsrsCardState {
+  NEW
+  LEARNING
+  REVIEW
+  RELEARNING
+}
+
+enum UsageSurface {
+  NODE_RUN
+  CHAT_COMPLETIONS
+  MCP
+}
+
+enum SourceKind {
+  PDF
+  PPTX
+  WEB
+  AUDIO
+  IMAGE
+  TEXT
+}
+
+enum PaperStatus {
+  DRAFT
+  READY
+}
+
+// =============================================================================
+// 身份与授权
+// =============================================================================
+
+model User {
+  id          String   @id @default(cuid())
+  email       String   @unique
+  displayName String
+  locale      String   @default("zh-CN")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  ownedCanvases    Canvas[]             @relation("CanvasOwner")
+  memberships      CanvasMember[]
+  tokens           PersonalAccessToken[]
+  conceptReviews   ConceptReview[]
+  attempts         Attempt[]
+  methodApps       MethodApplication[]
+  providerKeys     ProviderCredential[]
+  usage            UsageRecord[]
+  webhookEndpoints WebhookEndpoint[]
+}
+
+/// PAT 只存哈希；明文仅在创建时返回一次。
+/// scopes 字符串形如 "sg_pat_xxxxxxxx" 的前缀单独存 tokenPrefix 以便展示与吊销。
+model PersonalAccessToken {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name        String
+  tokenPrefix String
+  tokenHash   String    @unique
+  scopes      Scope[]
+  expiresAt   DateTime?
+  lastUsedAt  DateTime?
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([userId])
+}
+
+/// OAuth2 客户端。授权码与 access/refresh token 存 Redis（短生命周期，
+/// 不落业务库），因此这里只有客户端注册信息。
+model OAuthClient {
+  id               String   @id @default(cuid())
+  clientId         String   @unique
+  clientSecretHash String
+  name             String
+  redirectUris     String[]
+  scopes           Scope[]
+  isFirstParty     Boolean  @default(false)
+  createdAt        DateTime @default(now())
+}
+
+// =============================================================================
+// 画布与协作
+// =============================================================================
+
+model Canvas {
+  id            String           @id @default(cuid())
+  ownerId       String
+  owner         User             @relation("CanvasOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  title         String
+  description   String?
+  visibility    CanvasVisibility @default(PRIVATE)
+  isTemplate    Boolean          @default(false)
+
+  // 模板市场：只读克隆并保留署名
+  forkedFromId     String?
+  forkedFrom       Canvas?  @relation("CanvasFork", fields: [forkedFromId], references: [id], onDelete: SetNull)
+  forks            Canvas[] @relation("CanvasFork")
+  forkCount        Int      @default(0)
+  originAuthorName String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  nodes        Node[]
+  edges        Edge[]
+  concepts     Concept[]
+  conceptEdges ConceptEdge[]
+  methods      Method[]
+  methodEdges  MethodEdge[]
+  problems     Problem[]
+  papers       Paper[]
+  members      CanvasMember[]
+  doc          CanvasDoc?
+  layouts      CanvasViewLayout[]
+  webhooks     WebhookEndpoint[]
+
+  @@index([ownerId])
+  @@index([visibility, isTemplate])
+}
+
+model CanvasMember {
+  canvasId String
+  canvas   Canvas     @relation(fields: [canvasId], references: [id], onDelete: Cascade)
+  userId   String
+  user     User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role     CanvasRole
+  joinedAt DateTime   @default(now())
+
+  @@id([canvasId, userId])
+  @@index([userId])
+}
+
+/// Yjs 文档状态：一个画布一个 CRDT blob。
+/// 增量更新经由 Redis 广播，定期压缩后写回这里（避免每 keystroke 写库）。
+model CanvasDoc {
+  canvasId  String   @id
+  canvas    Canvas   @relation(fields: [canvasId], references: [id], onDelete: Cascade)
+  ystate    Bytes
+  version   Int      @default(0)
+  updatedAt DateTime @updatedAt
+}
+
+/// 三视图各自的布局缓存：切换视图只换布局算法，实体 id 不变。
+model CanvasViewLayout {
+  id        String     @id @default(cuid())
+  canvasId  String
+  canvas    Canvas     @relation(fields: [canvasId], references: [id], onDelete: Cascade)
+  view      CanvasView
+  layout    Json
+  updatedAt DateTime   @updatedAt
+
+  @@unique([canvasId, view])
+}
+
+// =============================================================================
+// 加工图：节点、边、执行、产物、原文
+// =============================================================================
+
+model Node {
+  id       String  @id @default(cuid())
+  canvasId String
+  canvas   Canvas  @relation(fields: [canvasId], references: [id], onDelete: Cascade)
+  type     NodeType
+  title    String?
+
+  /// 节点参数，形状由 packages/contracts 中该 type 的 zod schema 约束
+  params Json @default("{}")
+
+  status NodeStatus @default(DRAFT)
+
+  /// 上次成功运行的指纹：sha256(上游 artifacts + params + modelVersion + promptVersion)
+  /// 重新计算的指纹与此值不同 → 下游全部标 STALE（不自动重跑）
+  fingerprint String?
+
+  posX Float @default(0)
+  posY Float @default(0)
+
+  staleAt     DateTime?
+  staleReason String?
+  errorMessage String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  edgesOut  Edge[]   @relation("EdgeFrom")
+  edgesIn   Edge[]   @relation("EdgeTo")
+  runs      Run[]
+  artifacts Artifact[]
+  sources   Source[]
+
+  @@index([canvasId, type])
+  @@index([canvasId, status])
+  /// 供 Edge 的复合外键使用：保证一条边的两个端点属于同一画布
+  @@unique([canvasId, id])
+}
+
+model Edge {
+  id       String @id @default(cuid())
+  canvasId String
+  canvas   Canvas @relation(fields: [canvasId], references: [id], onDelete: Cascade)
+
+  /// 复合外键 (canvasId, fromNodeId) → Node(canvasId, id)：
+  /// 跨画布连边在数据库层就写不进去，不依赖服务层记得校验。
+  fromNodeId String
+  fromNode   Node   @relation("EdgeFrom", fields: [canvasId, fromNodeId], references: [canvasId, id], onDelete: Cascade)
+  toNodeId   String
+  toNode     Node   @relation("EdgeTo", fields: [canvasId, toNodeId], references: [canvasId, id], onDelete: Cascade)
+  kind       EdgeKind
+
+  /// 端口名：类型校验在 UI 层与服务层双重执行，服务层拒绝返回 400
+  fromPort String @default("out")
+  toPort   String @default("in")
+
+  createdAt DateTime @default(now())
+
+  @@unique([canvasId, fromNodeId, toNodeId, kind])
+  @@index([canvasId])
+  @@index([toNodeId])
+  @@index([fromNodeId])
+}
+
+model Run {
+  id     String @id @default(cuid())
+  nodeId String
+  node   Node   @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  status  RunStatus @default(QUEUED)
+  /// user | mcp | webhook | retry —— 执行必须显式触发，这里记录触发来源
+  trigger String    @default("user")
+
+  modelUsed     String?
+  modelVersion  String?
+  promptVersion String?
+  fingerprint   String?
+
+  /// 指纹命中直接返回缓存产物，tokensIn/tokensOut 记 0
+  cacheHit Boolean @default(false)
+
+  tokensIn  Int @default(0)
+  tokensOut Int @default(0)
+
+  /// 重跑前向用户展示的预计消耗（gate 节点据此确认）
+  estimatedTokensIn  Int?
+  estimatedTokensOut Int?
+
+  costUsd Decimal? @db.Decimal(12, 6)
+
+  errorCode    String?
+  errorMessage String?
+
+  startedAt DateTime?
+  endedAt   DateTime?
+  createdAt DateTime  @default(now())
+
+  artifacts Artifact[]
+
+  @@index([nodeId, createdAt])
+  @@index([status])
+}
+
+model Artifact {
+  id     String  @id @default(cuid())
+  nodeId String
+  node   Node    @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  runId  String?
+  run    Run?    @relation(fields: [runId], references: [id], onDelete: SetNull)
+
+  kind ArtifactKind
+
+  /// 大产物（原文、切片）落对象存储，结构化摘要留 structured
+  s3Key     String?
+  structured Json
+  /// 规范化 JSON 的 sha256，参与指纹计算与缓存比对
+  hash      String
+  sizeBytes Int?
+
+  createdAt DateTime @default(now())
+
+  @@index([nodeId, kind])
+  @@index([runId])
+  @@index([hash])
+}
+
+model Source {
+  id     String @id @default(cuid())
+  nodeId String
+  node   Node   @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  kind      SourceKind
+  filename  String
+  mimeType  String
+  pageCount Int        @default(0)
+  byteSize  Int?
+  s3Key     String?
+  checksum  String?
+  parsedAt  DateTime?
+
+  createdAt DateTime @default(now())
+
+  spans               Span[]
+  conceptEdgeEvidence ConceptEdge[]
+
+  @@index([nodeId])
+  @@index([checksum])
+}
+
+/// 溯源的最小单位：文件 + 页码 + 字符区间。
+/// page = 0 表示非分页来源（音频转写等）。
+model Span {
+  id       String @id @default(cuid())
+  sourceId String
+  source   Source @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  page      Int    @default(0)
+  charStart Int
+  charEnd   Int
+  text      String
+
+  /// PDF 高亮矩形 [{pageX, pageY, w, h}]，供溯源抽屉定位
+  bbox Json?
+
+  createdAt DateTime @default(now())
+
+  conceptCitations    ConceptCitation[]
+  methodCitations     MethodCitation[]
+  problemCitations    ProblemCitation[]
+  /// 概念先修边的证据 span（见 ConceptEdge.evidenceSpanId）
+  conceptEdgeEvidence ConceptEdge[]
+
+  @@unique([sourceId, page, charStart, charEnd])
+  @@index([sourceId, page])
+}
+
+// =============================================================================
+// 知识资产：Concept（携带记忆掌握度）
+// =============================================================================
+
+model Concept {
+  id       String @id @default(cuid())
+  canvasId String
+  canvas   Canvas @relation(fields: [canvasId], references: [id], onDelete: Cascade)
+
+  name       String
+  definition String
+
+  /// 无 span 引用只能是 UNVERIFIED，且不得进入 ConceptCard
+  status VerificationStatus @default(UNVERIFIED)
+
+  // ── 记忆掌握度（FSRS 调度，独立于 Method.proficiency）──
+  mastery        Float    @default(0)
+  dueAt          DateTime @default(now())
+  lastReviewedAt DateTime?
+  reps           Int      @default(0)
+  lapses         Int      @default(0)
+  /// FSRS 全量状态：{ stability, difficulty, state, step, ... }
+  fsrsState      Json     @default("{}")
+
+  /// 语义邻接检索用；维度由 embeddingModel 决定，改动需要 migration
+  embedding      Unsupported("vector(1536)")?
+  embeddingModel String?
+  embeddedAt     DateTime?
+
+  /// 溯源软引用：节点删除后线索保留，便于审计"这张卡是谁产的"
+  createdFromNodeId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  citations ConceptCitation[]
+  reviews   ConceptReview[]
+  edgesOut  ConceptEdge[]     @relation("ConceptEdgeFrom")
+  edgesIn   ConceptEdge[]     @relation("ConceptEdgeTo")
+  methods   MethodConcept[]
+  problems  ProblemConcept[]
+
+  @@unique([canvasId, name])
+  @@index([canvasId, dueAt])
+  @@index([canvasId, status])
+  @@index([canvasId, mastery])
+}
+
+/// 概念 → 原文 span。这张表是"溯源是物理约束"的落点：
+/// 没有行的 Concept 只能是 UNVERIFIED（guards.sql 中的触发器强制）。
+model ConceptCitation {
+  id        String  @id @default(cuid())
+  conceptId String
+  concept   Concept @relation(fields: [conceptId], references: [id], onDelete: Cascade)
+  spanId    String
+  span      Span    @relation(fields: [spanId], references: [id], onDelete: Restrict)
+
+  /// 主引用（卡片上显示的那个角标）
+  isPrimary Boolean @default(false)
+  /// 摘录原文，便于卡片内联展示而无需再查 span
+  quote     String?
+
+  @@unique([conceptId, spanId])
+  @@index([spanId])
+}
+
+model ConceptEdge {
+  id       String @id @default(cuid())
+  canvasId String
+  canvas   Canvas @relation(fields: [canvasId], references: [id], onDelete: Cascade)
+
+  fromConceptId String
+  fromConcept   Concept @relation("ConceptEdgeFrom", fields: [fromConceptId], references: [id], onDelete: Cascade)
+  toConceptId   String
+  toConcept     Concept @relation("ConceptEdgeTo", fields: [toConceptId], references: [id], onDelete: Cascade)
+
+  kind ConceptEdgeKind
+
+  /// prereq 节点产出为 PROPOSED，人工 Gate 确认后才是 CONFIRMED
+  status     EdgeReviewStatus @default(PROPOSED)
+  confidence Float?
+  rationale  String?
+
+  /// 推断依据的原文 span（人工 Gate 确认时可直接查看）
+  /// 选 (a) 补外键而非删字段：ConceptCitation 表达的是"这个概念自身的定义出处"，
+  /// 这条边表达的是"这两个概念之间为什么存在先修关系"，语义不同，不能合并到引用表。
+  evidenceSourceId String?
+  evidenceSource   Source? @relation(fields: [evidenceSourceId], references: [id], onDelete: SetNull)
+  evidenceSpanId   String?
+  evidenceSpan     Span?   @relation(fields: [evidenceSpanId], references: [id], onDelete: SetNull)
+
+  createdFromNodeId String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([fromConceptId, toConceptId, kind])
+  @@index([canvasId, kind, status])
+  @@index([fromConceptId])
+  @@index([toConceptId])
+}
+
+model ConceptReview {
+  id        String  @id @default(cuid())
+  conceptId String
+  concept   Concept @relation(fields: [conceptId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  grade      ReviewGrade
+  reviewedAt DateTime   @default(now())
+
+  elapsedDays   Float
+  scheduledDays Float
+
+  stabilityBefore  Float?
+  stabilityAfter   Float?
+  difficultyBefore Float?
+  difficultyAfter  Float?
+  state            FsrsCardState
+
+  masteryAfter Float
+
+  @@index([conceptId, reviewedAt])
+  @@index([userId, reviewedAt])
+}
+
+// =============================================================================
+// 能力资产：Method（携带方法熟练度）
+// =============================================================================
+
+model Method {
+  id       String @id @default(cuid())
+  canvasId String
+  canvas   Canvas @relation(fields: [canvasId], references: [id], onDelete: Cascade)
+
+  name String
+  /// 一句话识别语，用于列表页与搜索
+  summary String?
+  status  VerificationStatus @default(UNVERIFIED)
+
+  /// ① 看到什么用它 —— 识别特征
+  trigger Json
+  /// ② 什么时候不能用它 —— 适用条件与失效边界
+  conditions Json
+  /// ③ 步骤链 —— SolutionStep[]，每步必有 cue / why / conceptIds
+  steps Json
+  /// ④ 结果自检手段
+  checks Json
+
+  // ── 方法熟练度（与 Concept.mastery 完全独立的两条曲线）──
+  proficiency Float    @default(0)
+  lastUsedAt  DateTime?
+
+  createdFromNodeId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  citations    MethodCitation[]
+  concepts     MethodConcept[]
+  edgesOut     MethodEdge[]        @relation("MethodEdgeFrom")
+  edgesIn      MethodEdge[]        @relation("MethodEdgeTo")
+  problems     ProblemMethod[]
+  applications MethodApplication[]
+
+  @@unique([canvasId, name])
+  @@index([canvasId, proficiency])
+  @@index([canvasId, status])
+}
+
+model MethodCitation {
+  id       String @id @default(cuid())
+  methodId String
+  method   Method @relation(fields: [methodId], references: [id], onDelete: Cascade)
+  spanId   String
+  span     Span   @relation(fields: [spanId], references: [id], onDelete: Restrict)
+
+  /// 绑定到 SolutionStep.order，溯源角标可以落在具体某一步
+  stepOrder Int?
+  quote     String?
+
+  @@unique([methodId, spanId])
+  @@index([spanId])
+}
+
+model MethodConcept {
+  methodId  String
+  method    Method  @relation(fields: [methodId], references: [id], onDelete: Cascade)
+  conceptId String
+  concept   Concept @relation(fields: [conceptId], references: [id], onDelete: Cascade)
+
+  isCore Boolean @default(false)
+
+  @@id([methodId, conceptId])
+  @@index([conceptId])
+}
+
+model MethodEdge {
+  id       String @id @default(cuid())
+  canvasId String
+  canvas   Canvas @relation(fields: [canvasId], references: [id], onDelete: Cascade)
+
+  fromMethodId String
+  fromMethod   Method @relation("MethodEdgeFrom", fields: [fromMethodId], references: [id], onDelete: Cascade)
+  toMethodId   String
+  toMethod     Method @relation("MethodEdgeTo", fields: [toMethodId], references: [id], onDelete: Cascade)
+
+  kind       MethodEdgeKind
+  status     EdgeReviewStatus @default(CONFIRMED)
+  confidence Float?
+  rationale  String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([fromMethodId, toMethodId, kind])
+  @@index([canvasId, kind])
+}
+
+/// 熟练度的原始观测。proficiency 是这张表的派生量，不是手填字段。
+/// 迁移成功率靠 isTransfer 区分：同一个方法换情境仍成功才算迁移。
+model MethodApplication {
+  id       String @id @default(cuid())
+  methodId String
+  method   Method @relation(fields: [methodId], references: [id], onDelete: Cascade)
+
+  problemId String?
+  problem   Problem? @relation(fields: [problemId], references: [id], onDelete: SetNull)
+  attemptId String?
+  attempt   Attempt? @relation(fields: [attemptId], references: [id], onDelete: SetNull)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  isCorrect  Boolean
+  /// 与该方法"学习情境"不同的题目上发生的调用
+  isTransfer Boolean @default(false)
+  /// 方法误用（选错方法 / 条件不满足仍使用）
+  isMisuse   Boolean @default(false)
+
+  /// 情境指纹：由题型 + 概念组合 + 表征形式构成，用于判定是否迁移
+  contextKey String?
+
+  usedAt DateTime @default(now())
+
+  @@index([methodId, usedAt])
+  @@index([userId, usedAt])
+}
+
+// =============================================================================
+// 出题与作答
+// =============================================================================
+
+model Problem {
+  id       String @id @default(cuid())
+  canvasId String
+  canvas   Canvas @relation(fields: [canvasId], references: [id], onDelete: Cascade)
+
+  type       ProblemType
+  stemMd     String
+  stemMathml String?
+
+  /// [{ key, text, errorTag }]：每个错误选项必须绑定一个 ErrorTag
+  options Json?
+  answer  Json
+
+  judgeRule JudgeRule
+  /// NUMERIC_TOL 的容差、RUBRIC 的机械判分步骤等
+  judgeSpec Json?
+
+  difficulty Int        @default(1)
+  bloom      BloomLevel @default(APPLY)
+
+  status ProblemStatus @default(PENDING)
+  /// REJECTED 必须带理由；三检明细存 checkResult
+  rejectReason String?
+  checkResult  Json?
+
+  verifiedAt DateTime?
+  rejectedAt DateTime?
+
+  sourceNodeId    String?
+  createdFromRunId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  citations    ProblemCitation[]
+  concepts     ProblemConcept[]
+  methods      ProblemMethod[]
+  attempts     Attempt[]
+  paperItems   PaperItem[]
+  applications MethodApplication[]
+
+  @@index([canvasId, status])
+  @@index([canvasId, difficulty])
+  @@index([canvasId, type])
+}
+
+model ProblemCitation {
+  id        String  @id @default(cuid())
+  problemId String
+  problem   Problem @relation(fields: [problemId], references: [id], onDelete: Cascade)
+  spanId    String
+  span      Span    @relation(fields: [spanId], references: [id], onDelete: Restrict)
+
+  note String?
+
+  @@unique([problemId, spanId])
+  @@index([spanId])
+}
+
+model ProblemConcept {
+  problemId String
+  problem   Problem @relation(fields: [problemId], references: [id], onDelete: Cascade)
+  conceptId String
+  concept   Concept @relation(fields: [conceptId], references: [id], onDelete: Cascade)
+
+  weight Float?
+
+  @@id([problemId, conceptId])
+  @@index([conceptId])
+}
+
+model ProblemMethod {
+  problemId String
+  problem   Problem @relation(fields: [problemId], references: [id], onDelete: Cascade)
+  methodId  String
+  method    Method  @relation(fields: [methodId], references: [id], onDelete: Cascade)
+
+  role RoleInProblem
+
+  @@id([problemId, methodId])
+  @@index([methodId])
+}
+
+model Attempt {
+  id        String  @id @default(cuid())
+  problemId String
+  problem   Problem @relation(fields: [problemId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  answer Json
+
+  /// null = 待人工/异步判分（RUBRIC）
+  isCorrect  Boolean?
+  /// [{ code, stepOrder?, note? }]：错因必须能回连概念或方法步骤
+  errorTags  Json      @default("[]")
+  judgeDetail Json?
+  timeSpentSec Int     @default(0)
+
+  createdAt DateTime @default(now())
+
+  methodApplications MethodApplication[]
+
+  @@index([problemId])
+  @@index([userId, createdAt])
+}
+
+model ErrorTag {
+  id       String        @id @default(cuid())
+  code     String        @unique
+  label    String
+  category ErrorCategory
+  description String?
+
+  createdAt DateTime @default(now())
+
+  @@index([category])
+}
+
+model Paper {
+  id       String @id @default(cuid())
+  canvasId String
+  canvas   Canvas @relation(fields: [canvasId], references: [id], onDelete: Cascade)
+
+  title String
+  /// 请求规格：知识点集合、时长、难度分布、方法覆盖约束、容差
+  spec Json
+  /// 实际达成情况与缺口。覆盖不足必须在这里明说，禁止静默补齐。
+  report Json?
+
+  durationMin Int?
+  status      PaperStatus @default(DRAFT)
+  createdById String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items PaperItem[]
+
+  @@index([canvasId, createdAt])
+}
+
+model PaperItem {
+  id        String  @id @default(cuid())
+  paperId   String
+  paper     Paper   @relation(fields: [paperId], references: [id], onDelete: Cascade)
+  problemId String
+  problem   Problem @relation(fields: [problemId], references: [id], onDelete: Restrict)
+
+  order  Int
+  points Float @default(1)
+
+  @@unique([paperId, problemId])
+  @@index([paperId, order])
+}
+
+// =============================================================================
+// 开放能力：Webhook 与计量
+// =============================================================================
+
+model WebhookEndpoint {
+  id        String         @id @default(cuid())
+  ownerId   String
+  owner     User           @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  canvasId  String?
+  canvas    Canvas?        @relation(fields: [canvasId], references: [id], onDelete: Cascade)
+  url       String
+  secret    String
+  events    WebhookEvent[]
+  isActive  Boolean        @default(true)
+  createdAt DateTime       @default(now())
+
+  deliveries WebhookDelivery[]
+
+  @@index([ownerId])
+}
+
+model WebhookDelivery {
+  id          String          @id @default(cuid())
+  endpointId  String
+  endpoint    WebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+  event       WebhookEvent
+  payload     Json
+  status      DeliveryStatus  @default(PENDING)
+  attempts    Int             @default(0)
+  responseStatus Int?
+  lastError   String?
+  nextAttemptAt DateTime?
+  deliveredAt DateTime?
+  createdAt   DateTime        @default(now())
+
+  @@index([endpointId, createdAt])
+  @@index([status, nextAttemptAt])
+}
+
+/// LLM Gateway 的计量账本：节点执行、/v1/chat/completions 代理、MCP 调用都记这里。
+model UsageRecord {
+  id      String @id @default(cuid())
+  userId  String
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  canvasId String?
+  runId   String?
+
+  surface UsageSurface
+  provider String
+  model    String
+
+  tokensIn     Int @default(0)
+  tokensOut    Int @default(0)
+  /// 命中前缀缓存的输入 token（不计费或折扣计费）
+  cachedTokens Int @default(0)
+  costUsd      Decimal? @db.Decimal(12, 6)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([runId])
+}
+
+/// BYOK：厂商密钥加密存储（AES-256-GCM，主密钥来自环境变量，绝不落库）。
+model ProviderCredential {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider      String
+  label         String   @default("default")
+  keyCiphertext String
+  keyLast4      String
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+
+  @@unique([userId, provider, label])
+  @@index([userId])
+}

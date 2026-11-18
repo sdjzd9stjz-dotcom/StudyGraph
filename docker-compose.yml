@@ -1,0 +1,69 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: studygraph-postgres
+    environment:
+      POSTGRES_USER: studygraph
+      POSTGRES_PASSWORD: studygraph
+      POSTGRES_DB: studygraph
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U studygraph -d studygraph"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: studygraph-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    container_name: studygraph-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      # 原来的 ["CMD","mc","ready","local"] 依赖 minio-init 容器里的 alias，在 minio 容器里没有，
+      # 会永远 unhealthy。改用 MinIO 自带的存活探针。
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # 建桶后退出：原文与切片放在 studygraph 桶里
+  minio-init:
+    image: minio/mc:latest
+    container_name: studygraph-minio-init
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 minioadmin minioadmin >/dev/null 2>&1; do sleep 1; done;
+      mc mb --ignore-existing local/studygraph;
+      echo 'bucket ready';
+      "
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:

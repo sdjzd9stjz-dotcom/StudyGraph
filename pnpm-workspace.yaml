@@ -1,0 +1,17 @@
+packages:
+  - apps/*
+  - packages/*
+
+# 本机 pnpm 生成的 junction 目标是 "Global\D:\..." 形式，Node 的 realpath/CJS 解析
+# 从那里找不到模块（prisma CLI 直接 MODULE_NOT_FOUND）。hoisted 布局与 npm 一致，
+# 没有 junction，Windows 上最稳；代价是可能出现幽灵依赖，由 tsc/eslint 兜住。
+nodeLinker: hoisted
+
+# 本机沙箱不允许子进程经命名管道取输出，pnpm 跑 postinstall 会 EPERM。
+# 因此依赖安装统一走 --ignore-scripts；Prisma 查询引擎随包体一起落盘即可用。
+verifyDepsBeforeRun: false
+
+# pkg-types@2.4.0 的 dist 里 import 'confbox/json'，而它自己声明的 confbox ^0.2 没有该子路径。
+# 强制统一到导出了 './json' 的 0.3.x，否则 prisma CLI 一启动就 ERR_PACKAGE_PATH_NOT_EXPORTED。
+overrides:
+  confbox: 0.3.2
