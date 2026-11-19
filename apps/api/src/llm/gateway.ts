@@ -2,6 +2,7 @@ import { AppError, llmCredentialMissing, llmProviderError } from '../lib/errors.
 import type { ApiKeyResolver } from './credentials.ts'
 import { normalizeCredential } from './credentials.ts'
 import { createAnthropicProvider } from './providers/anthropic.ts'
+import { createDeepSeekProvider } from './providers/deepseek.ts'
 import { createOpenAIProvider } from './providers/openai.ts'
 import { TASK_ROUTING } from './routing.ts'
 import type { ModelRoute } from './routing.ts'
@@ -54,7 +55,9 @@ export function createGateway(deps: GatewayDeps): LLMGateway {
       const call =
         route.provider === 'openai'
           ? createOpenAIProvider({ apiKey, fetchImpl: deps.fetchImpl })
-          : createAnthropicProvider({ apiKey, fetchImpl: deps.fetchImpl })
+          : route.provider === 'deepseek'
+            ? createDeepSeekProvider({ apiKey, fetchImpl: deps.fetchImpl })
+            : createAnthropicProvider({ apiKey, fetchImpl: deps.fetchImpl })
 
       try {
         return await call({

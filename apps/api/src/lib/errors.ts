@@ -34,6 +34,7 @@ export const ERROR_CODES = [
   'LLM_PROVIDER_ERROR',
   'PROVIDER_RESPONSE_INVALID',
   'SOURCE_HAS_NO_TEXT_LAYER',
+  'SOURCE_TEXT_LAYER_UNUSABLE',
   // 通用
   'VALIDATION_FAILED',
   'INVALID_JSON',
@@ -148,4 +149,21 @@ export const sourceHasNoTextLayer = (filename: string) =>
     'SOURCE_HAS_NO_TEXT_LAYER',
     `这份 PDF 没有文字层（可能是扫描件），M2 暂不支持 OCR：${filename}`,
     { filename },
+  )
+
+/**
+ * 有文字层，但文字不可用（SG-SUP-008 §2.3）。
+ *
+ * 与"没有文字层"分开：这是劣质 OCR 的产物，字符能读但不是人话。
+ * 如果放行，下游会抽出"看着像概念、引用一段乱码"的假卡——约束 1 在这类材料面前会失效。
+ */
+export const sourceTextLayerUnusable = (
+  filename: string,
+  detail: { totalPages: number; nonEmptyPages: number; signals: string[] },
+) =>
+  new AppError(
+    422,
+    'SOURCE_TEXT_LAYER_UNUSABLE',
+    `这份文件的文字层不可用（${detail.totalPages} 页中只有 ${detail.nonEmptyPages} 页能识别出零星字符，且内容多为乱码）。这通常是扫描件经过劣质 OCR 的结果。可以换一份电子版课件，或等后续版本支持重新 OCR。`,
+    { filename, ...detail },
   )

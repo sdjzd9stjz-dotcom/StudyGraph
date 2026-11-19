@@ -34,7 +34,18 @@ export interface NodeExecutor<P = unknown> {
   readonly artifactKind: string
   /** prompt 模板文本的哈希；无 prompt 的执行器写 'no-prompt' */
   readonly promptVersion: string
-  run(ctx: NodeExecutorRunCtx<P>): Promise<{ outputs: Record<string, unknown>; usage: TokenUsage }>
+  /**
+   * 指纹参数的补充（SG-SUP-008 §1）：默认指纹只含 `node.params`，
+   * 对 `source` 来说就是"一个路径"——同名覆盖文件不会变指纹。
+   * 实现这个钩子把**内容摘要**并进指纹输入。
+   */
+  prepareFingerprintParams?(params: P): Promise<Record<string, unknown>>
+  run(ctx: NodeExecutorRunCtx<P>): Promise<{
+    outputs: Record<string, unknown>
+    usage: TokenUsage
+    /** 按模型拆分的用量，落 UsageRecord（D3：cachedTokens 要能查到） */
+    usageRecords?: Array<{ provider: string; model: string } & TokenUsage>
+  }>
 }
 
 export const ZERO_USAGE: TokenUsage = { tokensIn: 0, tokensOut: 0, cachedTokens: 0 }

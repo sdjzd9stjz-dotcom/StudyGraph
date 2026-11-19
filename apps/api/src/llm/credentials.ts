@@ -22,14 +22,18 @@ export interface ResolvedCredential {
 export interface CredentialResolverDeps {
   readonly prisma: PrismaClient
   readonly masterKey?: string | undefined
-  readonly env: { readonly OPENAI_API_KEY?: string | undefined; readonly ANTHROPIC_API_KEY?: string | undefined }
+  readonly env: {
+    readonly OPENAI_API_KEY?: string | undefined
+    readonly ANTHROPIC_API_KEY?: string | undefined
+    readonly DEEPSEEK_API_KEY?: string | undefined
+  }
 }
 
 /** 允许返回纯字符串（老调用方/测试）或带来源的对象。 */
 export type ApiKeyResult = string | ResolvedCredential | null
 
 export type ApiKeyResolver = (
-  provider: 'openai' | 'anthropic',
+  provider: 'openai' | 'anthropic' | 'deepseek',
   user: UserCtx,
 ) => Promise<ApiKeyResult>
 
@@ -48,7 +52,12 @@ export function createApiKeyResolver(deps: CredentialResolverDeps): ApiKeyResolv
       return { apiKey: decryptSecret(credential.keyCiphertext, deps.masterKey), source: 'byok' }
     }
 
-    const fromEnv = provider === 'openai' ? deps.env.OPENAI_API_KEY : deps.env.ANTHROPIC_API_KEY
+    const fromEnv =
+      provider === 'openai'
+        ? deps.env.OPENAI_API_KEY
+        : provider === 'deepseek'
+          ? deps.env.DEEPSEEK_API_KEY
+          : deps.env.ANTHROPIC_API_KEY
     const trimmed = fromEnv?.trim()
     return trimmed && trimmed.length > 0 ? { apiKey: trimmed, source: 'env' } : null
   }

@@ -133,7 +133,11 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   const resolveApiKey = createApiKeyResolver({
     prisma,
     masterKey: env.BYOK_ENCRYPTION_KEY,
-    env: { OPENAI_API_KEY: env.OPENAI_API_KEY, ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY },
+    env: {
+      OPENAI_API_KEY: env.OPENAI_API_KEY,
+      ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY,
+      DEEPSEEK_API_KEY: env.DEEPSEEK_API_KEY,
+    },
   })
 
   const llm = createGateway({

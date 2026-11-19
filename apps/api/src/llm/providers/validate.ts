@@ -18,7 +18,7 @@ export interface UsageFields {
 }
 
 export function assertUsageAndModel(
-  provider: 'openai' | 'anthropic',
+  provider: 'openai' | 'anthropic' | 'deepseek',
   payload: { model?: unknown; usage?: unknown },
   readUsage: (usage: Record<string, unknown>) => UsageFields,
 ): { modelVersion: string; usage: TokenUsage } {

@@ -1,10 +1,12 @@
+import { readFileSync } from 'node:fs'
 import { basename } from 'node:path'
 
 import { sourceDocSchema } from '../../../../../packages/contracts/src/index.ts'
 import type { SourceDoc } from '../../../../../packages/contracts/src/index.ts'
-import { sourceHasNoTextLayer } from '../../lib/errors.ts'
+import { sourceHasNoTextLayer, sourceTextLayerUnusable } from '../../lib/errors.ts'
 import { originalKey, pageTextKey, writePageTexts } from '../../storage/page-text.ts'
-import { extractSource } from '../../storage/extract-text.ts'
+import { extractSource, sha256Of } from '../../storage/extract-text.ts'
+import { assessTextLayer } from '../../storage/text-layer.ts'
 import type { NodeExecutor } from '../contract.ts'
 import { ZERO_USAGE } from '../contract.ts'
 
@@ -19,8 +21,10 @@ interface SourceParams {
  *
  * - `Source.pageCount` = 真实页数（PPTX = 幻灯片数），不是填死值
  * - `Source.checksum` = 文件 sha256
- * - 原文落 S3：`canvas/<cv>/source/<id>/original.<ext>`；页文本落 `.../text.json`
- * - **扫描件（无文字层）必须失败**：返回 422 `SOURCE_HAS_NO_TEXT_LAYER`，0 个 span，不生成任何内容
+ * - **指纹必须含文件内容**（SG-SUP-008 §1）：同名文件被覆盖后必须重跑，
+ *   不能因为路径没变就命中缓存。见 `prepareFingerprintParams`。
+ * - 两层闸门：0 字符 → `SOURCE_HAS_NO_TEXT_LAYER`；
+ *   有字符但不可用（劣质 OCR）→ `SOURCE_TEXT_LAYER_UNUSABLE`
  */
 export const sourceExecutor: NodeExecutor<SourceParams> = {
   type: 'SOURCE',
@@ -29,6 +33,16 @@ export const sourceExecutor: NodeExecutor<SourceParams> = {
   inputs: { type: 'object', properties: {}, required: [] },
   outputs: { type: 'object', properties: { sourceDoc: { type: 'object' } }, required: ['sourceDoc'] },
 
+  /**
+   * 指纹参数 = 路径 + **文件内容 sha256** + 字节数（SG-SUP-008 §1.3）。
+   *
+   * 读不到文件就直接抛：绝不退回"只用路径"算指纹——那等于把这条 P0 换个写法留着。
+   */
+  async prepareFingerprintParams(params) {
+    const buffer = readFileSync(params.localPath)
+    return { ...params, contentSha256: sha256Of(buffer), byteSize: buffer.length }
+  },
+
   async run(ctx) {
     const localPath = ctx.params.localPath
     if (!localPath) throw new Error('source 节点缺少 params.localPath')
@@ -36,9 +50,19 @@ export const sourceExecutor: NodeExecutor<SourceParams> = {
     const filename = ctx.params.filename ?? basename(localPath)
     const extraction = await extractSource(localPath)
 
-    // 扫描件/纯图课件：解析成功但没有文字层 → 明确失败，绝不生成内容
+    // 第一层：一个字符都没有 → 没有文字层
     if (extraction.textChars === 0) {
       throw sourceHasNoTextLayer(filename)
+    }
+
+    // 第二层：有字符但不构成可用文本（劣质 OCR）→ 同样拒绝，但不建任何行
+    const assessment = assessTextLayer(extraction.pages)
+    if (!assessment.usable) {
+      throw sourceTextLayerUnusable(filename, {
+        totalPages: assessment.totalPages,
+        nonEmptyPages: assessment.nonEmptyPages,
+        signals: assessment.signals.length > 0 ? assessment.signals : [assessment.reason],
+      })
     }
 
     const source = await ctx.prisma.source.create({

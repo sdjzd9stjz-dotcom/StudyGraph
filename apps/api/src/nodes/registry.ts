@@ -19,8 +19,6 @@ const REGISTRY = new Map<string, NodeExecutor>()
  * 自检要求 `implemented ∩ planned = ∅`，同类型既"已实现"又"还在计划里"会被判冲突。
  */
 export const PLANNED_PLAN: Partial<Record<NodeType, string>> = {
-  EXTRACT: 'M2',
-  CARD: 'M2',
   PREREQ: 'M3',
   QUIZ: 'M3',
   GRADE: 'M3',

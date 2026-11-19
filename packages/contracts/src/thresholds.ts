@@ -20,3 +20,25 @@ export const FSRS_MAX_INITIAL_INTERVAL_DAYS = 14
 
 /** 指纹命中缓存时 Run.tokensIn/Out 记 0，这是"不消耗 token"的验收依据。 */
 export const CACHE_HIT_TOKENS = 0
+
+/**
+ * 文字层可用性闸门（SG-SUP-008 §2.3）。
+ *
+ * 两层判定：先看"有没有文字"（全文 0 字符 → 无文字层），
+ * 再看"文字能不能用"（劣质 OCR 的乱码页会被这里拦下）。
+ */
+export const TEXT_LAYER = {
+  /** 标准 A：一页至少这么多字符才算"有效页" */
+  minEffectivePageChars: 20,
+  /** 标准 A：有效页占比低于这个值 → 不可用（数学分析 30/261=11.5% 会被拦，ch3-4 56% 放行） */
+  minEffectivePageRatio: 0.2,
+  /** 标准 B-1：康熙部首/兼容汉字占比超过它 → 异常 */
+  maxKangxiRatio: 0.01,
+  /** 标准 B-2：无元音的拉丁串占拉丁串比例超过它 → 异常 */
+  maxVowelLessLatinRatio: 0.5,
+  /** 标准 B-3：单字符页占"有字符页"的比例超过它 → 异常 */
+  maxSingleCharPageRatio: 0.3,
+  /** 三条乱码特征里至少命中几条才判"不可用" */
+  minGibberishSignals: 2,
+} as const
+

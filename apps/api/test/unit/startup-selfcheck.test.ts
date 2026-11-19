@@ -15,12 +15,12 @@ const env: Env = {
 const stubPrisma = {} as never
 
 test('C：注册表自检不通过时，正常启动路径拒绝构建 app（不是只在测试里断言）', async () => {
-  const saved = PLANNED_PLAN.EXTRACT
+  const saved = PLANNED_PLAN.PREREQ
   try {
-    delete (PLANNED_PLAN as Record<string, string>).EXTRACT
+    delete (PLANNED_PLAN as Record<string, string>).PREREQ
     await assert.rejects(() => buildApp({ env, prisma: stubPrisma }), /执行器注册表自检未通过/)
   } finally {
-    ;(PLANNED_PLAN as Record<string, string>).EXTRACT = saved
+    ;(PLANNED_PLAN as Record<string, string>).PREREQ = saved as string
   }
 })
 

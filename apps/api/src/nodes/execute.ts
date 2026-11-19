@@ -92,9 +92,14 @@ export async function executeNode(
 
   const { inputs, hashes } = await collectInputs(deps.prisma, node.canvasId, node.id)
 
+  // 指纹输入：默认是 params；source 这类执行器会把文件内容摘要并进来（SG-SUP-008 §1）
+  const fingerprintParams = executor.prepareFingerprintParams
+    ? await executor.prepareFingerprintParams(node.params)
+    : (node.params ?? {})
+
   const fingerprint = computeFingerprint({
     upstreamArtifactHashes: hashes,
-    params: node.params ?? {},
+    params: fingerprintParams,
     modelVersion: executor.promptVersion === 'no-prompt' ? 'rule-based-v1' : 'llm',
     promptVersion: executor.promptVersion,
   })
@@ -167,6 +172,23 @@ export async function executeNode(
     })
 
     const structured = result.outputs
+
+    // D3：把每个模型的用量落 UsageRecord（cachedTokens 要能直接查到）
+    if (result.usageRecords && result.usageRecords.length > 0) {
+      await deps.prisma.usageRecord.createMany({
+        data: result.usageRecords.map((record) => ({
+          userId: deps.user.id,
+          canvasId: node.canvasId,
+          runId: run.id,
+          surface: 'NODE_RUN' as never,
+          provider: record.provider,
+          model: record.model,
+          tokensIn: record.tokensIn,
+          tokensOut: record.tokensOut,
+          cachedTokens: record.cachedTokens,
+        })),
+      })
+    }
     const hash = computeFingerprint({
       upstreamArtifactHashes: [],
       params: structured,

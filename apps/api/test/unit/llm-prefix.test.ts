@@ -4,6 +4,7 @@ import test from 'node:test'
 import { createGateway } from '../../src/llm/gateway.ts'
 import { createAnthropicProvider } from '../../src/llm/providers/anthropic.ts'
 import { createOpenAIProvider } from '../../src/llm/providers/openai.ts'
+import { TASK_ROUTING } from '../../src/llm/routing.ts'
 
 /**
  * 前缀缓存的标准（SG-SUP-006 §3.3）：
@@ -98,6 +99,8 @@ test('Anthropic 的 key 不是死参数：gateway 会把它写进结构化日志
   const gateway = createGateway({
     resolveApiKey: async () => 'test',
     logger: { debug: (obj: unknown) => logged.push(obj) },
+    // 显式路由到 anthropic：全局路由表在 SG-SUP-009 之后默认走 deepseek
+    routing: { ...TASK_ROUTING, method: { provider: 'anthropic', model: 'claude-sonnet-4-5', tier: 'frontier' } },
     fetchImpl: (async (_url: string, init: RequestInit) => {
       bodies.push(String(init.body))
       return Response.json({

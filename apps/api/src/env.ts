@@ -18,9 +18,17 @@ const schema = z.object({
 
   REDIS_URL: z.string().optional(),
 
-  /** 厂商密钥：BYOK 之外的后备来源；两个都空时 Gateway 会报 LLM_CREDENTIAL_MISSING */
+  /** 厂商密钥：BYOK 之外的后备来源；都空时 Gateway 会报 LLM_CREDENTIAL_MISSING */
   OPENAI_API_KEY: z.string().optional(),
   ANTHROPIC_API_KEY: z.string().optional(),
+  /**
+   * DeepSeek 密钥（SG-SUP-009 §0.1）。
+   * **只从进程环境变量来，不写进 .env / 源码 / 测试 / 文档**——
+   * 启动方式：`$env:DEEPSEEK_API_KEY='...'; node apps/api/src/server.ts`
+   */
+  DEEPSEEK_API_KEY: z.string().optional(),
+  /** DeepSeek base URL（一般不用改） */
+  DEEPSEEK_BASE_URL: z.string().url().optional(),
   /** BYOK 主密钥（32 字节 base64），未配置时 ProviderCredential 解密会拒绝 */
   BYOK_ENCRYPTION_KEY: z.string().optional(),
 })

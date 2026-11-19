@@ -1,5 +1,7 @@
 import { hasExecutor, registerExecutor } from '../registry.ts'
+import { cardExecutor } from './card.ts'
 import { chunkExecutor } from './chunk.ts'
+import { extractExecutor } from './extract.ts'
 import { sourceExecutor } from './source.ts'
 
 /**
@@ -9,9 +11,9 @@ import { sourceExecutor } from './source.ts'
  * 幂等：重复调用不会因"重复注册"抛错（测试里 buildApp 会被调用多次）。
  */
 export function registerBuiltinExecutors(): void {
-  for (const executor of [sourceExecutor, chunkExecutor]) {
+  for (const executor of [sourceExecutor, chunkExecutor, extractExecutor, cardExecutor]) {
     if (!hasExecutor(executor.type)) registerExecutor(executor)
   }
 }
 
-export { sourceExecutor, chunkExecutor }
+export { sourceExecutor, chunkExecutor, extractExecutor, cardExecutor }

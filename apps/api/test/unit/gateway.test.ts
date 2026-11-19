@@ -6,7 +6,7 @@ import { decryptSecret, encryptSecret } from '../../src/llm/byok.ts'
 import { createApiKeyResolver } from '../../src/llm/credentials.ts'
 import { createGateway } from '../../src/llm/gateway.ts'
 import type { GatewayDeps } from '../../src/llm/gateway.ts'
-import { TASK_ROUTING } from '../../src/llm/routing.ts'
+import { ANTHROPIC_FRONTIER_ROUTE, OPENAI_SMALL_ROUTE, TASK_ROUTING } from '../../src/llm/routing.ts'
 
 const user = { id: 'u1', email: 'u@t.t', displayName: 'u' }
 
@@ -57,7 +57,11 @@ test('成功时 usage 与 modelVersion 取自厂商响应，不是本地配置',
       { status: 200 },
     )) as typeof fetch
 
-  const gw = gateway({ fetchImpl: fakeFetch })
+  const gw = gateway({
+    fetchImpl: fakeFetch,
+    // 显式指定路由，让这条测试只验"usage/modelVersion 取自响应"，不依赖全局路由表
+    routing: { ...TASK_ROUTING, extract: { provider: 'openai', model: 'gpt-4o-mini', tier: 'small' } },
+  })
   const result = await gw.complete({
     taskType: 'extract',
     messages: [{ role: 'user', content: 'hi' }],
@@ -89,7 +93,11 @@ test('D：响应缺 usage/model → PROVIDER_RESPONSE_INVALID（anthropic，E06 
     Response.json({ content: [{ type: 'tool_use', input: {} }] })) as typeof fetch
 
   await assert.rejects(
-    () => gateway({ fetchImpl: fakeFetch }).complete({ taskType: 'method', messages: [], user }),
+    () =>
+      gateway({
+        fetchImpl: fakeFetch,
+        routing: { ...TASK_ROUTING, method: { provider: 'anthropic', model: 'claude-sonnet-4-5', tier: 'frontier' } },
+      }).complete({ taskType: 'method', messages: [], user }),
     (error: unknown) => {
       assert.ok(error instanceof AppError)
       assert.equal(error.code, 'PROVIDER_RESPONSE_INVALID')
@@ -129,7 +137,11 @@ test('E：cachePrefixKey 必须影响出站请求体（E09）', async () => {
     })
   }) as unknown as typeof fetch
 
-  const gw = gateway({ fetchImpl: fakeFetch })
+  const gw = gateway({
+    fetchImpl: fakeFetch,
+    // 这条验的是 OpenAI 的 prompt_cache_key，显式把 extract 指回 openai
+    routing: { ...TASK_ROUTING, extract: { provider: 'openai', model: 'gpt-4o-mini', tier: 'small' } },
+  })
   for (const key of ['source:1:v1', 'source:1:v2']) {
     await gw.complete({ taskType: 'extract', messages: [], user, cachePrefixKey: key })
   }
@@ -194,7 +206,10 @@ test('routing 表：机械任务走小模型，推理任务走前沿模型', () 
     assert.equal(TASK_ROUTING[task].tier, 'frontier', `${task} 应走前沿模型`)
   }
   const providers = new Set(Object.values(TASK_ROUTING).map((route) => route.provider))
-  assert.deepEqual([...providers].sort(), ['anthropic', 'openai'])
+  // SG-SUP-009：M2 实调走 DeepSeek；OpenAI / Anthropic 的显式路由作为可选路径保留
+  assert.deepEqual([...providers].sort(), ['deepseek'])
+  assert.equal(OPENAI_SMALL_ROUTE.provider, 'openai')
+  assert.equal(ANTHROPIC_FRONTIER_ROUTE.provider, 'anthropic')
 })
 
 test('BYOK：AES-256-GCM 加密后可解密，密文里没有明文', () => {
