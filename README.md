@@ -29,6 +29,7 @@
 | 目录结构 | `docs/structure.md` |
 | 运行手册（含本机 6 个环境坑） | `docs/runbook.md` |
 | M1 设计决定（边写入入口、端口矩阵、删除策略） | `docs/milestone-1.md` |
+| 监理指令 / 交付回报 / 独立验收 | `docs/指令/`、`docs/交付/`、`docs/验收/`（索引见 `docs/README.md`） |
 
 **未实现**：任何 HTTP 接口、UI、节点执行器、LLM Gateway、队列、MCP。
 

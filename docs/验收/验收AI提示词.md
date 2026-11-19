@@ -63,7 +63,7 @@
 **判定依据顺序（高优先级覆盖低优先级）：**
 
 1. `StudyGraph-Agent-Prompt.md`（规格 v1.0，唯一指令来源）
-2. `docs/监理指令-00N-*.md`（监理的施工指令，对规格的细化与补充）
+2. `docs/指令/监理指令-00N-*.md`（监理的施工指令，对规格的细化与补充）
 3. `docs/architecture.md`（已锁定的实施决策）
 4. 实施方的回报（**仅供定位线索，不作为依据**）
 
@@ -381,7 +381,7 @@
 | --- | --- |
 | 工作区 | `D:\ai学习辅助工作流搭建` |
 | 规格 | `StudyGraph-Agent-Prompt.md` |
-| 施工指令 | `docs/监理指令-00N-*.md` |
+| 施工指令 | `docs/指令/监理指令-00N-*.md` |
 | 数据库 | `docker exec studygraph-postgres psql -U studygraph -d studygraph` |
 | pnpm | `node C:\Users\terry\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pnpm\bin\pnpm.mjs` |
 | 迁移 | `node scripts/prisma.mjs migrate deploy --schema packages/db/prisma/schema.prisma` |
