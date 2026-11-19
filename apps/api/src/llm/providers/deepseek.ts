@@ -1,6 +1,3 @@
-import { providerResponseInvalid } from '../../lib/errors.ts'
-import { assertUsageAndModel } from './validate.ts'
-import type { ProviderCall, ProviderResult } from './openai-compatible.ts'
 import { createOpenAICompatibleProvider } from './openai-compatible.ts'
 
 /**
@@ -22,34 +19,11 @@ export interface DeepSeekProviderConfig {
 }
 
 export function createDeepSeekProvider(config: DeepSeekProviderConfig) {
-  const inner = createOpenAICompatibleProvider({
+  return createOpenAICompatibleProvider({
     provider: 'deepseek',
     apiKey: config.apiKey,
     baseUrl: config.baseUrl ?? 'https://api.deepseek.com',
     fetchImpl: config.fetchImpl,
     jsonMode: 'json_object',
   })
-
-  return async function call(input: ProviderCall): Promise<ProviderResult> {
-    return inner(input)
-  }
-}
-
-/**
- * DeepSeek 的 usage 字段缺失检查（009 §2.2：字段不存在 ≠ 值为 0）。
- * 单独导出便于单测直接打这个点。
- */
-export function assertDeepSeekUsage(payload: { model?: unknown; usage?: unknown }): {
-  cachedTokens: number
-} {
-  const usage = payload.usage as Record<string, unknown> | undefined
-  if (!usage || typeof usage.prompt_cache_hit_tokens !== 'number') {
-    throw providerResponseInvalid('deepseek', ['usage.prompt_cache_hit_tokens'])
-  }
-  const { usage: normalized } = assertUsageAndModel('deepseek', payload, (raw) => ({
-    tokensIn: raw.prompt_tokens,
-    tokensOut: raw.completion_tokens,
-    cachedTokens: raw.prompt_cache_hit_tokens,
-  }))
-  return { cachedTokens: normalized.cachedTokens }
 }

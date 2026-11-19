@@ -10,6 +10,26 @@ import { ANTHROPIC_FRONTIER_ROUTE, OPENAI_SMALL_ROUTE, TASK_ROUTING } from '../.
 
 const user = { id: 'u1', email: 'u@t.t', displayName: 'u' }
 
+test('DeepSeek 要求缓存计量，合法零值和命中数均按响应返回', async () => {
+  for (const hit of [undefined, 0, 128]) {
+    const gw = createGateway({
+      resolveApiKey: async () => 'test',
+      fetchImpl: async () => Response.json({
+        model: 'snapshot', choices: [{ message: { content: '{}' } }],
+        usage: { prompt_tokens: 150, completion_tokens: 1, prompt_cache_hit_tokens: hit },
+      }),
+    })
+    const call = () => gw.complete({ taskType: 'extract', messages: [], user })
+    if (hit === undefined) {
+      await assert.rejects(call, (e: unknown) => e instanceof AppError && e.code === 'PROVIDER_RESPONSE_INVALID')
+    } else {
+      const result = await call()
+      assert.equal(result.provider, 'deepseek')
+      assert.equal(result.usage.cachedTokens, hit)
+    }
+  }
+})
+
 const gateway = (overrides: Partial<GatewayDeps> = {}) =>
   createGateway({
     resolveApiKey: async () => 'test-key',
@@ -112,7 +132,7 @@ test('D：usage 存在但缺 tokensIn → 同样拒绝（"字段不存在"≠"�
     Response.json({
       model: 'gpt-4o-mini-2024-07-18',
       choices: [{ message: { content: '{}' } }],
-      usage: { completion_tokens: 10 },
+      usage: { completion_tokens: 10, prompt_cache_hit_tokens: 0 },
     })) as typeof fetch
 
   await assert.rejects(

@@ -1,7 +1,10 @@
+import { supportsDefinition } from '../../spans/claim-support.ts'
 import { createHash } from 'node:crypto'
 
 import { conceptClaimsSchema } from '../../../../../packages/contracts/src/index.ts'
 import type { ChunkSet, ConceptClaims } from '../../../../../packages/contracts/src/index.ts'
+import { classifyClaim } from '../../spans/claim-support.ts'
+import type { ClaimVerdict } from '../../spans/claim-support.ts'
 import type { NodeExecutor } from '../contract.ts'
 
 /**
@@ -20,7 +23,7 @@ const SYSTEM_PROMPT = [
   '规则：',
   '1. 只能从【给定文本】里抽取，禁止补充任何外部知识、禁止编造定义。',
   '2. 文本里没有明确讲到的概念，不要输出。',
-  '3. 每个概念必须给出一段原文 quote（逐字复制，不要改写、不要加省略号）。',
+  '3. definition 和 quote 均填同一句完整原文，句中须有概念名称及解释。只有标题、目录或不完整短语时跳过。',
   '4. 只输出一个 json 对象，形如 {"claims":[{"chunk":0,"name":"...","definition":"...","quote":"..."}]}。',
   '5. 没有可抽取的概念时输出 {"claims":[]}。',
 ].join('\n')
@@ -55,6 +58,7 @@ export const extractExecutor: NodeExecutor<ExtractParams> = {
     const batchSize = ctx.params.batchSize ?? 15
     const maxClaimsPerChunk = ctx.params.maxClaimsPerChunk ?? 3
 
+    if (!Number.isSafeInteger(batchSize) || batchSize < 1) throw new Error('batchSize 必须是正整数')
     const chunks = chunkSet.chunks
     const claims: Array<{
       id: string
@@ -62,7 +66,9 @@ export const extractExecutor: NodeExecutor<ExtractParams> = {
       definition: string
       spanIds: string[]
       quote: string
-      verified: boolean
+      verdict: ClaimVerdict
+      reasons: string[]
+      similarity: number
     }> = []
 
     let tokensIn = 0
@@ -111,9 +117,9 @@ export const extractExecutor: NodeExecutor<ExtractParams> = {
       cachedTokens += result.usage.cachedTokens
 
       // 按响应里的真实模型名聚合（DeepSeek 返回的是 deepseek-flash 这类实际版本）
-      const key = `deepseek:${result.modelVersion}`
+      const key = `${result.provider}:${result.modelVersion}`
       const record = usageRecords.get(key) ?? {
-        provider: 'deepseek',
+        provider: result.provider,
         model: result.modelVersion,
         tokensIn: 0,
         tokensOut: 0,
@@ -140,16 +146,19 @@ export const extractExecutor: NodeExecutor<ExtractParams> = {
         const definition = (claim.definition ?? '').trim()
         if (!name || !definition) continue
 
-        // 逐字符确认 quote 真的在原文里；确认不了就不是"有出处"
-        const verified = quote.length > 0 && chunk.text.includes(quote)
+        // 三档判定（SG-SUP-010 §1.3）：extract 与 card 用同一个分类器
+        const classification = classifyClaim({ name, definition, quote, spanText: chunk.text })
 
         claims.push({
           id: `claim-${claims.length + 1}`,
           name,
           definition,
-          spanIds: verified ? chunk.spanIds : [],
-          quote: verified ? quote : '',
-          verified,
+          // 非 UNVERIFIED 必须有引用：A1 通过就是"引文查得到"
+          spanIds: classification.verdict === 'UNVERIFIED' ? [] : chunk.spanIds,
+          quote,
+          verdict: classification.verdict,
+          reasons: classification.reasons,
+          similarity: classification.similarity,
         })
       }
     }
@@ -160,8 +169,10 @@ export const extractExecutor: NodeExecutor<ExtractParams> = {
         id: claim.id,
         name: claim.name,
         definition: claim.definition,
+        quote: claim.quote,
         spanIds: claim.spanIds,
-        status: claim.verified ? 'VERIFIED' : 'UNVERIFIED',
+        status: claim.verdict,
+        reasons: claim.reasons,
       })),
     })
 

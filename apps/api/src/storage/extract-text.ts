@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 
-import type { ExtractedPage } from './pptx.ts'
+import type { StoredPageText } from './page-text.ts'
 import { extractPptx } from './pptx.ts'
 import { extractPdf } from './pdf.ts'
 
@@ -17,7 +17,7 @@ export type SourceKindDetected = 'PPTX' | 'PDF'
 export interface ExtractionResult {
   readonly kind: SourceKindDetected
   readonly pageCount: number
-  readonly pages: ExtractedPage[]
+  readonly pages: StoredPageText[]
   /** 有文字的总字符数（0 表示没有文字层） */
   readonly textChars: number
   readonly checksum: string

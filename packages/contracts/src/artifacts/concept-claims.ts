@@ -3,24 +3,31 @@ import { z } from 'zod'
 /**
  * `extract` 的产物：概念论断。
  *
- * 每条 claim 的 `spanIds` 可以为空——但空的那条**必须是 UNVERIFIED**，
- * 且后续 `card` 不得把它写进 `ConceptCard`（硬约束 1）。
- * 这里用 superRefine 把这条约束钉在 schema 上，而不是靠调用方自觉。
+ * 三档状态（SG-SUP-010 §1.3）：
+ * - `VERIFIED`：引文逐字可查 **且** 定义与引文逐字相同
+ * - `PENDING_REVIEW`：引文逐字可查，但定义是人的转述 → 等人工复核
+ * - `UNVERIFIED`：引文查不到 / 无引文 / 没有谓词 → 不产卡
+ *
+ * 后两者都必须有至少一个 spanId：待审的**唯一**合法性来源就是"引文查得到"，
+ * 允许无引用的待审，会让它比 VERIFIED 更危险（看起来像审核过）。
  */
 export const conceptClaimSchema = z
   .object({
     name: z.string().min(1),
     definition: z.string().min(1),
+    quote: z.string().optional(),
     spanIds: z.array(z.string().min(1)),
-    status: z.enum(['VERIFIED', 'UNVERIFIED']),
+    status: z.enum(['VERIFIED', 'PENDING_REVIEW', 'UNVERIFIED']),
     /** 模型给的依据说明，仅用于审计，不展示给学生 */
     rationale: z.string().optional(),
+    /** 分类器给出的失败原因（UNVERIFIED 时非空），便于事后统计 */
+    reasons: z.array(z.string()).optional(),
   })
   .superRefine((claim, ctx) => {
-    if (claim.status === 'VERIFIED' && claim.spanIds.length === 0) {
+    if (claim.status !== 'UNVERIFIED' && claim.spanIds.length === 0) {
       ctx.addIssue({
         code: 'custom',
-        message: 'VERIFIED 的 claim 必须至少有一个 spanId',
+        message: `${claim.status} 的 claim 必须至少有一个 spanId`,
         path: ['spanIds'],
       })
     }

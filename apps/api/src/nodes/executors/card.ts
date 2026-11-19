@@ -1,3 +1,5 @@
+import { classifyClaim, matchesStoredSpan } from '../../spans/claim-support.ts'
+import { readPageTexts } from '../../storage/page-text.ts'
 import type { ConceptClaims } from '../../../../../packages/contracts/src/index.ts'
 import type { NodeExecutor } from '../contract.ts'
 import { ZERO_USAGE } from '../contract.ts'
@@ -17,7 +19,7 @@ import { ZERO_USAGE } from '../contract.ts'
 export const cardExecutor: NodeExecutor = {
   type: 'CARD',
   artifactKind: 'CONCEPT_CARD',
-  promptVersion: 'no-prompt',
+  promptVersion: 'extractive-card-v2',
   inputs: { type: 'object', properties: { conceptClaims: { type: 'object' } }, required: ['conceptClaims'] },
   outputs: { type: 'object', properties: { cards: { type: 'object' } }, required: ['cards'] },
 
@@ -28,51 +30,50 @@ export const cardExecutor: NodeExecutor = {
     const created: Array<{ conceptId: string; name: string; spanId: string; status: string }> = []
     const skipped: Array<{ name: string; reason: string }> = []
 
+    const pages = await readPageTexts(ctx.objectStore, ctx.canvasId, conceptClaims.sourceId)
+    if (!pages) throw new Error('无法读取引用原文')
     for (const claim of conceptClaims.claims) {
-      if (claim.status !== 'VERIFIED' || claim.spanIds.length === 0) {
-        skipped.push({ name: claim.name, reason: '没有可 resolve 的 span' })
+      // 只跳过 UNVERIFIED；PENDING_REVIEW 也建卡（引文可查，只是定义待人复核）
+      if (claim.status === 'UNVERIFIED' || claim.spanIds.length === 0) {
+        skipped.push({ name: claim.name, reason: `UNVERIFIED(${(claim.reasons ?? []).join(',') || '无原因'})` })
         continue
       }
 
-      // 同名概念去重（同一概念被多个 chunk 抽到时只建一张卡）
-      const existing = await ctx.prisma.concept.findFirst({
-        where: { canvasId: ctx.canvasId, name: claim.name },
-        select: { id: true },
+      const span = await ctx.prisma.span.findFirst({
+        where: { id: claim.spanIds[0], sourceId: conceptClaims.sourceId, source: { node: { canvasId: ctx.canvasId } } },
       })
-      if (existing) {
-        skipped.push({ name: claim.name, reason: '同名概念已存在' })
+      // 用同一个分类器复核：card 不信任上游的状态，自己再判一次
+      const classification = span && matchesStoredSpan(span, pages)
+        ? classifyClaim({ name: claim.name, definition: claim.definition, quote: claim.quote, spanText: span.text })
+        : { verdict: 'UNVERIFIED' as const }
+      if (!span || classification.verdict === 'UNVERIFIED') {
+        skipped.push({ name: claim.name, reason: '引文、原文或定义不匹配' })
         continue
       }
 
-      const spanId = claim.spanIds[0]!
-
-      // 顺序不能反：UNVERIFIED → 引用 → VERIFIED
-      const concept = await ctx.prisma.concept.create({
-        data: {
-          canvasId: ctx.canvasId,
-          name: claim.name,
-          definition: claim.definition,
-          status: 'UNVERIFIED',
-        },
-        select: { id: true },
+      const concept = await ctx.prisma.$transaction(async tx => {
+        const where = { canvasId_name: { canvasId: ctx.canvasId, name: claim.name } }
+        const current = await tx.concept.findUnique({ where })
+        if (current && current.status !== 'UNVERIFIED') {
+          if (current.definition !== claim.definition) return null
+          const sameEvidence = await tx.conceptCitation.findUnique({
+            where: { conceptId_spanId: { conceptId: current.id, spanId: span.id } },
+          })
+          return sameEvidence?.quote === claim.quote ? current : null
+        }
+        const entry = await tx.concept.upsert({
+          where, create: { ...where.canvasId_name, definition: claim.definition, status: 'UNVERIFIED' },
+          update: { definition: claim.definition },
+        })
+        // A reverified definition replaces citations attached to the former definition.
+        await tx.conceptCitation.deleteMany({ where: { conceptId: entry.id } })
+        await tx.conceptCitation.create({ data: {
+          conceptId: entry.id, spanId: span.id, isPrimary: true, quote: claim.quote!,
+        } })
+        return tx.concept.update({ where: { id: entry.id }, data: { status: classification.verdict } })
       })
-
-      await ctx.prisma.conceptCitation.create({
-        data: {
-          conceptId: concept.id,
-          spanId,
-          isPrimary: true,
-          quote: claim.definition.slice(0, 200),
-        },
-      })
-
-      try {
-        await ctx.prisma.concept.update({ where: { id: concept.id }, data: { status: 'VERIFIED' } })
-        created.push({ conceptId: concept.id, name: claim.name, spanId, status: 'VERIFIED' })
-      } catch {
-        // 触发器拦下（例如 span 失效）：保持 UNVERIFIED，不掩盖
-        created.push({ conceptId: concept.id, name: claim.name, spanId, status: 'UNVERIFIED' })
-      }
+      if (concept) created.push({ conceptId: concept.id, name: claim.name, spanId: span.id, status: concept.status })
+      else skipped.push({ name: claim.name, reason: '同名概念已有不同证据' })
     }
 
     return {
@@ -80,6 +81,7 @@ export const cardExecutor: NodeExecutor = {
         cards: {
           total: created.length,
           verified: created.filter((card) => card.status === 'VERIFIED').length,
+          pendingReview: created.filter((card) => card.status === 'PENDING_REVIEW').length,
           unverified: created.filter((card) => card.status === 'UNVERIFIED').length,
           skipped,
           cards: created,

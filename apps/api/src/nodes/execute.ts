@@ -97,13 +97,17 @@ export async function executeNode(
     ? await executor.prepareFingerprintParams(node.params)
     : (node.params ?? {})
 
-  const fingerprint = computeFingerprint({
+  const route = node.type === 'EXTRACT' ? deps.llm.routeFor('extract') : null
+  const modelUsed = route ? `${route.provider}/${route.model}` : null
+  // An alias alone cannot prove which provider snapshot will answer the next request.
+  const expectedVersion = route?.expectedVersion ?? route?.model ?? 'rule-based-v1'
+  const fingerprintFor = (version: string) => computeFingerprint({
     upstreamArtifactHashes: hashes,
-    params: fingerprintParams,
-    modelVersion: executor.promptVersion === 'no-prompt' ? 'rule-based-v1' : 'llm',
+    params: route ? { params: fingerprintParams, modelUsed } : fingerprintParams,
+    modelVersion: version,
     promptVersion: executor.promptVersion,
   })
-
+  let fingerprint = fingerprintFor(expectedVersion)
   const cacheHit = node.fingerprint === fingerprint
 
   if (options.dryRun) {
@@ -127,6 +131,7 @@ export async function executeNode(
         status: 'SUCCEEDED',
         trigger: 'user',
         fingerprint,
+        modelUsed, modelVersion: expectedVersion, promptVersion: executor.promptVersion,
         cacheHit: true,
         tokensIn: 0,
         tokensOut: 0,
@@ -189,6 +194,10 @@ export async function executeNode(
         })),
       })
     }
+    const versions = [...new Set(result.usageRecords?.map(record => record.model))]
+    if (route && versions.length !== 1) throw new Error('一次运行需要唯一可核验的模型版本')
+    const modelVersion = route ? versions[0]! : expectedVersion
+    fingerprint = fingerprintFor(modelVersion)
     const hash = computeFingerprint({
       upstreamArtifactHashes: [],
       params: structured,
@@ -211,6 +220,7 @@ export async function executeNode(
       data: {
         status: 'SUCCEEDED',
         endedAt: new Date(),
+        fingerprint, modelUsed, modelVersion, promptVersion: executor.promptVersion,
         tokensIn: result.usage.tokensIn,
         tokensOut: result.usage.tokensOut,
       },

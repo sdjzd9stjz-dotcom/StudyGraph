@@ -5,6 +5,7 @@ export type ProviderId = 'openai' | 'anthropic' | 'deepseek'
 export interface ModelRoute {
   readonly provider: ProviderId
   readonly model: string
+  readonly expectedVersion?: string
   readonly tier: 'small' | 'frontier'
 }
 
@@ -30,7 +31,7 @@ const DEEPSEEK_REASONER = process.env.STUDYGRAPH_DEEPSEEK_REASONER ?? 'deepseek-
 export const TASK_ROUTING: Record<TaskType, ModelRoute> = {
   // 机械、量大、便宜的任务
   chunk: { provider: 'deepseek', model: DEEPSEEK_CHAT, tier: 'small' },
-  extract: { provider: 'deepseek', model: DEEPSEEK_CHAT, tier: 'small' },
+  extract: { provider: 'deepseek', model: DEEPSEEK_CHAT, tier: 'small', ...(process.env.STUDYGRAPH_EXTRACT_MODEL_VERSION ? { expectedVersion: process.env.STUDYGRAPH_EXTRACT_MODEL_VERSION } : {}) },
   judge: { provider: 'deepseek', model: DEEPSEEK_CHAT, tier: 'small' },
   quiz: { provider: 'deepseek', model: DEEPSEEK_CHAT, tier: 'small' },
   check: { provider: 'deepseek', model: DEEPSEEK_CHAT, tier: 'small' },

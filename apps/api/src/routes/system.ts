@@ -9,7 +9,7 @@ import { getAuth } from '../plugins/auth.ts'
 import type { Guard } from '../plugins/auth.ts'
 
 const querySchema = z.object({
-  provider: z.enum(['openai', 'anthropic']).default('openai'),
+  provider: z.enum(['openai', 'anthropic', 'deepseek']).default('openai'),
 })
 
 export interface SystemRouteDeps {

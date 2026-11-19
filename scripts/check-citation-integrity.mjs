@@ -23,7 +23,11 @@ const objectStore = createObjectStore({
   forcePathStyle: true,
 })
 
-const report = await checkConceptCitations({ prisma, objectStore })
+const scope = process.argv.slice(2)
+if (scope.length && (scope.length !== 2 || scope[0] !== '--canvas' || !scope[1].trim())) {
+  throw new Error('用法：node scripts/check-citation-integrity.mjs [--canvas <id>]')
+}
+const report = await checkConceptCitations({ prisma, objectStore }, scope[1])
 
 console.log(
   JSON.stringify(
@@ -39,4 +43,4 @@ console.log(
 )
 
 await prisma.$disconnect()
-process.exit(report.downgraded.length === 0 ? 0 : 1)
+process.exit(report.unverifiableSources.length ? 2 : report.downgraded.length ? 1 : 0)

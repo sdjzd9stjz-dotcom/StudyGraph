@@ -31,6 +31,7 @@ export const chunkExecutor: NodeExecutor<ChunkParams> = {
     if (!sourceDoc?.sourceId) throw new Error('chunk 节点缺少上游 sourceDoc')
 
     const maxChars = ctx.params.maxChars ?? 800
+    if (!Number.isSafeInteger(maxChars) || maxChars < 1) throw new Error('maxChars 必须是正整数')
 
     const spans = await ctx.prisma.span.findMany({
       where: { sourceId: sourceDoc.sourceId },

@@ -42,3 +42,19 @@ export const TEXT_LAYER = {
   minGibberishSignals: 2,
 } as const
 
+/**
+ * 三档判定的阈值（SG-SUP-010 §1.4–1.5）。
+ *
+ * T2（PENDING_REVIEW）= 引文逐字可查 + 定义是转述。判定只用字符 bigram Jaccard，
+ * 纯机械、可复现、**没有模型参与**（自己出题自己答不算判据）。
+ *
+ * `REVIEW_MIN_BIGRAM_SIMILARITY` 用 27 条真实被拒 claim 校准过，校准表见
+ * `docs/交付/监理回报-010-分层校验与M2收尾.md` §1；改它必须说明理由。
+ */
+export const REVIEW_MIN_BIGRAM_SIMILARITY = 0.45
+
+/** 定义长度 / 引文长度 的允许区间：太短往往是空话，太长往往是加了外部知识 */
+export const REVIEW_MIN_LENGTH_RATIO = 0.5
+export const REVIEW_MAX_LENGTH_RATIO = 2.0
+
+

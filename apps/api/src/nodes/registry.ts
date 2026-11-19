@@ -127,7 +127,7 @@ export function getExecutor(type: string): NodeExecutor {
   const executor = REGISTRY.get(type)
   if (executor) return executor
   const plan = isNodeType(type) ? PLANNED_PLAN[type] : 'M6'
-  throw executorNotImplemented(type, plan)
+  throw executorNotImplemented(type, plan ?? '未指定')
 }
 
 export function hasExecutor(type: string): boolean {

@@ -69,5 +69,6 @@ export interface LLMCompleteResult {
 }
 
 export interface LLMGateway {
-  complete(req: LLMCompleteRequest): Promise<{ data: unknown; usage: TokenUsage; modelVersion: string }>
+  routeFor(task: TaskType): import('./routing.ts').ModelRoute
+  complete(req: LLMCompleteRequest): Promise<LLMCompleteResult & { provider: import('./routing.ts').ProviderId }>
 }

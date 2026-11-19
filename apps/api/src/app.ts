@@ -15,6 +15,7 @@ import { registerEdgeRoutes } from './routes/edges.ts'
 import { registerGraphRoutes } from './routes/graph.ts'
 import { registerNodeRoutes } from './routes/nodes.ts'
 import { registerRunRoutes } from './routes/run.ts'
+import { registerReviewRoutes } from './routes/review.ts'
 import { registerSystemRoutes } from './routes/system.ts'
 import { createObjectStore } from './storage/object-store.ts'
 
@@ -151,6 +152,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   registerGraphRoutes(app, { prisma, guard })
   registerRunRoutes(app, { prisma, guard, objectStore, llm })
   registerSystemRoutes(app, { guard, resolveApiKey })
+  registerReviewRoutes(app, { prisma, guard })
 
   return app
 }

@@ -33,6 +33,7 @@ export function createGateway(deps: GatewayDeps): LLMGateway {
   const routing = deps.routing ?? TASK_ROUTING
 
   return {
+    routeFor: (task) => routing[task],
     async complete(request: LLMCompleteRequest) {
       const route = routing[request.taskType]
       const resolved = normalizeCredential(await deps.resolveApiKey(route.provider, request.user))
@@ -60,12 +61,13 @@ export function createGateway(deps: GatewayDeps): LLMGateway {
             : createAnthropicProvider({ apiKey, fetchImpl: deps.fetchImpl })
 
       try {
-        return await call({
+        const result = await call({
           model: route.model,
           messages: request.messages,
           jsonSchema: request.jsonSchema,
           cachePrefix,
         })
+        return { ...result, provider: route.provider }
       } catch (error) {
         // 已经带 errorCode 的（响应结构非法等）原样上抛，不叠加成 502 厂商错误
         if (error instanceof AppError) throw error
@@ -78,7 +80,7 @@ export function createGateway(deps: GatewayDeps): LLMGateway {
 /** 从环境变量取密钥（保留给自检与测试）；生产路径用 credentials.ts 的 BYOK 解析器。 */
 export function envApiKeyResolver(env: Record<string, string | undefined>): ApiKeyResolver {
   return async (provider) => {
-    const key = provider === 'openai' ? env.OPENAI_API_KEY : env.ANTHROPIC_API_KEY
+    const key = provider === 'openai' ? env.OPENAI_API_KEY : provider === 'deepseek' ? env.DEEPSEEK_API_KEY : env.ANTHROPIC_API_KEY
     return key && key.trim().length > 0 ? key.trim() : null
   }
 }

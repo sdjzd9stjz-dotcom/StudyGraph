@@ -37,6 +37,7 @@ export function assertUsageAndModel(
   ] as const) {
     if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) invalid.push(name)
   }
+  if (provider === 'deepseek' && usage.cachedTokens === undefined) invalid.push('usage.prompt_cache_hit_tokens')
   if (
     usage.cachedTokens !== undefined &&
     (typeof usage.cachedTokens !== 'number' || !Number.isFinite(usage.cachedTokens) || usage.cachedTokens < 0)

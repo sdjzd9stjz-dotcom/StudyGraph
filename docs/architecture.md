@@ -216,6 +216,10 @@ fingerprint = sha256(
 
 ### 5.2 自建 LLM Gateway
 
+SG-SUP-009 批准在首期 OpenAI、Anthropic 的基础上，临时接入第三家 DeepSeek 进行 M2 实调。DeepSeek 复用 OpenAI 兼容适配层，默认机械任务走 chat、推理任务走 reasoner；两条原厂备用路由可显式注入。UsageRecord 的供应商来自选中的路由，模型来自响应体。
+
+EXTRACT 的运行指纹包含供应商、请求模型、响应模型版本、提示词、参数和上游产物。固定快照可直接复用；别名请求可用 `STUDYGRAPH_EXTRACT_MODEL_VERSION` 指定部署已确认的响应版本。请求前无法确认与已存版本一致时执行新调用。厂商切换别名对应快照时应更新部署配置。
+
 前端禁止直连厂商 API。三个理由：
 
 1. **收口**：学生 BYOK 与校园额度必须走同一处计量与限额（`UsageRecord` + `ProviderCredential`）。
@@ -291,18 +295,42 @@ interface LLMGateway {
 版面纠偏留到需要时再评估。扫描版（无文字层）会被判为解析失败并返回
 `SOURCE_HAS_NO_TEXT_LAYER`，**不生成任何内容**。
 
-### 5.7 前缀缓存：两家厂商机制不同，接口因此拆成 `{ key, text }`
+### 5.7 各供应商的前缀缓存
 
 `cachePrefix = { key, text }`（SG-SUP-006 §3.3）：`key` 是标识，`text` 是真正进 system 的原文片段。
 两者都由调用方从 `(sourceId, 章节范围, promptVersion)` 派生。
 
 | 厂商 | 缓存机制 | 请求体里的落点 | key 用在哪 |
 | --- | --- | --- | --- |
+| **DeepSeek** | 自动按前缀内容寻址 | 前缀 text 进入 system 消息 | 无显式键；响应必须包含数值 `usage.prompt_cache_hit_tokens`，0 为有效计量 |
 | **OpenAI** | 有显式路由键 | `prompt_cache_key = key`；`text` 作为第一条 system 消息放在最前 | 直接进请求体 |
 | **Anthropic** | **内容寻址**：缓存的是被 `cache_control` 标记的内容块本身，没有"传一个键"的概念 | `system` 数组 = [前缀 text 块, 调用方 system 块]，**最后一个块**带 `cache_control: {type:'ephemeral'}` | 不进请求体，只进结构化日志 `llm.prefix_cache`（可观测，不是死参数） |
 
 为什么不能只有 key：只给 key，Anthropic 的前缀内容不变 → 缓存永远命中同一段，接了等于没接。
 为什么不能只有 text：OpenAI 少了路由键，命中率靠运气。
+
+### 5.8 供应商：首期 2 家，因验收需要临时接入第 3 家
+
+规格 §技术栈 写的是「首期接 2 个供应商」。**用户已授权**（SG-SUP-009 §1），M2 期间临时接入
+DeepSeek 作为实调供应商，走 OpenAI 兼容协议，适配成本低于另两家（同一份
+`providers/openai-compatible.ts`，只参数化 base URL、`response_format` 形态、usage 字段名）。
+
+**请求别名与响应 model 的语义不同，不许合并：**
+
+| 字段 | 谁决定 | 用在哪 | 例子 |
+| --- | --- | --- | --- |
+| **请求别名**（`routing.ts` 的 `model`） | 我们决定，是我们能控制的东西 | 出站请求体的 `model` | `deepseek-chat` / `deepseek-reasoner` |
+| **响应 model**（`ProviderResult.modelVersion`） | 厂商决定，是**真相** | 指纹的 `modelVersion`、`UsageRecord.model` | 实测返回 `deepseek-flash` |
+
+| 请求别名 | 实测响应 `model` | 说明 |
+| --- | --- | --- |
+| `deepseek-chat` | `deepseek-flash` | 009 的实调中观测到；厂商可能把别名指向滚动更新的实际模型 |
+| `deepseek-reasoner` | 未实测 | M2 未用到推理别名 |
+
+**以厂商当前别名为准，本表随实测更新。** 两者是否是"同一模型的两个名字"没有官方结论，
+本项目不做推断：指纹与用量一律记响应里的 `modelVersion`/`model`，路由表只负责"请求谁"。
+如果厂商把别名切到新模型，指纹会因为 `modelVersion` 变化而失配、缓存自动失效——这正是要的效果。
+
 
 **三条可观察标准**（两家都要满足，见 `apps/api/test/unit/llm-prefix.test.ts`）：
 
