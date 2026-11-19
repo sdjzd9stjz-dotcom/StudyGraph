@@ -5,20 +5,22 @@ import type { SpanRef } from '../../../../packages/contracts/src/index.ts'
 /**
  * span 解析与校验（溯源是物理约束的第一道服务层闸门）。
  *
- * 校验的是**逐字符相等**：`span.text === pageText.slice(charStart, charEnd)`。
+ * 校验判定是：
+ *   verify(span, pageText) = ok  iff  span.charStart >= 0
+ *                                 ∧ span.charEnd > span.charStart
+ *                                 ∧ pageText.slice(span.charStart, span.charEnd) === span.text
  *
- * ## 缓存必须绑定原文版本（SG-SUP-005 缺陷 A）
+ * ## 缓存规则（SG-SUP-005 A、SG-SUP-006 §1）
  *
- * 曾经按 `(spanId, 范围)` 缓存校验结果，原文从 `abc` 改成 `xyz` 后仍返回 `ok: true`
- * —— 这不是性能问题，是硬约束 1 被击穿：原文变了，引用必须失效。
+ * 缓存命中只允许跳过**读页文本**，不允许跳过**与 span 自身相关的判定**。
+ * 因此缓存键必须覆盖判定函数的所有输入：
  *
- * 现在缓存条目里存的是**当时页文本的 sha256**（或 `Source.checksum`），
- * 读到条目后先比对版本，不一致就重算：
+ *   sourceId · page · charStart · charEnd · sha256(span.text) · 页文本版本
  *
- * - 没有 `loadSourceVersion` 时：每次 verify 取页文本 → 算哈希 → 命中则复用，否则重算。
- *   代价是每次都要读一次页文本，但绝不会给出过期结论。
- * - 提供 `loadSourceVersion` 时（生产：查 `Source.checksum`）：先用版本号定位条目，
- *   命中就**不读页文本**，两全。
+ * 两轮漏检的教训：
+ * 1. 键里没有 `span.text` → 同一个 id/区间换个期望文本也能命中旧结论（把校验变成恒真函数）。
+ * 2. `loadSourceVersion()` 返回 `undefined` 时曾被当作"版本未变" → 原文明明改了也命中。
+ *    现在 `undefined` 等价于"无法判断缓存是否有效"，此时**完全绕过缓存**，直接读文本比对。
  */
 export type SpanVerification =
   | { readonly ok: true }
@@ -87,17 +89,33 @@ export interface SpanResolver {
 export interface SpanResolverDeps {
   readonly loadSpan: (spanId: string) => Promise<SpanRef | null>
   readonly loadPageText: (sourceId: string, page: number) => Promise<string | undefined>
-  /** 可选：源的当前版本（Source.checksum）。提供后命中缓存可以不读页文本。 */
+  /** 可选：源的当前版本（Source.checksum）。返回 undefined 表示"取不到版本"。 */
   readonly loadSourceVersion?: (sourceId: string) => Promise<string | undefined>
   /** 仅便于测试注入 */
-  readonly cache?: Map<string, { version: string; result: SpanVerification }>
+  readonly cache?: Map<string, SpanVerification>
 }
 
-const textHash = (text: string | undefined): string =>
-  createHash('sha256').update(text ?? '\u0000missing-page').digest('hex')
+const sha256 = (text: string): string => createHash('sha256').update(text, 'utf8').digest('hex')
+
+/** 判定函数的全部输入都在键里，缺一项都可能让缓存变成恒真函数。 */
+function cacheKey(span: SpanRef, pageVersion: string): string {
+  return [
+    span.sourceId,
+    span.page,
+    span.charStart,
+    span.charEnd,
+    sha256(span.text).slice(0, 32),
+    pageVersion,
+  ].join('|')
+}
 
 export function createSpanResolver(deps: SpanResolverDeps): SpanResolver {
-  const cache = deps.cache ?? new Map<string, { version: string; result: SpanVerification }>()
+  const cache = deps.cache ?? new Map<string, SpanVerification>()
+
+  const compute = async (span: SpanRef): Promise<SpanVerification> => {
+    const text = await deps.loadPageText(span.sourceId, span.page)
+    return verifySpan(span, text === undefined ? new Map() : new Map([[span.page, text]]))
+  }
 
   return {
     resolve: deps.loadSpan,
@@ -105,28 +123,34 @@ export function createSpanResolver(deps: SpanResolverDeps): SpanResolver {
     pageText: deps.loadPageText,
 
     async verify(span) {
-      const key = `${span.id}|${span.page}|${span.charStart}|${span.charEnd}`
-
-      // 有廉价版本查询时：版本相同即可直接复用，不必读页文本
+      // 有廉价版本查询时：版本可用才允许用缓存
       if (deps.loadSourceVersion) {
-        const version = (await deps.loadSourceVersion(span.sourceId)) ?? 'unknown'
-        const cached = cache.get(key)
-        if (cached && cached.version === version) return cached.result
+        const version = await deps.loadSourceVersion(span.sourceId)
 
-        const text = await deps.loadPageText(span.sourceId, span.page)
-        const result = verifySpan(span, text === undefined ? new Map() : new Map([[span.page, text]]))
-        cache.set(key, { version, result })
+        // 取不到版本 = 无法判断缓存是否有效 → 绕过缓存，直接比对
+        if (version === undefined || version === null || version === '') {
+          return compute(span)
+        }
+
+        const key = cacheKey(span, version)
+        const cached = cache.get(key)
+        if (cached) return cached
+
+        const result = await compute(span)
+        cache.set(key, result)
         return result
       }
 
-      // 没有版本查询时：用页文本哈希判断条目是否还新鲜
+      // 没有版本查询：先读文本，用文本哈希当版本（读是省不掉的，算可以省）
       const text = await deps.loadPageText(span.sourceId, span.page)
-      const version = textHash(text)
+      const version = sha256(text ?? '\u0000missing-page')
+      const key = cacheKey(span, version)
+
       const cached = cache.get(key)
-      if (cached && cached.version === version) return cached.result
+      if (cached) return cached
 
       const result = verifySpan(span, text === undefined ? new Map() : new Map([[span.page, text]]))
-      cache.set(key, { version, result })
+      cache.set(key, result)
       return result
     },
   }

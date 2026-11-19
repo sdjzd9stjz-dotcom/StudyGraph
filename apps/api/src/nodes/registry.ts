@@ -60,35 +60,40 @@ export interface SelfCheckReport {
 
 /**
  * 自检必须拿「已实现 ∪ 计划」与 `NODE_TYPES` 的 17 个值做**双向差集**，
- * 而不是检查自己内部一致（SG-SUP-005 缺陷 C）：
+ * 而不是检查自己内部一致（SG-SUP-005 缺陷 C / SG-SUP-006 §2）。
  *
- * - 少一个计划 → `missingPlan` 非空、`ok=false`
- * - 同一个类型既实现又计划 → 报冲突
- * - 并集里出现 17 个之外的东西 → 报未知类型
+ * 三类问题分别检查：
+ *   遗漏：NODE_TYPES − (implemented ∪ planned)
+ *   多余：(implemented ∪ planned) − NODE_TYPES   ← 曾经先按 NODE_TYPES 过滤键，导致这一支永远查不出
+ *   重叠：implemented ∩ planned
  *
- * `planned` 由 `PLANNED_PLAN` 的键推导，所以删掉某个计划项时它会从 `planned` 消失，
- * 同时出现在 `missingPlan` 里——这正是自检要的可观察行为。
+ * 关键是**对原始键集合检错，不要先过滤**：过滤之后的集合天然合法，多出来的会被静默吃掉。
  */
 export function selfCheck(): SelfCheckReport {
   const implemented = implementedTypes()
-  const plannedCandidates = new Set<NodeType>(Object.keys(PLANNED_PLAN).filter(isNodeType))
+  // 原始键，不过滤
+  const plannedKeys = Object.keys(PLANNED_PLAN)
+  const plannedSet = new Set<string>(plannedKeys)
 
-  const planned = NODE_TYPES.filter((type) => !implemented.includes(type) && plannedCandidates.has(type))
-  const missingPlan = NODE_TYPES.filter((type) => !implemented.includes(type) && !plannedCandidates.has(type))
+  const planned = NODE_TYPES.filter((type) => !implemented.includes(type) && plannedSet.has(type))
+  const missingPlan = NODE_TYPES.filter((type) => !implemented.includes(type) && !plannedSet.has(type))
+  const extraPlanKeys = plannedKeys.filter((key) => !NODE_TYPES.includes(key as NodeType))
+  const overlap = implemented.filter((type) => plannedSet.has(type))
 
   const problems: string[] = []
+
   for (const type of missingPlan) problems.push(`${type} 既未实现也没有计划里程碑`)
 
-  const overlap = implemented.filter((type) => plannedCandidates.has(type))
+  for (const key of extraPlanKeys) {
+    problems.push(`${key} 不是 NODE_TYPES 中的节点类型（可能是拼写错误，或计划表被改坏了）`)
+  }
+
   for (const type of overlap) problems.push(`${type} 同时出现在已实现与计划里`)
 
-  const union = new Set<NodeType>([...implemented, ...planned])
+  const union = new Set<string>([...implemented, ...planned])
   for (const type of NODE_TYPES) {
     // 已经在 missingPlan 里报过的不要再报一次（同一个缺口说两遍只是噪音）
     if (!union.has(type) && !missingPlan.includes(type)) problems.push(`并集缺少 ${type}`)
-  }
-  for (const type of union) {
-    if (!NODE_TYPES.includes(type)) problems.push(`并集含未知类型 ${String(type)}`)
   }
   if (implemented.length !== REGISTRY.size) {
     problems.push('注册表里有非 NodeType 的条目')

@@ -36,11 +36,27 @@ export const TASK_TYPES = [
 
 export type TaskType = (typeof TASK_TYPES)[number]
 
+/**
+ * 前缀材料（SG-SUP-006 §3.3）。
+ *
+ * `key` 与 `text` 都由调用方从 `(sourceId, 章节范围, promptVersion)` 派生：
+ * - `key`：缓存标识，用于 OpenAI 的 `prompt_cache_key`、日志与指标
+ * - `text`：真正进 system 前缀的原文片段，Anthropic 是内容寻址，靠它命中缓存
+ *
+ * 两者必须同时给：只给 key 对 Anthropic 等于没接缓存，只给 text 对 OpenAI 少了路由键。
+ */
+export interface CachePrefix {
+  readonly key: string
+  readonly text: string
+}
+
 export interface LLMCompleteRequest {
   readonly taskType: TaskType
   readonly messages: readonly Message[]
   readonly jsonSchema?: JSONSchema
-  /** 前缀缓存键：(sourceId, 章节范围, promptVersion) */
+  /** 前缀材料（新接口） */
+  readonly cachePrefix?: CachePrefix
+  /** @deprecated 旧调用方只传键；内部等价于 `{ key, text: '' }`。新代码请用 cachePrefix */
   readonly cachePrefixKey?: string
   readonly user: UserCtx
 }

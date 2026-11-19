@@ -1,4 +1,4 @@
-import type { JSONSchema, Message, TokenUsage } from '../types.ts'
+import type { CachePrefix, JSONSchema, Message, TokenUsage } from '../types.ts'
 import { assertUsageAndModel } from './validate.ts'
 
 export interface ProviderCall {
@@ -6,8 +6,8 @@ export interface ProviderCall {
   readonly messages: readonly Message[]
   readonly jsonSchema?: JSONSchema
   readonly maxTokens?: number
-  /** 前缀缓存键：必须真的影响出站请求（SG-SUP-005 缺陷 E） */
-  readonly cachePrefixKey?: string
+  /** 前缀材料：key 进缓存字段，text 进 system 前缀（SG-SUP-006 §3.3） */
+  readonly cachePrefix?: CachePrefix
 }
 
 export interface ProviderResult {
@@ -29,17 +29,24 @@ export interface OpenAIProviderConfig {
  *
  * - 结构化输出用 `response_format: json_schema` 强制，不解析模型自由文本
  * - `usage` / `model` 缺失即抛 PROVIDER_RESPONSE_INVALID（见 providers/validate.ts）
- * - `cachePrefixKey` 落进 `prompt_cache_key`：前缀缓存按这个键路由，
- *   键不同 → 出站请求体不同（可观察）
+ * - 前缀：`cachePrefix.text` 作为 system 前缀内容（内容寻址），
+ *   `cachePrefix.key` 进 `prompt_cache_key`（OpenAI 的路由键，两家机制不同，见 architecture §5.7）
  */
 export function createOpenAIProvider(config: OpenAIProviderConfig) {
   const baseUrl = config.baseUrl ?? 'https://api.openai.com/v1'
   const doFetch = config.fetchImpl ?? fetch
 
   return async function call(input: ProviderCall): Promise<ProviderResult> {
+    const prefixText = input.cachePrefix?.text?.trim()
+
+    const messages = [
+      ...(prefixText ? [{ role: 'system' as const, content: prefixText }] : []),
+      ...input.messages.map((message) => ({ role: message.role, content: message.content })),
+    ]
+
     const body: Record<string, unknown> = {
       model: input.model,
-      messages: input.messages.map((message) => ({ role: message.role, content: message.content })),
+      messages,
       max_tokens: input.maxTokens ?? 2048,
     }
 
@@ -50,9 +57,8 @@ export function createOpenAIProvider(config: OpenAIProviderConfig) {
       }
     }
 
-    if (input.cachePrefixKey) {
-      // OpenAI 的前缀缓存按 prompt_cache_key 分组；同一段教材原文共享一个键
-      body.prompt_cache_key = input.cachePrefixKey
+    if (input.cachePrefix?.key) {
+      body.prompt_cache_key = input.cachePrefix.key
     }
 
     const response = await doFetch(`${baseUrl}/chat/completions`, {

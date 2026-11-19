@@ -31,15 +31,18 @@ export function createAnthropicProvider(config: AnthropicProviderConfig) {
       messages: dialogue.map((message) => ({ role: message.role, content: message.content })),
     }
 
+    // 前缀材料进 system（Anthropic 是内容寻址：缓存的就是这段内容本身）。
+    // 顺序：缓存前缀在前，调用方 system 在后；**最后一个块**打 cache_control 断点。
+    const systemBlocks: Array<Record<string, unknown>> = []
+    const prefixText = input.cachePrefix?.text?.trim()
+    if (prefixText) systemBlocks.push({ type: 'text', text: prefixText })
     if (systemMessages.length > 0) {
-      body.system = [
-        {
-          type: 'text',
-          text: systemMessages.map((message) => message.content).join('\n\n'),
-          // 教材原文作前缀，命中缓存可省输入成本（规格 §5.2）
-          cache_control: { type: 'ephemeral' },
-        },
-      ]
+      systemBlocks.push({ type: 'text', text: systemMessages.map((message) => message.content).join('\n\n') })
+    }
+    if (systemBlocks.length > 0) {
+      const last = systemBlocks[systemBlocks.length - 1] as Record<string, unknown>
+      last.cache_control = { type: 'ephemeral' }
+      body.system = systemBlocks
     }
 
     if (input.jsonSchema) {

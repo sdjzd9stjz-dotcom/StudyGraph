@@ -291,14 +291,45 @@ interface LLMGateway {
 版面纠偏留到需要时再评估。扫描版（无文字层）会被判为解析失败并返回
 `SOURCE_HAS_NO_TEXT_LAYER`，**不生成任何内容**。
 
-### 5.7 前缀缓存键在各厂商的落点
+### 5.7 前缀缓存：两家厂商机制不同，接口因此拆成 `{ key, text }`
 
-`cachePrefixKey` 由调用方按 `(sourceId, 章节范围, promptVersion)` 组织，落到适配层后：
+`cachePrefix = { key, text }`（SG-SUP-006 §3.3）：`key` 是标识，`text` 是真正进 system 的原文片段。
+两者都由调用方从 `(sourceId, 章节范围, promptVersion)` 派生。
 
-| 厂商 | 落点 | 说明 |
+| 厂商 | 缓存机制 | 请求体里的落点 | key 用在哪 |
+| --- | --- | --- | --- |
+| **OpenAI** | 有显式路由键 | `prompt_cache_key = key`；`text` 作为第一条 system 消息放在最前 | 直接进请求体 |
+| **Anthropic** | **内容寻址**：缓存的是被 `cache_control` 标记的内容块本身，没有"传一个键"的概念 | `system` 数组 = [前缀 text 块, 调用方 system 块]，**最后一个块**带 `cache_control: {type:'ephemeral'}` | 不进请求体，只进结构化日志 `llm.prefix_cache`（可观测，不是死参数） |
+
+为什么不能只有 key：只给 key，Anthropic 的前缀内容不变 → 缓存永远命中同一段，接了等于没接。
+为什么不能只有 text：OpenAI 少了路由键，命中率靠运气。
+
+**三条可观察标准**（两家都要满足，见 `apps/api/test/unit/llm-prefix.test.ts`）：
+
+1. 前缀材料变 → 请求体必须变
+2. 前缀材料同 → 请求体必须完全一致（不许塞时间戳）
+3. 各自机制证据：OpenAI 有 `prompt_cache_key` 且值等于 key；Anthropic 的 system 里能读到 text 子串，
+   且最后一个 system 块带 `cache_control`
+
+### 5.8 PPTX 文本抽取口径（SG-SUP-007 §2.1）
+
+| 位置 | 抽取 | 说明 |
 | --- | --- | --- |
-| OpenAI | 请求体 `prompt_cache_key` | 同键的请求共享前缀缓存；**键不同 → 请求体必然不同**（可观察） |
-| Anthropic | 不传键，靠 `system[].cache_control: ephemeral` | Anthropic 的缓存维度就是 system 前缀内容本身，没有独立的键参数；伪造一个厂商不认识的字段比不传更糟 |
+| `ppt/slides/slideN.xml` 的 `<a:t>` | ✅ 必须 | 正文主体，含表格 `<a:tbl>` 内的文本（表格文字同样是 `<a:t>`） |
+| `ppt/notesSlides/*.xml` 的 `<a:t>` | ✅ 必须，**单独标记** | 讲稿常含关键解释；落库时要能在 span 上区分来源（见下） |
+| 图表 chart XML | ❌ 本轮不抽 | 抽不到不算缺陷，此处如实记录 |
+| 图片里的文字 | ❌ 不抽 | 不做 OCR；该页文本稀疏或为 0 时**不得凭空生成** |
+| `slideMaster` / `slideLayout` | ❌ 不抽 | 模板文字（页码、公司名）会污染检索与引用（实测这部分有 3666 字符，全部排除） |
+
+**偏移基准不变**：`charStart/charEnd` 仍是**页内文本**、UTF-16、左闭右开（§3.1）。
+`Span.page` 对 PPTX 表示**从 1 开始的幻灯片序号**，与 PDF 页码同义，前端不需要分叉。
+
+**备注页与正文的隔离**：两者各自独立成文本基准，不与正文拼接。
+为此 `Span` 需要一个 `region` 字段（`slide` / `notes`），随下一次 migration 加入——
+按规矩新开一个 migration，不改已应用的那几个。
+
+**空文本页**：实测 266 张幻灯片里有 **46 张（17%）没有任何文字**（纯图页）。
+这些页抽取结果为 0 字符，若某张卡只引用这类页，该卡必须是 `UNVERIFIED`。
 
 ---
 

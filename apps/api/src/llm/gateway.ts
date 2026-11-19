@@ -16,6 +16,8 @@ export interface GatewayDeps {
   /** 便于测试替换路由 */
   readonly routing?: Record<TaskType, ModelRoute>
   readonly fetchImpl?: typeof fetch
+  /** 结构化日志；`cachePrefix.key` 在这里留痕（Anthropic 不把它放进请求体） */
+  readonly logger?: { debug: (obj: unknown, msg?: string) => void }
 }
 
 /**
@@ -36,6 +38,19 @@ export function createGateway(deps: GatewayDeps): LLMGateway {
       if (!resolved) throw llmCredentialMissing(route.provider)
       const apiKey = resolved.apiKey
 
+      // 新接口用 cachePrefix（key + text）；老调用方只给 key 时退化成 { key, text: '' }
+      const cachePrefix =
+        request.cachePrefix ??
+        (request.cachePrefixKey ? { key: request.cachePrefixKey, text: '' } : undefined)
+
+      // key 的可观测用途：日志与指标（Anthropic 不把它塞进请求体，这里必须留痕）
+      if (cachePrefix) {
+        deps.logger?.debug(
+          { event: 'llm.prefix_cache', provider: route.provider, taskType: request.taskType, cachePrefixKey: cachePrefix.key, prefixChars: cachePrefix.text.length },
+          '前缀缓存材料',
+        )
+      }
+
       const call =
         route.provider === 'openai'
           ? createOpenAIProvider({ apiKey, fetchImpl: deps.fetchImpl })
@@ -46,7 +61,7 @@ export function createGateway(deps: GatewayDeps): LLMGateway {
           model: route.model,
           messages: request.messages,
           jsonSchema: request.jsonSchema,
-          cachePrefixKey: request.cachePrefixKey,
+          cachePrefix,
         })
       } catch (error) {
         // 已经带 errorCode 的（响应结构非法等）原样上抛，不叠加成 502 厂商错误
