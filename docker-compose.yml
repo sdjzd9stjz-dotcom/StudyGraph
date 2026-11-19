@@ -2,6 +2,7 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     container_name: studygraph-postgres
+    restart: unless-stopped
     environment:
       POSTGRES_USER: studygraph
       POSTGRES_PASSWORD: studygraph
@@ -19,6 +20,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: studygraph-redis
+    restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     ports:
       - "6379:6379"
@@ -30,40 +32,28 @@ services:
       timeout: 3s
       retries: 10
 
-  minio:
-    image: minio/minio:latest
-    container_name: studygraph-minio
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+  # S3 兼容存储。
+  #
+  # 为什么不是 MinIO（2026-11-19 实测）：
+  #   - Docker Hub 上 minio/minio 已不存在（MinIO 迁到 quay.io，而本机代理链路上
+  #     quay 的 token 认证握手拿不到 200，HEAD manifest 恒为 401）
+  #   - dl.min.io 的 windows 二进制路径已 410 下架
+  # SeaweedFS 的 S3 网关实现的是同一套 S3 协议，我们的 ObjectStore 层只依赖协议，
+  # 换回 MinIO 只需改 image 与端口，代码不用动。
+  s3:
+    image: chrislusf/seaweedfs:latest
+    container_name: studygraph-s3
+    restart: unless-stopped
+    command: server -s3 -s3.port=8333 -dir=/data -master.volumeSizeLimitMB=1024
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "9000:8333" # 对外仍是 9000，.env 的 S3_ENDPOINT 不用改
+      - "9333:9333" # master
     volumes:
-      - miniodata:/data
-    healthcheck:
-      # 原来的 ["CMD","mc","ready","local"] 依赖 minio-init 容器里的 alias，在 minio 容器里没有，
-      # 会永远 unhealthy。改用 MinIO 自带的存活探针。
-      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  # 建桶后退出：原文与切片放在 studygraph 桶里
-  minio-init:
-    image: minio/mc:latest
-    container_name: studygraph-minio-init
-    depends_on:
-      - minio
-    entrypoint: >
-      /bin/sh -c "
-      until mc alias set local http://minio:9000 minioadmin minioadmin >/dev/null 2>&1; do sleep 1; done;
-      mc mb --ignore-existing local/studygraph;
-      echo 'bucket ready';
-      "
+      - s3data:/data
+    # 不设 healthcheck：SeaweedFS 镜像里没有 wget/curl，任何探针都是假红。
+    # 就绪性由 scripts 里的 S3 往返校验（put → get → sha256 比对 → delete）证明，比探针更强。
 
 volumes:
   pgdata:
   redisdata:
-  miniodata:
+  s3data:

@@ -15,3 +15,8 @@ export type {
 } from './ports.ts'
 
 export * from './thresholds.ts'
+
+export { canonicalJson, computeFingerprint, promptVersionOf } from './fingerprint.ts'
+export type { FingerprintInput } from './fingerprint.ts'
+
+export * from './artifacts/index.ts'

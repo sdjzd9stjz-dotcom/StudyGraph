@@ -127,6 +127,27 @@ executor 产出的每条论断都带 `spanIds`；`SpanResolver` 解析失败（s
 **禁止实现的路径**：任何「模型直接生成概念卡正文」的捷径。
 `card` 节点的输入必须是 `extract` 的 claims（已带 spanIds），不允许从零生成。
 
+### 3.1 span 偏移相对于什么文本（SG-SUP-004 §3.5 要求现在定死）
+
+**相对于「该页的纯文本」**（选项 a）。精确约定：
+
+| 项 | 约定 |
+| --- | --- |
+| 页文本 | 该页所有文本项按阅读顺序拼接，**不做空白压缩、不做字符替换、不做 Unicode 规范化** |
+| `page` | 从 1 开始 |
+| `charStart` / `charEnd` | 页内字符偏移（UTF-16 code unit，与 JS `String.prototype.slice` 一致），`[start, end)` 左闭右开 |
+| 恒等式 | `span.text === pageText.slice(charStart, charEnd)` |
+
+为什么不用整篇文档的偏移：它依赖页间分隔符的约定，换一个 PDF 解析器就会整体错位；
+页内偏移是自包含的，第三方拿同一页文本就能复现。
+
+为什么不用"规范化后的字符串"：规范化规则一调整，历史 span 全部漂移，而且**漂移是静默的**——
+界面照常高亮，只是高亮到了另一段话上。这比报错危险得多。
+
+校验口径：`apps/api/src/spans/resolver.ts` 的 `verifySpan()` 逐字符比对，
+并在 `packages/contracts/src/artifacts/span.ts` 的注释里重复了同一段定义——
+两处必须是同一段话，改一处就要改另一处。
+
 ---
 
 ## 4. 执行语义：显式触发 + 指纹缓存

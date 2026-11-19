@@ -28,6 +28,11 @@ export const ERROR_CODES = [
   'EDGE_DUPLICATE',
   // 视图
   'VIEW_NOT_IMPLEMENTED',
+  // 执行（M2）
+  'EXECUTOR_NOT_IMPLEMENTED',
+  'LLM_CREDENTIAL_MISSING',
+  'LLM_PROVIDER_ERROR',
+  'SOURCE_HAS_NO_TEXT_LAYER',
   // 通用
   'VALIDATION_FAILED',
   'INTERNAL_ERROR',
@@ -101,3 +106,28 @@ export const viewNotImplemented = (view: string, plan: string) =>
 
 export const validationFailed = (details: Record<string, unknown>) =>
   new AppError(400, 'VALIDATION_FAILED', '请求参数校验失败', details)
+
+/** 未实现的节点被调用：501，不许静默返回空对象。 */
+export const executorNotImplemented = (type: string, plan: string) =>
+  new AppError(501, 'EXECUTOR_NOT_IMPLEMENTED', `节点 ${type} 的 executor 尚未实现（计划：${plan}）`, {
+    type,
+    plan,
+  })
+
+/** 没有可用凭据：503（配置问题，不是客户端的错），且绝不能伪装成成功。 */
+export const llmCredentialMissing = (provider: string) =>
+  new AppError(503, 'LLM_CREDENTIAL_MISSING', `没有可用的 ${provider} 凭据：请在 .env 配置 API key，或通过 BYOK 上传`, {
+    provider,
+  })
+
+export const llmProviderError = (provider: string, message: string) =>
+  new AppError(502, 'LLM_PROVIDER_ERROR', `${provider} 调用失败：${message}`, { provider })
+
+/** 扫描版 PDF：明确告诉学生为什么不能解析，而不是静默产出空卡。 */
+export const sourceHasNoTextLayer = (filename: string) =>
+  new AppError(
+    422,
+    'SOURCE_HAS_NO_TEXT_LAYER',
+    `这份 PDF 没有文字层（可能是扫描件），M2 暂不支持 OCR：${filename}`,
+    { filename },
+  )

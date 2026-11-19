@@ -9,16 +9,24 @@
 | Node.js | ≥ 22.11 | 本机 26.13.1（原生跑 `.ts`、`node:test`） |
 | pnpm | 11.x | 本机 11.28.5，**不在 PATH 上**，调用方式见 §4 |
 | PostgreSQL | 16 + pgvector | `Concept.embedding vector(1536)`、递归 CTE |
-| Redis | 7+ | BullMQ、SSE 广播、OAuth 授权码（M2 起需要） |
-| S3 兼容存储 | MinIO 即可 | 原文、切片、大产物（M2 起需要） |
+| Redis | 7+ | BullMQ、SSE 广播、OAuth 授权码 |
+| S3 兼容存储 | SeaweedFS（原计划 MinIO） | 原文、切片、大产物 |
 
-## 2. 本机现状（2026-11-18）
+> **2026-11-19 变更**：MinIO 已迁离 Docker Hub（`minio/minio` 不存在）、
+> quay 的 token 认证在本机代理链路上恒 401、官方 Windows 二进制路径已 410。
+> 改用 `chrislusf/seaweedfs` 的 S3 网关（对外仍映射到 9000，`.env` 不用改）。
+> `ObjectStore` 只依赖 S3 协议，换回 MinIO 只改 image 与端口。
 
-已安装：Node 26.13.1、git 2.56.1。
+## 2. 本机现状（2026-11-19）
 
-**缺失：Docker、PostgreSQL、Redis、MinIO。** 因此 `pnpm db:migrate` 与任何需要连库的
-验收都无法执行。`docker-compose.yml` 已就绪，装完 Docker Desktop 后
-`docker compose up -d postgres` 即可（先只起 postgres，Redis/MinIO 到 M2 再说）。
+已安装：Node 26.13.1、git 2.56.1、Docker Desktop 29.9.3。
+
+容器：`studygraph-postgres`（healthy）、`studygraph-redis`（healthy）、`studygraph-s3`（Up，无探针）。
+缺的就是**模型凭据**与**真实课件 PDF**（M2 的两个硬阻塞，见 `docs/milestone-2.md` §1）。
+
+Docker daemon 走的是代理（Docker Desktop → Settings → Resources → Proxies，
+或 `%APPDATA%\Docker\settings-store.json` 的 `overrideProxyHttp`）；不配代理会撞
+`x509: certificate signed by unknown authority`。
 
 ## 3. 这台机器上已经踩过的坑
 
@@ -167,6 +175,17 @@ node ../../node_modules/next/dist/bin/next start -p 3000
   `NEXT_PUBLIC_API_BASE_URL` / `NEXT_PUBLIC_DEV_PAT` / `STUDYGRAPH_DEV_PAT`
 - `next build` 依赖 `experimental.externalDir`：web 直接引用 `packages/contracts` 的端口矩阵，
   **不允许为了打包方便复制第二份端口表**（前后端同源是硬要求）
+
+### 4.4 M2 的新增命令
+
+```bash
+node scripts/registry-self-check.mjs   # 17 个类型的执行器自检（0 implemented + 17 planned）
+node scripts/s3-roundtrip.mjs          # 对象存储往返：put → get → sha256 比对 → delete → 读不回
+```
+
+- `POST /v1/nodes/:id/run?dryRun=true` 与不带参数的同名请求，在 executor 未实现时都应返回
+  **501 `EXECUTOR_NOT_IMPLEMENTED`**（带 `details.plan`），绝不会返回空对象
+- 未配置 `S3_ENDPOINT` / `S3_BUCKET` 时，`ObjectStore.put/get` 直接抛错（不会静默降级）
 
 ## 5. 首次建库步骤（DB 就绪后按顺序做）
 

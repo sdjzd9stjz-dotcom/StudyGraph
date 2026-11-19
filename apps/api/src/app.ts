@@ -9,6 +9,7 @@ import { registerCanvasRoutes } from './routes/canvases.ts'
 import { registerEdgeRoutes } from './routes/edges.ts'
 import { registerGraphRoutes } from './routes/graph.ts'
 import { registerNodeRoutes } from './routes/nodes.ts'
+import { registerRunRoutes } from './routes/run.ts'
 import { createObjectStore } from './storage/object-store.ts'
 
 export interface BuildAppOptions {
@@ -28,6 +29,21 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
         ? false
         : { level: process.env.LOG_LEVEL ?? 'info', transport: undefined },
     bodyLimit: 2 * 1024 * 1024,
+  })
+
+  // 空 body 容忍：curl -X POST 带 content-type 却没给 body 时，Fastify 默认 400。
+  // 对 /run、/mark-stale 这类"没有参数"的端点，这是客户端的坑而不是错误请求。
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (_request, body, done) => {
+    const text = (body as string).trim()
+    if (text.length === 0) {
+      done(null, {})
+      return
+    }
+    try {
+      done(null, JSON.parse(text))
+    } catch (error) {
+      done(error as Error, undefined)
+    }
   })
 
   // ── 统一错误信封 ────────────────────────────────────────────────────────────
@@ -80,12 +96,20 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
 
   // ── 业务路由 ───────────────────────────────────────────────────────────
   const guard = createGuard(prisma)
-  const objectStore = createObjectStore({ endpoint: env.S3_ENDPOINT, bucket: env.S3_BUCKET })
+  const objectStore = createObjectStore({
+    endpoint: env.S3_ENDPOINT,
+    bucket: env.S3_BUCKET,
+    region: env.S3_REGION,
+    accessKeyId: env.S3_ACCESS_KEY_ID,
+    secretAccessKey: env.S3_SECRET_ACCESS_KEY,
+    forcePathStyle: true,
+  })
 
   registerCanvasRoutes(app, { prisma, guard, objectStore })
   registerNodeRoutes(app, { prisma, guard })
   registerEdgeRoutes(app, { prisma, guard })
   registerGraphRoutes(app, { prisma, guard })
+  registerRunRoutes(app, { prisma, guard })
 
   return app
 }
