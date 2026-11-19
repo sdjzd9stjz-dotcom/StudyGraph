@@ -2,6 +2,9 @@ import { NODE_TYPES, isNodeType } from '../../../../packages/contracts/src/index
 import type { NodeType } from '../../../../packages/contracts/src/index.ts'
 import { executorNotImplemented } from '../lib/errors.ts'
 import type { NodeExecutor } from './contract.ts'
+// 循环导入是有意的：executors/index 只把 registerExecutor 当函数用（函数声明会提升），
+// 而自检必须在**任何人**调用时都能看到内置执行器，不能依赖"调用方先注册过"。
+import { registerBuiltinExecutors } from './executors/index.ts'
 
 /**
  * 执行器注册表 + 启动自检（SG-SUP-004 §3.3）。
@@ -71,6 +74,9 @@ export interface SelfCheckReport {
  * 关键是**对原始键集合检错，不要先过滤**：过滤之后的集合天然合法，多出来的会被静默吃掉。
  */
 export function selfCheck(): SelfCheckReport {
+  // 自检必须自己保证"内置执行器已注册"：否则任何人裸导入 registry 调 selfCheck()，
+  // 都会看到 4 个已实现的节点被判成"既未实现也没有计划"（SG-SUP-010 复验暴露）。
+  registerBuiltinExecutors()
   const implemented = implementedTypes()
   // 原始键，不过滤
   const plannedKeys = Object.keys(PLANNED_PLAN)
