@@ -18,6 +18,14 @@ importers:
         specifier: 6.19.3
         version: 6.19.3
 
+  apps/api:
+    dependencies:
+      '@studygraph/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+
+  packages/contracts: {}
+
   packages/db:
     dependencies:
       '@prisma/client':

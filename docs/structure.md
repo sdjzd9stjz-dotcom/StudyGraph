@@ -49,9 +49,9 @@ studygraph/
 │  │  │  │  ├─ proficiency.ts               ⬜ 熟练度公式 v1（见 architecture.md §2.2）
 │  │  │  │  ├─ error-tags.ts                ⬜ 错因 → 补丁映射
 │  │  │  │  └─ graph/
-│  │  │  │     ├─ dag.ts                    ⬜ 拓扑排序 + 环路检测
+│  │  │  │     ├─ dag.ts                    ✅ collectDownstream / collectUpstream / topoSort / CycleError
 │  │  │  │     ├─ projection.ts             ⬜ 三视图投影（同一实体，不同边与布局）
-│  │  │  │     └─ queries.ts                ⬜ 递归 CTE 封装
+│  │  │  │     └─ queries.ts                ⬜ 递归 CTE 封装（SQL 版已写在 packages/db/sql/downstream.sql）
 │  │  │  ├─ llm/
 │  │  │  │  ├─ gateway.ts                   ⬜ 统一抽象：complete() + 结构化输出
 │  │  │  │  ├─ providers/openai.ts anthropic.ts           ⬜ 首期两个供应商
@@ -88,14 +88,17 @@ studygraph/
 │     ├─ lib/api-client.ts sse.ts yjs/provider.ts yjs/node-map.ts            ⬜
 │     └─ package.json                                                       ⬜
 ├─ packages/
-│  ├─ contracts/src/                        ⬜ 前后端共享的 zod 契约（不含 React）
-│  │  ├─ node-types.ts                      ⬜ 17 个类型的判别联合
-│  │  ├─ ports.ts                           ⬜ 端口类型与兼容矩阵（UI 与 service 双端同源）
-│  │  ├─ params/*.ts                        ⬜ 每节点 params schema
+│  ├─ contracts/src/                        🟡 前后端共享契约（不含 React）
+│  │  ├─ index.ts                           ✅ 统一出口
+│  │  ├─ node-types.ts                      ✅ 17 个类型 + 批次表
+│  │  ├─ edges.ts                           ✅ 三种边语义（与 Prisma 逐字一致）
+│  │  ├─ ports.ts                           ✅ 端口类型 + 入口端口 + validateConnection()
+│  │  ├─ params/*.ts                        ⬜ 每节点 params schema（zod，M2 引入）
 │  │  ├─ artifacts/*.ts                     ⬜ 产物 schema（含 SolutionStep）
 │  │  ├─ error-tags.ts                      ⬜ 6 类错因 + 种子标签
 │  │  ├─ scopes.ts                          ⬜ canvas:read / write / run:execute / problem:read
-│  │  └─ thresholds.ts                      ⬜ proficiency 0.6 等阈值常量
+│  │  ├─ thresholds.ts                      ✅ proficiency 0.6 等阈值常量
+│  │  └─ ../test/ports.test.ts              ✅ 27 条断言（N1–N5 / P1–P8 / schema 漂移）
 │  ├─ db/
 │  │  ├─ prisma/schema.prisma               ✅ 全量领域模型
 │  │  ├─ prisma/migrations/

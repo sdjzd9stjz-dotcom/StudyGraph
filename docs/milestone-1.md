@@ -12,9 +12,12 @@
 | --- | --- |
 | Prisma schema 全量落地 | ✅ 已验收（SG-SUP-001 §1） |
 | guards 进 migration 链路 | ✅ SQL 已验证（PGlite/PG17），⏳ 待容器复验 |
-| 画布 CRUD | ⬜ 未开始 |
+| 画布 CRUD | ⬜ 未开始（阻塞：无数据库） |
 | 17 个占位卡片 + 拖拽 | ⬜ 未开始 |
-| 端口校验（前端 + 后端 400） | 🟡 端口矩阵已定（见 §3），代码未写 |
+| 端口矩阵（契约层） | ✅ 17×2 已定 + 27 条断言通过（`packages/contracts`） |
+| 端口校验（前端 + 后端 400） | 🟡 判定函数已就绪；HTTP 400 待数据库 |
+| stale 下游收集（纯函数 + 单测） | ✅ 11 条断言通过（`apps/api/src/domain/graph/dag.ts`） |
+| stale 下游收集（SQL 递归 CTE） | 🟡 已写（`packages/db/sql/downstream.sql`），待数据库验证 |
 | `docs/milestone-1.md` | 🟡 本文件 |
 
 ---
@@ -111,6 +114,11 @@ curl -sS -X POST "$API_BASE_URL/v1/canvases/$CV/edges" \
 
 端口命名：简单节点用 `in` / `out`；需要两路输入的节点用语义名（`problem` / `solution`）。
 
+**入口端口（⤓）**：数据来自画布外部（粘贴题目 / 提交作答），不由连线供给。
+向入口端口连线必须 400 `EDGE_PORT_EXTERNAL`，UI 上渲染成"上传/粘贴槽"而不是连接点。
+这是写单测时逼出来的约束——`ProblemInput` / `AnswerRecord` 没有任何节点能产出，
+如果允许连线就会产生一条永远拿不到数据的死边。
+
 | # | type | 输入端口 → 类型 | 输出端口 → 类型 | 语义 |
 | --- | --- | --- | --- | --- |
 | 1 | `source` | —（文件由 params/上传提供） | `out` → `SourceDoc` | 原文 + span 索引 |
@@ -119,39 +127,53 @@ curl -sS -X POST "$API_BASE_URL/v1/canvases/$CV/edges" \
 | 4 | `card` | `in` ← `ConceptClaims` | `out` → `ConceptCardSet` | 概念卡（已入库、已校验引用） |
 | 5 | `prereq` | `in` ← `ConceptCardSet` | `out` → `GraphPatch` | 先修关系补丁（PROPOSED） |
 | 6 | `quiz` | `in` ← `ConceptCardSet` | `out` → `ProblemSet` | 概念自测题草稿 |
-| 7 | `grade` | `in` ← `AnswerRecord` | `out` → `GradeResult` | 判分 + 错因 |
+| 7 | `grade` | `in` ⤓ `AnswerRecord` | `out` → `GradeResult` | 判分 + 错因 |
 | 8 | `review` | `in` ← `GradeResult` | `out` → `ReviewPlan` | FSRS 调度写入 |
 | 9 | `gate` | `in` ← `ProblemSet` | `out` → `ProblemSet` | 人工成本/质量闸门（通过后原样放行） |
-| 10 | `probe` | `problem` ← `ProblemInput` | `out` → `ProbeProfile` | 题型/考点/隐含条件 |
-| 11 | `method` | `problem` ← `ProblemInput`，`solution` ← `SolutionTrace` | `out` → `MethodCard` | 解法抽取 |
-| 12 | `solve` | `problem` ← `ProblemInput` | `out` → `SolutionTrace` | 分步解法（不可跳步） |
+| 10 | `probe` | `problem` ⤓ `ProblemInput` | `out` → `ProbeProfile` | 题型/考点/隐含条件 |
+| 11 | `method` | `problem` ⤓ `ProblemInput`，`solution` ← `SolutionTrace` | `out` → `MethodCard` | 解法抽取 |
+| 12 | `solve` | `problem` ⤓ `ProblemInput` | `out` → `SolutionTrace` | 分步解法（不可跳步） |
 | 13 | `diagnose` | `in` ← `GradeResult` | `out` → `Diagnosis` | 错因归因 + 补丁 |
 | 14 | `variant` | `in` ← `ProblemSet` | `out` → `ProblemSet` | 六维变式 |
 | 15 | `distractor` | `in` ← `ProblemSet` | `out` → `ProblemSet` | 干扰项 + ErrorTag |
 | 16 | `check` | `in` ← `ProblemSet` | `out` → `VerifiedProblems` | 三检闸门 |
 | 17 | `paper` | `in` ← `VerifiedProblems` | `out` → `PaperSpec` | 组卷 |
 
+终端产物（`GraphPatch` / `ProbeProfile` / `ReviewPlan` / `Diagnosis` / `MethodCard` / `PaperSpec`）
+不连下游：它们落库或落卡片库，不是边上的中间态。
+
 ### 必须 400 的负向用例（前端拦 + 后端 400）
 
-| # | from | to | 期望 |
+| # | from | to | 期望 errorCode |
 | --- | --- | --- | --- |
-| N1 | `source.out`（SourceDoc） | `card.in`（ConceptClaims） | 400 `EDGE_PORT_TYPE_MISMATCH` |
-| N2 | `chunk.out`（ChunkSet） | `paper.in`（VerifiedProblems） | 400 `EDGE_PORT_TYPE_MISMATCH` |
-| N3 | `extract.out`（ConceptClaims） | `grade.in`（AnswerRecord） | 400 `EDGE_PORT_TYPE_MISMATCH` |
-| N4 | `card.out`（ConceptCardSet） | `chunk.in`（SourceDoc） | 400 `EDGE_PORT_TYPE_MISMATCH` |
+| N1 | `source.out`（SourceDoc） | `card.in`（ConceptClaims） | `EDGE_PORT_TYPE_MISMATCH` |
+| N2 | `chunk.out`（ChunkSet） | `paper.in`（VerifiedProblems） | `EDGE_PORT_TYPE_MISMATCH` |
+| N3 | `extract.out`（ConceptClaims） | `check.in`（ProblemSet） | `EDGE_PORT_TYPE_MISMATCH` |
+| N4 | `card.out`（ConceptCardSet） | `chunk.in`（SourceDoc） | `EDGE_PORT_TYPE_MISMATCH` |
+| N5 | `chunk.out`（ChunkSet） | `solve.problem`（ProblemInput ⤓） | `EDGE_PORT_EXTERNAL` |
+
+> N3 原定 `extract.out → grade.in`，但 `grade.in` 是入口端口，会先命中 `EDGE_PORT_EXTERNAL`。
+> 入口端口判定在类型判定之前，报错更贴近真实原因。
 
 ### 合法用例（正例，防止"全拒绝也算通过"）
 
-| # | from | to |
+| # | from → to | 端口类型 |
 | --- | --- | --- |
 | P1 | `source.out` → `chunk.in` | SourceDoc |
 | P2 | `chunk.out` → `extract.in` | ChunkSet |
 | P3 | `extract.out` → `card.in` | ConceptClaims |
 | P4 | `card.out` → `prereq.in` | ConceptCardSet |
-| P5 | `problem.out` → `solve.problem` | ProblemInput |
+| P5 | `card.out` → `quiz.in` | ConceptCardSet |
 | P6 | `solve.out` → `method.solution` | SolutionTrace |
 | P7 | `variant.out` → `check.in` | ProblemSet |
 | P8 | `check.out` → `paper.in` | VerifiedProblems |
+
+> P5 原定 `problem.out → solve.problem`，但 `ProblemInput` 没有生产节点（见上文入口端口），
+> 改为 `card.out → quiz.in`。
+
+**实现与验证**：矩阵在 `packages/contracts/src/ports.ts`，`validateConnection()` 是纯函数；
+`packages/contracts/test/ports.test.ts` 27 条断言覆盖 N1–N5、P1–P8、入口端口结构性约束、
+以及与 `schema.prisma` 的 `NodeType` / `EdgeKind` 逐字比对。
 
 ---
 
@@ -160,10 +182,10 @@ curl -sS -X POST "$API_BASE_URL/v1/canvases/$CV/edges" \
 M1 不实现执行，但必须先有**能跑的**下游收集：
 
 - 存储层：`Edge @@index([fromNodeId])` 已就位
-- 查询：`WITH RECURSIVE` 沿 `Edge` 反向展开，环路用 `path` 数组保护
-- 单测：造 `A → B → C`，`collectDownstream(A)` 必须 `toEqual(expect.arrayContaining([B, C]))`
-
-实现位置：`apps/api/src/domain/graph/dag.ts`（M1 内），SQL 版本在 `packages/db/prisma` 侧注释留档。
+- 纯函数：`apps/api/src/domain/graph/dag.ts` 的 `collectDownstream` / `collectUpstream` / `topoSort`
+- SQL：`packages/db/sql/downstream.sql` 的递归 CTE（`path` 数组防环，`depth < 64` 防拖库）
+- 单测：造 `A → B → C`，产出的必须**就是** `[B, C]`（`assert.deepEqual`，不是 `toBeDefined`）
+- 结果：`apps/api/test/unit/dag.test.ts` 11 条断言全绿（链 / 菱形 / 环 / 自环 / 悬空边 / kinds 过滤 / 拓扑排序）
 
 ---
 
@@ -173,8 +195,10 @@ M1 不实现执行，但必须先有**能跑的**下游收集：
 - [ ] `GET /v1/canvases/:id` → 200，包含节点与边
 - [ ] 17 个节点类型都能拖上画布（占位卡片，不执行）
 - [ ] N1–N4 四个负向用例：前端拦截 + 后端 400（curl 绕开 UI 实测）
-- [ ] P1–P8 八个正例全部 201
-- [ ] `collectDownstream` 单测通过（A→B→C）
+  - 契约层已覆盖（含新增的 N5 入口端口）：`node packages/contracts/test/ports.test.ts` → 27 pass
+- [ ] N5 入口端口连线 400（契约层已通过，HTTP 待数据库）
+- [ ] P1–P8 八个正例全部 201（契约层已通过）
+- [x] `collectDownstream` 单测通过（A→B→C）→ `node apps/api/test/unit/dag.test.ts` 11 pass
 - [ ] 跨画布连边被拒绝（服务层 400 + DB 外键兜底）
 - [ ] `DELETE /v1/canvases/:id` 后 `pg_constraint` 无孤儿行、MinIO 无残留对象
 

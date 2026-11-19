@@ -1,0 +1,9 @@
+{
+  "name": "@studygraph/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:unit": "node test/unit/dag.test.ts"
+  }
+}

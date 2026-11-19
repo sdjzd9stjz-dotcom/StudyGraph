@@ -116,6 +116,22 @@ node scripts/check-guards-sync.mjs   # guards.sql 与 guards migration 是否逐
 node scripts/verify-sql.mjs          # 用 PGlite(PG17 WASM) 跑两个 migration + 负向用例
 ```
 
+### 4.1 单测怎么跑（M1 起）
+
+```bash
+node packages/contracts/test/ports.test.ts     # 端口矩阵 27 条
+node apps/api/test/unit/dag.test.ts            # DAG / 下游收集 11 条
+```
+
+三条硬规矩：
+
+1. **直接跑文件，不要 `node --test <目录>`**：多文件模式会 spawn 子进程，本机沙箱下 EPERM（坑 2）。
+2. **不要通过包名 import `@studygraph/contracts`**：Node 的类型剥离对 node_modules 内的文件直接报
+   `ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`（pnpm 的 workspace 链接会解析到 node_modules）。
+   M1 阶段 `apps/api/src/domain/graph/dag.ts` 用相对路径直连 `packages/contracts/src/index.ts`；
+   M2 引入 tsc 构建后改回包名。
+3. 断言用 Node 内置的 `node:assert/strict`，不引入 vitest —— 保持"零新增依赖"，测试框架 M2 再定。
+
 ## 5. 首次建库步骤（DB 就绪后按顺序做）
 
 ```bash
