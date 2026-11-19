@@ -112,35 +112,57 @@ node scripts/prisma.mjs migrate diff --from-empty --to-schema-datamodel packages
 两条零依赖校验：
 
 ```bash
-node scripts/check-guards-sync.mjs   # guards.sql 与 guards migration 是否逐字节一致
-node scripts/verify-sql.mjs          # 用 PGlite(PG17 WASM) 跑两个 migration + 负向用例
+node scripts/check-guards-sync.mjs   # guards.sql 与 guard migrations 的语句流是否一致
+node scripts/check-drift.mjs         # 漂移防护：diff 里出现删手写索引就 exit 1
+node scripts/verify-sql.mjs          # PGlite 快速回归（不是验收证据）
 ```
 
 ### 4.1 单测怎么跑（M1 起）
 
 ```bash
-node packages/contracts/test/ports.test.ts     # 端口矩阵 27 条
-node apps/api/test/unit/dag.test.ts            # DAG / 下游收集 11 条
+node packages/contracts/test/ports.test.ts                       # 端口矩阵 27 条
+node apps/api/test/unit/dag.test.ts                              # DAG / 下游收集 13 条
+node apps/api/test/integration/downstream-equivalence.test.ts    # 真库等价性 2 条（需容器）
 ```
 
 三条硬规矩：
 
-1. **直接跑文件，不要 `node --test <目录>`**：多文件模式会 spawn 子进程，本机沙箱下 EPERM（坑 2）。
+1. **直接跑文件，不要 `node --test <目录>`**：多文件模式会 spawn 子进程，沙箱下 EPERM（坑 2）。
 2. **不要通过包名 import `@studygraph/contracts`**：Node 的类型剥离对 node_modules 内的文件直接报
    `ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`（pnpm 的 workspace 链接会解析到 node_modules）。
    M1 阶段 `apps/api/src/domain/graph/dag.ts` 用相对路径直连 `packages/contracts/src/index.ts`；
    M2 引入 tsc 构建后改回包名。
 3. 断言用 Node 内置的 `node:assert/strict`，不引入 vitest —— 保持"零新增依赖"，测试框架 M2 再定。
 
+### 4.2 `migrate dev` 会删手写索引（已确认，必须防）
+
+Prisma 无法从 `schema.prisma` 推出 `Concept_embedding_hnsw`（HNSW）与 `Concept_name_trgm`（gin_trgm_ops），
+所以 `migrate diff` 会把它们当成多余索引并且生成：
+
+```sql
+DROP INDEX "Concept_embedding_hnsw";
+DROP INDEX "Concept_name_trgm";
+```
+
+**规矩**：
+
+- 日常应用迁移只用 `node scripts/prisma.mjs migrate deploy`
+- `migrate dev`（`pnpm db:migrate:dev`）只在改 schema 时用，且**生成的 migration 必须人工检查**
+- 出现上面两行 `DROP INDEX` 一律删掉再应用
+- 提交前跑 `node scripts/check-drift.mjs`：检测到就 exit 1 并打印原因（已实测会拦）
+
 ## 5. 首次建库步骤（DB 就绪后按顺序做）
 
 ```bash
 docker compose up -d postgres
 
-# 两个 migration 一起应用：20261118030000_init（表/枚举/外键）+ 20261118030100_guards（CHECK/触发器/视图）
+# 三个 migration 一起应用：
+#   20261118030000_init             表 / 枚举 / 外键 / 复合外键
+#   20261118030100_guards           CHECK 7 / 触发器 6 / 视图 4 / 索引 2
+#   20261119000000_edge_no_self_loop CHECK 1（禁止自环边）
 node scripts/prisma.mjs migrate deploy --schema packages/db/prisma/schema.prisma
 
-# 自检（预期 7 / 6 / 4）
+# 自检（PG16 实测：8 / 6 / 4，CHECK 由 7 变 8 是自环约束带来的）
 psql "$DATABASE_URL" -c "SELECT count(*) FROM pg_constraint WHERE contype='c' AND connamespace='public'::regnamespace;"
 psql "$DATABASE_URL" -c "SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal;"
 psql "$DATABASE_URL" -c "SELECT count(*) FROM pg_views WHERE schemaname='public';"

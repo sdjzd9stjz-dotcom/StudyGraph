@@ -1,6 +1,6 @@
 # M1 · 画布底座
 
-> **状态：未开工（开工前整改阶段）**
+> **状态：整改期（§2 闸门已完成，画布 CRUD 未开始）**
 > 本文件在 M1 通过验收前，只写**设计决定**与**待验证清单**，不写任何"已完成"。
 > 每一项验收通过后，把命令与输出补进下面的「验收记录」。
 
@@ -11,13 +11,16 @@
 | 项 | 状态 |
 | --- | --- |
 | Prisma schema 全量落地 | ✅ 已验收（SG-SUP-001 §1） |
-| guards 进 migration 链路 | ✅ SQL 已验证（PGlite/PG17），⏳ 待容器复验 |
-| 画布 CRUD | ⬜ 未开始（阻塞：无数据库） |
+| 三个 migration 在 PG16 上应用 | ✅ 已应用（含 `20261119000000_edge_no_self_loop`） |
+| 自环边约束 | ✅ PG16 实测拒绝（`edge_no_self_loop`） |
+| 迁移漂移防护 | ✅ `scripts/check-drift.mjs` 实测 exit 1 |
+| stale 语义定死（只沿 DERIVED_FROM） | ✅ 纯函数 / SQL / 文档 / 等价性测试四者一致 |
+| 画布 CRUD | ⬜ 未开始（本轮只做到闸门） |
 | 17 个占位卡片 + 拖拽 | ⬜ 未开始 |
 | 端口矩阵（契约层） | ✅ 17×2 已定 + 27 条断言通过（`packages/contracts`） |
-| 端口校验（前端 + 后端 400） | 🟡 判定函数已就绪；HTTP 400 待数据库 |
-| stale 下游收集（纯函数 + 单测） | ✅ 11 条断言通过（`apps/api/src/domain/graph/dag.ts`） |
-| stale 下游收集（SQL 递归 CTE） | 🟡 已写（`packages/db/sql/downstream.sql`），待数据库验证 |
+| 端口校验（前端 + 后端 400） | 🟡 判定函数就绪；HTTP 400 未开始 |
+| stale 下游收集（纯函数） | ✅ 13 条断言（`dag.ts`） |
+| stale 下游收集（SQL 递归 CTE） | ✅ PG16 等价性 2 条断言 |
 | `docs/milestone-1.md` | 🟡 本文件 |
 
 ---
@@ -177,15 +180,21 @@ curl -sS -X POST "$API_BASE_URL/v1/canvases/$CV/edges" \
 
 ---
 
-## 4. stale 传播（SG-SUP-001 §7.2①）
+## 4. stale 传播（SG-SUP-001 §7.2① + SG-SUP-002 §2.1）
 
 M1 不实现执行，但必须先有**能跑的**下游收集：
 
+- **语义（已定死）**：只沿 `DERIVED_FROM`。`CITES` 引用原文、`PREREQUISITE` 是知识结构，
+  都不是数据依赖。理由写在 `docs/architecture.md` §4.0（SG-SUP-002 要求"要么采纳要么反驳"，这里采纳）
 - 存储层：`Edge @@index([fromNodeId])` 已就位
-- 纯函数：`apps/api/src/domain/graph/dag.ts` 的 `collectDownstream` / `collectUpstream` / `topoSort`
-- SQL：`packages/db/sql/downstream.sql` 的递归 CTE（`path` 数组防环，`depth < 64` 防拖库）
-- 单测：造 `A → B → C`，产出的必须**就是** `[B, C]`（`assert.deepEqual`，不是 `toBeDefined`）
-- 结果：`apps/api/test/unit/dag.test.ts` 11 条断言全绿（链 / 菱形 / 环 / 自环 / 悬空边 / kinds 过滤 / 拓扑排序）
+- 纯函数：`apps/api/src/domain/graph/dag.ts` 的 `collectDownstream` / `collectUpstream` / `topoSort`，
+  默认 `STALE_EDGE_KINDS = ['DERIVED_FROM']`；要看全部关系显式传 `ALL_EDGE_KINDS`
+- SQL：`packages/db/sql/downstream.sql` 同样只走 `DERIVED_FROM`，输出 `depth` 与 `truncated`
+  （深度上限 64 会置 `truncated=true`，不再静默截断）
+- 单测：造 `A → B → C`，产出必须**就是** `[B, C]`（`assert.deepEqual`）
+- 等价性：`apps/api/test/integration/downstream-equivalence.test.ts` 在真实 PG16 上
+  同一张图跑两边（含 `CITES` / `PREREQUISITE` 边）做 `deepEqual`
+- 结果：单测 13 条 + 等价性 2 条全绿；`CycleError.cycle` 已改为真实环路径（P2-4）
 
 ---
 
@@ -194,13 +203,13 @@ M1 不实现执行，但必须先有**能跑的**下游收集：
 - [ ] `POST /v1/canvases` → 201，返回 id
 - [ ] `GET /v1/canvases/:id` → 200，包含节点与边
 - [ ] 17 个节点类型都能拖上画布（占位卡片，不执行）
-- [ ] N1–N4 四个负向用例：前端拦截 + 后端 400（curl 绕开 UI 实测）
-  - 契约层已覆盖（含新增的 N5 入口端口）：`node packages/contracts/test/ports.test.ts` → 27 pass
-- [ ] N5 入口端口连线 400（契约层已通过，HTTP 待数据库）
+- [ ] N1–N5 五条负向用例：后端 400（curl 绕开 UI 实测）
+  - 契约层已覆盖：`node packages/contracts/test/ports.test.ts` → 27 pass
 - [ ] P1–P8 八个正例全部 201（契约层已通过）
-- [x] `collectDownstream` 单测通过（A→B→C）→ `node apps/api/test/unit/dag.test.ts` 11 pass
-- [ ] 跨画布连边被拒绝（服务层 400 + DB 外键兜底）
-- [ ] `DELETE /v1/canvases/:id` 后 `pg_constraint` 无孤儿行、MinIO 无残留对象
+- [x] `collectDownstream` 单测通过（A→B→C）→ 13 pass
+- [x] 纯函数与 SQL 等价性（真库）→ 2 pass
+- [ ] 跨画布连边被拒绝（服务层 400 + DB 外键兜底；DB 侧已验）
+- [ ] `DELETE /v1/canvases/:id` 后无孤儿行、MinIO 无残留对象
 
 ---
 

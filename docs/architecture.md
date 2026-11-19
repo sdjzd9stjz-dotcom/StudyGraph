@@ -12,15 +12,17 @@
 | --- | --- | --- |
 | Prisma schema 语法与关系完整 | ✅ 已验证 | `prisma validate` → valid |
 | Prisma Client 可生成 | ✅ 已验证 | `prisma generate` |
-| schema 能翻译成 PostgreSQL DDL | ✅ 已验证 | `prisma migrate diff` → 34 表 / 27 枚举 / 53 外键 / 66 索引 |
-| `vector(1536)` 与扩展进入 DDL | ✅ 已验证 | migration.sql 含 `CREATE EXTENSION` 与 `vector(1536)` 列 |
-| 两个 migration 能在真实引擎上执行 | ✅ 已验证（PGlite/PG17 WASM） | `scripts/verify-sql.mjs`：init 186 条语句 + guards 23 条 |
-| CHECK / 触发器 / 视图行为正确 | ✅ 已验证（同上） | 7 个 CHECK、6 个触发器、4 个视图；四个负向/正向用例全绿 |
-| 跨画布连边被数据库拒绝 | ✅ 已验证（同上） | 复合外键 `Edge_canvasId_toNodeId_fkey` 报错 |
-| 迁移在 `pgvector/pgvector:pg16` 容器上执行 | ❌ 未验证 | 本机无 Docker（待用户安装） |
+| schema 能翻译成 PostgreSQL DDL | ✅ 已验证 | `prisma migrate diff` → 34 表 / 27 枚举 |
+| 三个 migration 在 **PG16 容器**上执行 | ✅ 已验证 | `_prisma_migrations` 三行、`applied_steps_count=1`、无回滚 |
+| CHECK / 触发器 / 视图计数 | ✅ 已验证（PG16） | 8 / 6 / 4（自环约束加入后 CHECK 由 7 变 8） |
+| 溯源触发器拒绝无引用 VERIFIED | ✅ 已验证（PG16） | `ERROR: Concept ... cannot be VERIFIED without at least one source span citation` |
+| 自环边被拒 | ✅ 已验证（PG16） | `violates check constraint "edge_no_self_loop"` |
+| 跨画布连边被数据库拒绝 | ✅ 已验证（复合外键） | `Edge_canvasId_toNodeId_fkey` |
+| 纯函数与 SQL 下游语义一致 | ✅ 已验证（PG16 集成测试） | `downstream-equivalence.test.ts` 2 pass |
 | 任何 HTTP / UI / 节点执行器 | ❌ 未实现 | M1 起逐步落地 |
 
 **不要把上表的 ❌ 当成已完成。** 里程碑文档只写验收通过的行为。
+PGlite 仍是本地快速回归工具，但**不再作为验收证据**（SG-SUP-002 §0）。
 
 ---
 
@@ -128,6 +130,27 @@ executor 产出的每条论断都带 `spanIds`；`SpanResolver` 解析失败（s
 ---
 
 ## 4. 执行语义：显式触发 + 指纹缓存
+
+### 4.0 stale 传播只沿 `DERIVED_FROM`（SG-SUP-002 §2.1）
+
+三种边里只有 `DERIVED_FROM` 是**数据依赖**：下游的产物是用上游的产物算出来的。
+另外两种不是：
+
+| 边 | 含义 | 为什么不该触发 stale |
+| --- | --- | --- |
+| `CITES` | 节点引用某段原文 span | 引用的是 `Span`，不是上游节点的产物。原文变没变由 `Source.checksum` 与 span 校验判定；上游节点重跑不改变已引用的原文，凭什么让下游重算 |
+| `PREREQUISITE` | 概念先修顺序 | 它是知识结构（学习路径），不是数据流。若沿它传播，"补一条先修边"这种纯知识操作会把整条加工链标脏，既烧钱又误导学生"我的卡片坏了" |
+
+因此：
+
+- 纯函数 `collectDownstream` / `collectUpstream` / `topoSort` 默认 `STALE_EDGE_KINDS = ['DERIVED_FROM']`
+- SQL `packages/db/sql/downstream.sql` 同样只沿 `DERIVED_FROM`
+- 需要"看所有连线"的场景（画布高亮、边列表）显式传 `{ kinds: ALL_EDGE_KINDS }`
+- 两边一致性不靠人工保证：`apps/api/test/integration/downstream-equivalence.test.ts`
+  在真实 PG16 上把同一张图跑两遍做 `deepEqual`
+
+> 这条决定同时修掉了 SG-SUP-002 指出的 P1-1：此前纯函数默认三种全走、SQL 只走派生，
+> 同一张图会得出两个答案——而且两边各自看都"对"。
 
 ### 4.1 指纹
 
@@ -259,9 +282,10 @@ variant ──► distractor ──► check ──► (VERIFIED) 题库
 
 ## 8. 数据层守卫
 
-Prisma 表达不了的东西在 `packages/db/prisma/migrations/20261118030100_guards/migration.sql`
-（`packages/db/sql/guards.sql` 是逐字节副本，`scripts/check-guards-sync.mjs` 防漂移）。
-**它是 migration，不是手工脚本**——`migrate deploy` 与 shadow database 都自带这些约束。
+Prisma 表达不了的东西在 guard migrations 里（目前两份）：
+`20261118030100_guards` 与 `20261119000000_edge_no_self_loop`。
+`packages/db/sql/guards.sql` 是两者的聚合副本，`scripts/check-guards-sync.mjs` 按语句流比对防漂移。
+**它们是 migration，不是手工脚本**——`migrate deploy` 与 shadow database 都自带这些约束。
 
 | 守卫 | 形式 | 防的是什么 |
 | --- | --- | --- |
@@ -269,12 +293,15 @@ Prisma 表达不了的东西在 `packages/db/prisma/migrations/20261118030100_gu
 | span 区间有序 | CHECK | 高亮指向不存在的位置 |
 | REJECTED 必须有理由、VERIFIED 必须无理由 | CHECK | 「悄悄入库」 |
 | 选择题必须 ≥2 个选项 | CHECK | 坏数据进 UI |
+| **边不得自环** | CHECK（20261119000000） | topoSort 无解、stale 在自身收敛不了 |
 | VERIFIED 资产必须有 ≥1 条引用 | 触发器（写入） | 无源生成 |
 | 引用被删光后自动降级 | 触发器（删除） | 删引用绕过溯源约束 |
 | 跨画布连边 | 复合外键 | 越权连边 |
 | 干扰项缺 errorTag | 审计视图 | 凑数选项 |
 | 试卷 report 里有 gaps 仍标 READY | 审计视图 | 静默补齐缺口 |
 | `steps[].conceptIds` 与 `MethodConcept` 不一致 | 审计视图 | 两份数据悄悄漂移 |
+
+计数（PG16 实测）：CHECK **8**、触发器 6、视图 4。
 
 审计视图不阻塞写入，由 `scripts/check-gates.ts` 与 CI 扫描——写入路径的性能不该被审计拖累。
 
@@ -294,12 +321,12 @@ Prisma 表达不了的东西在 `packages/db/prisma/migrations/20261118030100_gu
 
 | 风险 | 影响 | 处置 |
 | --- | --- | --- |
-| 本机无 Docker / PostgreSQL / Redis | 迁移与任何连库验收无法执行 | **阻塞项，需用户安装 Docker Desktop**（`docker compose up -d postgres`） |
-| 沙箱禁止管道式子进程 | Prisma 引擎命令需放宽权限；`node --test` 多文件模式不可用 | 见 `docs/runbook.md` 坑 2；单测用 `node <file>.ts` |
-| 迁移尚未在 pgvector 容器上执行 | PGlite 与真实镜像的 pgvector 版本差异 | Docker 就绪后立刻 `migrate deploy` 并记录到 `docs/milestone-1.md` |
+| `migrate dev` 会生成 `DROP INDEX` 删掉手写索引 | 语义检索静默失效 | ✅ 已加 `scripts/check-drift.mjs`（检测即 exit 1），见 runbook §4.2 |
+| 沙箱禁止管道式子进程 | Prisma 引擎命令曾需放宽权限 | ✅ 当前会话为 danger-full-access，已可直接跑 `migrate deploy` |
+| 纯函数与 SQL 的下游语义漂移 | stale 传播在两处给出不同答案 | ✅ 已统一为只沿 `DERIVED_FROM`，并有真库等价性测试 |
 | pgvector 维度写死 1536 | 换 embedding 模型要迁移 | `Concept.embeddingModel` 记录来源，切换时批量重建 |
-| Next 14 生态老化 | 装依赖可能撞 peer 冲突 | M1 首次安装时验证 |
-| Prisma 6 + Node 26 非官方矩阵 | 迁移环节未知 | M1 首次 `migrate deploy` 时验证 |
+| Next 14 生态老化 | 装依赖可能撞 peer 冲突 | M1 安装时验证（本轮未动前端依赖） |
+| Prisma 6 + Node 26 非官方矩阵 | — | ✅ 已在 PG16 上跑通 `migrate deploy` |
 
 ---
 
