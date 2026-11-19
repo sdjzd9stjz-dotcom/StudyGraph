@@ -54,22 +54,44 @@ export interface SelfCheckReport {
   readonly unionSize: number
   readonly ok: boolean
   readonly problems: string[]
+  /** 既没实现、也没有计划里程碑的类型（SG-SUP-005 缺陷 C：必须能漏出来） */
+  readonly missingPlan: NodeType[]
 }
 
+/**
+ * 自检必须拿「已实现 ∪ 计划」与 `NODE_TYPES` 的 17 个值做**双向差集**，
+ * 而不是检查自己内部一致（SG-SUP-005 缺陷 C）：
+ *
+ * - 少一个计划 → `missingPlan` 非空、`ok=false`
+ * - 同一个类型既实现又计划 → 报冲突
+ * - 并集里出现 17 个之外的东西 → 报未知类型
+ *
+ * `planned` 由 `PLANNED_PLAN` 的键推导，所以删掉某个计划项时它会从 `planned` 消失，
+ * 同时出现在 `missingPlan` 里——这正是自检要的可观察行为。
+ */
 export function selfCheck(): SelfCheckReport {
   const implemented = implementedTypes()
-  const planned = NODE_TYPES.filter((type) => !implemented.includes(type))
-  const union = new Set<NodeType>([...implemented, ...planned])
-  const problems: string[] = []
+  const plannedCandidates = new Set<NodeType>(Object.keys(PLANNED_PLAN).filter(isNodeType))
 
-  if (union.size !== NODE_TYPES.length) {
-    problems.push(`已实现 ∪ 计划 = ${union.size}，应为 ${NODE_TYPES.length}`)
+  const planned = NODE_TYPES.filter((type) => !implemented.includes(type) && plannedCandidates.has(type))
+  const missingPlan = NODE_TYPES.filter((type) => !implemented.includes(type) && !plannedCandidates.has(type))
+
+  const problems: string[] = []
+  for (const type of missingPlan) problems.push(`${type} 既未实现也没有计划里程碑`)
+
+  const overlap = implemented.filter((type) => plannedCandidates.has(type))
+  for (const type of overlap) problems.push(`${type} 同时出现在已实现与计划里`)
+
+  const union = new Set<NodeType>([...implemented, ...planned])
+  for (const type of NODE_TYPES) {
+    // 已经在 missingPlan 里报过的不要再报一次（同一个缺口说两遍只是噪音）
+    if (!union.has(type) && !missingPlan.includes(type)) problems.push(`并集缺少 ${type}`)
+  }
+  for (const type of union) {
+    if (!NODE_TYPES.includes(type)) problems.push(`并集含未知类型 ${String(type)}`)
   }
   if (implemented.length !== REGISTRY.size) {
     problems.push('注册表里有非 NodeType 的条目')
-  }
-  for (const type of implemented) {
-    if (!(type in PLANNED_PLAN)) problems.push(`${type} 没有计划里程碑`)
   }
 
   return {
@@ -78,7 +100,20 @@ export function selfCheck(): SelfCheckReport {
     unionSize: union.size,
     ok: problems.length === 0,
     problems,
+    missingPlan,
   }
+}
+
+/**
+ * 启动自检：不通过就拒绝启动（SG-SUP-005 缺陷 C）。
+ * 半实现的节点表上线后，用户点执行会得到一个"什么都没发生"的节点，比报错更难查。
+ */
+export function assertRegistryReady(): SelfCheckReport {
+  const report = selfCheck()
+  if (!report.ok) {
+    throw new Error(`执行器注册表自检未通过：\n- ${report.problems.join('\n- ')}`)
+  }
+  return report
 }
 
 /** 取执行器；没有就 501，绝不返回 undefined 让上层静默继续。 */

@@ -1,5 +1,6 @@
 import type { JSONSchema, Message, TokenUsage } from '../types.ts'
 import type { ProviderCall, ProviderResult } from './openai.ts'
+import { assertUsageAndModel } from './validate.ts'
 
 export interface AnthropicProviderConfig {
   readonly apiKey: string
@@ -10,11 +11,11 @@ export interface AnthropicProviderConfig {
 /**
  * Anthropic Messages 适配层。
  *
- * 结构化输出用 tool_use 强制（`tool_choice: tool`），拿到的是 `input` 对象，
- * 不需要解析自由文本。
- *
- * 前缀缓存：把 system 段标成 `cache_control: ephemeral`，命中时厂商返回
- * `cache_read_input_tokens`，我们逐字记进 `cachedTokens`。
+ * - 结构化输出用 tool_use 强制（`tool_choice: tool`），拿到的是 `input` 对象
+ * - `usage` / `model` 缺失即抛 PROVIDER_RESPONSE_INVALID
+ * - **前缀缓存**：Anthropic 的缓存维度就是 system 前缀内容本身，没有独立缓存键参数。
+ *   `cachePrefixKey` 在这里的用途是决定**是否打缓存断点**（`cache_control: ephemeral`），
+ *   不改变文案、也不伪造一个厂商不认识的字段。这一点写进了 docs/architecture.md §5.2。
  */
 export function createAnthropicProvider(config: AnthropicProviderConfig) {
   const baseUrl = config.baseUrl ?? 'https://api.anthropic.com/v1'
@@ -68,13 +69,9 @@ export function createAnthropicProvider(config: AnthropicProviderConfig) {
     }
 
     const payload = (await response.json()) as {
-      model?: string
+      model?: unknown
       content?: Array<{ type: string; input?: unknown; text?: string }>
-      usage?: {
-        input_tokens?: number
-        output_tokens?: number
-        cache_read_input_tokens?: number
-      }
+      usage?: unknown
     }
 
     const toolUse = payload.content?.find((block) => block.type === 'tool_use')
@@ -93,15 +90,13 @@ export function createAnthropicProvider(config: AnthropicProviderConfig) {
       throw new Error('Anthropic 返回既没有 tool_use 也没有 text')
     }
 
-    return {
-      data,
-      usage: {
-        tokensIn: payload.usage?.input_tokens ?? 0,
-        tokensOut: payload.usage?.output_tokens ?? 0,
-        cachedTokens: payload.usage?.cache_read_input_tokens ?? 0,
-      },
-      modelVersion: payload.model ?? input.model,
-    }
+    const { modelVersion, usage } = assertUsageAndModel('anthropic', payload, (raw) => ({
+      tokensIn: raw.input_tokens,
+      tokensOut: raw.output_tokens,
+      cachedTokens: raw.cache_read_input_tokens,
+    }))
+
+    return { data, usage, modelVersion }
   }
 }
 

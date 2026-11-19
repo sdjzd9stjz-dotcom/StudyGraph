@@ -1,10 +1,13 @@
 import type { JSONSchema, Message, TokenUsage } from '../types.ts'
+import { assertUsageAndModel } from './validate.ts'
 
 export interface ProviderCall {
   readonly model: string
   readonly messages: readonly Message[]
   readonly jsonSchema?: JSONSchema
   readonly maxTokens?: number
+  /** 前缀缓存键：必须真的影响出站请求（SG-SUP-005 缺陷 E） */
+  readonly cachePrefixKey?: string
 }
 
 export interface ProviderResult {
@@ -24,8 +27,10 @@ export interface OpenAIProviderConfig {
 /**
  * OpenAI Chat Completions 适配层。
  *
- * 结构化输出用 `response_format: json_schema` 强制，不解析模型自由文本
- * （规格 §3.6：不许靠正则解析）。
+ * - 结构化输出用 `response_format: json_schema` 强制，不解析模型自由文本
+ * - `usage` / `model` 缺失即抛 PROVIDER_RESPONSE_INVALID（见 providers/validate.ts）
+ * - `cachePrefixKey` 落进 `prompt_cache_key`：前缀缓存按这个键路由，
+ *   键不同 → 出站请求体不同（可观察）
  */
 export function createOpenAIProvider(config: OpenAIProviderConfig) {
   const baseUrl = config.baseUrl ?? 'https://api.openai.com/v1'
@@ -45,6 +50,11 @@ export function createOpenAIProvider(config: OpenAIProviderConfig) {
       }
     }
 
+    if (input.cachePrefixKey) {
+      // OpenAI 的前缀缓存按 prompt_cache_key 分组；同一段教材原文共享一个键
+      body.prompt_cache_key = input.cachePrefixKey
+    }
+
     const response = await doFetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -61,13 +71,9 @@ export function createOpenAIProvider(config: OpenAIProviderConfig) {
     }
 
     const payload = (await response.json()) as {
-      model?: string
+      model?: unknown
       choices?: Array<{ message?: { content?: string } }>
-      usage?: {
-        prompt_tokens?: number
-        completion_tokens?: number
-        prompt_tokens_details?: { cached_tokens?: number }
-      }
+      usage?: unknown
     }
 
     const content = payload.choices?.[0]?.message?.content
@@ -80,14 +86,15 @@ export function createOpenAIProvider(config: OpenAIProviderConfig) {
       throw new Error(`OpenAI 返回的内容不是合法 JSON：${content.slice(0, 200)}`)
     }
 
-    return {
-      data,
-      usage: {
-        tokensIn: payload.usage?.prompt_tokens ?? 0,
-        tokensOut: payload.usage?.completion_tokens ?? 0,
-        cachedTokens: payload.usage?.prompt_tokens_details?.cached_tokens ?? 0,
-      },
-      modelVersion: payload.model ?? input.model,
-    }
+    const { modelVersion, usage } = assertUsageAndModel('openai', payload, (raw) => {
+      const details = raw.prompt_tokens_details as { cached_tokens?: unknown } | undefined
+      return {
+        tokensIn: raw.prompt_tokens,
+        tokensOut: raw.completion_tokens,
+        cachedTokens: details?.cached_tokens,
+      }
+    })
+
+    return { data, usage, modelVersion }
   }
 }

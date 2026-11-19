@@ -255,6 +255,51 @@ interface LLMGateway {
 | PostgreSQL | 16 + pgvector | `Unsupported("vector(1536)")` 需要 pgvector 扩展 |
 | Node.js | ≥22.11 | 本机 26.13.1 实测可用（Prisma 6 官方矩阵未覆盖 26，迁移环节待验证） |
 
+### 5.5 对象存储选型：SeaweedFS（替代 MinIO）
+
+**结论**：`docker compose` 的 `s3` 服务用 `chrislusf/seaweedfs`，通过 S3 网关提供对象存储。
+`S3_ENDPOINT` 仍是唯一入口配置，**换回 MinIO 或换成真实 S3 只改配置与镜像，代码不动**。
+
+为什么可以：规格写的是「S3 兼容存储」，没有点名厂商。SeaweedFS 的 S3 网关实现同一套协议，
+`ObjectStore`（`apps/api/src/storage/object-store.ts`）只依赖协议，`put/get/deleteMany`
+在本地实测通过（65536 字节往返 sha256 一致、删除后读回 `NoSuchKey`）。
+
+为什么不是 MinIO（2026-11-19 实测，全部记录在 `milestone-2.md`）：
+
+| 尝试 | 结果 |
+| --- | --- |
+| `docker pull minio/minio:latest` | `repository does not exist`（已迁离 Docker Hub） |
+| `quay.io/minio/minio` | HEAD manifest `401 UNAUTHORIZED`（token 认证过不了本机代理链路） |
+| `bitnami/minio` | `not found` |
+| `dl.min.io/.../minio.exe` | HTTP 410 Gone |
+
+**健康检查标准**：`curl -sf http://127.0.0.1:8333/` 必须成功。
+不要探 `/status`（404，会让容器永远 unhealthy），也不要写 `exit 0` 敷衍。
+`docker compose ps` 里三个服务都必须显示 `(healthy)`。
+
+### 5.6 PDF 解析库选型：`unpdf`
+
+硬指标是**逐页文本 + 可复现的字符偏移**（`architecture.md` §3.1 定义了偏移口径）。
+选 `unpdf` 的理由：
+
+- 纯 JS（打包了 pdfjs 的 node 构建），不需要 canvas/DOM，可直接在 Fastify 进程里跑
+- `getDocumentProxy()` → `numPages` 与逐页 `getTextContent()`，页内文本项顺序稳定，
+  我们据此拼接页文本并按 `[start,end)` 切 span
+- 不需要额外的 native 依赖（`pdfjs-dist` 在 ESM/Node 组合下还要处理 worker 路径）
+
+代价：`unpdf` 不做版面分析（双栏会按内容流顺序拼接），M2 的定位是"能拿到稳定偏移"，
+版面纠偏留到需要时再评估。扫描版（无文字层）会被判为解析失败并返回
+`SOURCE_HAS_NO_TEXT_LAYER`，**不生成任何内容**。
+
+### 5.7 前缀缓存键在各厂商的落点
+
+`cachePrefixKey` 由调用方按 `(sourceId, 章节范围, promptVersion)` 组织，落到适配层后：
+
+| 厂商 | 落点 | 说明 |
+| --- | --- | --- |
+| OpenAI | 请求体 `prompt_cache_key` | 同键的请求共享前缀缓存；**键不同 → 请求体必然不同**（可观察） |
+| Anthropic | 不传键，靠 `system[].cache_control: ephemeral` | Anthropic 的缓存维度就是 system 前缀内容本身，没有独立的键参数；伪造一个厂商不认识的字段比不传更糟 |
+
 ---
 
 ## 6. 图投影：一份数据，三个视图

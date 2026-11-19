@@ -3,9 +3,10 @@ import test from 'node:test'
 
 import { AppError } from '../../src/lib/errors.ts'
 import { decryptSecret, encryptSecret } from '../../src/llm/byok.ts'
+import { createApiKeyResolver } from '../../src/llm/credentials.ts'
 import { createGateway } from '../../src/llm/gateway.ts'
-import { TASK_ROUTING } from '../../src/llm/routing.ts'
 import type { GatewayDeps } from '../../src/llm/gateway.ts'
+import { TASK_ROUTING } from '../../src/llm/routing.ts'
 
 const user = { id: 'u1', email: 'u@t.t', displayName: 'u' }
 
@@ -68,6 +69,123 @@ test('成功时 usage 与 modelVersion 取自厂商响应，不是本地配置',
   assert.equal(result.modelVersion, 'gpt-4o-mini-2024-07-18')
 })
 
+test('D：响应缺 usage/model → PROVIDER_RESPONSE_INVALID（openai，E06 第一行）', async () => {
+  const fakeFetch = (async () =>
+    Response.json({ choices: [{ message: { content: '{}' } }] })) as typeof fetch
+
+  await assert.rejects(
+    () => gateway({ fetchImpl: fakeFetch }).complete({ taskType: 'extract', messages: [], user }),
+    (error: unknown) => {
+      assert.ok(error instanceof AppError)
+      assert.equal(error.code, 'PROVIDER_RESPONSE_INVALID')
+      assert.deepEqual(error.details?.missing, ['model', 'usage'])
+      return true
+    },
+  )
+})
+
+test('D：响应缺 usage/model → PROVIDER_RESPONSE_INVALID（anthropic，E06 第二行）', async () => {
+  const fakeFetch = (async () =>
+    Response.json({ content: [{ type: 'tool_use', input: {} }] })) as typeof fetch
+
+  await assert.rejects(
+    () => gateway({ fetchImpl: fakeFetch }).complete({ taskType: 'method', messages: [], user }),
+    (error: unknown) => {
+      assert.ok(error instanceof AppError)
+      assert.equal(error.code, 'PROVIDER_RESPONSE_INVALID')
+      assert.deepEqual(error.details?.missing, ['model', 'usage'])
+      return true
+    },
+  )
+})
+
+test('D：usage 存在但缺 tokensIn → 同样拒绝（"字段不存在"≠"值为 0"）', async () => {
+  const fakeFetch = (async () =>
+    Response.json({
+      model: 'gpt-4o-mini-2024-07-18',
+      choices: [{ message: { content: '{}' } }],
+      usage: { completion_tokens: 10 },
+    })) as typeof fetch
+
+  await assert.rejects(
+    () => gateway({ fetchImpl: fakeFetch }).complete({ taskType: 'extract', messages: [], user }),
+    (error: unknown) => {
+      assert.ok(error instanceof AppError)
+      assert.equal(error.code, 'PROVIDER_RESPONSE_INVALID')
+      assert.deepEqual(error.details?.missing, ['usage.tokensIn'])
+      return true
+    },
+  )
+})
+
+test('E：cachePrefixKey 必须影响出站请求体（E09）', async () => {
+  const bodies: string[] = []
+  const fakeFetch = (async (_url: string, init: RequestInit) => {
+    bodies.push(String(init.body))
+    return Response.json({
+      model: 'snapshot-1',
+      choices: [{ message: { content: '{}' } }],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    })
+  }) as unknown as typeof fetch
+
+  const gw = gateway({ fetchImpl: fakeFetch })
+  for (const key of ['source:1:v1', 'source:1:v2']) {
+    await gw.complete({ taskType: 'extract', messages: [], user, cachePrefixKey: key })
+  }
+
+  assert.equal(bodies.length, 2)
+  assert.notEqual(bodies[0], bodies[1], '两个不同的前缀键必须产生不同的出站请求体')
+  assert.match(bodies[0] ?? '', /source:1:v1/)
+  assert.match(bodies[1] ?? '', /source:1:v2/)
+})
+
+test('E：BYOK 两个用户取到不同密钥，且第二个回退到 env', async () => {
+  const masterKey = Buffer.alloc(32, 9).toString('base64')
+  const userACredential = {
+    keyCiphertext: encryptSecret('sk-user-a', masterKey),
+    isActive: true,
+  }
+
+  const prisma = {
+    providerCredential: {
+      findFirst: async ({ where }: { where: { userId: string } }) =>
+        where.userId === 'user-a' ? userACredential : null,
+    },
+  }
+
+  const resolve = createApiKeyResolver({
+    prisma: prisma as never,
+    masterKey,
+    env: { OPENAI_API_KEY: 'sk-from-env' },
+  })
+
+  const a = await resolve('openai', { id: 'user-a', email: 'a@t.t', displayName: 'a' })
+  const b = await resolve('openai', { id: 'user-b', email: 'b@t.t', displayName: 'b' })
+
+  assert.deepEqual(a, { apiKey: 'sk-user-a', source: 'byok' })
+  assert.deepEqual(b, { apiKey: 'sk-from-env', source: 'env' })
+  assert.notEqual((a as { apiKey: string }).apiKey, (b as { apiKey: string }).apiKey)
+})
+
+test('E：有密文但没有主密钥 → 报错，不悄悄回退 env', async () => {
+  const prisma = {
+    providerCredential: {
+      findFirst: async () => ({ keyCiphertext: '{"v":1}', isActive: true }),
+    },
+  }
+  const resolve = createApiKeyResolver({
+    prisma: prisma as never,
+    masterKey: undefined,
+    env: { OPENAI_API_KEY: 'sk-from-env' },
+  })
+
+  await assert.rejects(
+    () => resolve('openai', { id: 'user-a', email: 'a@t.t', displayName: 'a' }),
+    /BYOK_ENCRYPTION_KEY 未配置/,
+  )
+})
+
 test('routing 表：机械任务走小模型，推理任务走前沿模型', () => {
   for (const task of ['chunk', 'extract', 'judge', 'check', 'quiz'] as const) {
     assert.equal(TASK_ROUTING[task].tier, 'small', `${task} 应走小模型`)
@@ -75,7 +193,6 @@ test('routing 表：机械任务走小模型，推理任务走前沿模型', () 
   for (const task of ['probe', 'method', 'solve', 'variant'] as const) {
     assert.equal(TASK_ROUTING[task].tier, 'frontier', `${task} 应走前沿模型`)
   }
-  // 两个供应商都要被用上（首期两个 provider）
   const providers = new Set(Object.values(TASK_ROUTING).map((route) => route.provider))
   assert.deepEqual([...providers].sort(), ['anthropic', 'openai'])
 })
@@ -86,7 +203,6 @@ test('BYOK：AES-256-GCM 加密后可解密，密文里没有明文', () => {
 
   const ciphertext = encryptSecret(secret, masterKey)
   assert.equal(ciphertext.includes(secret), false, '密文里不能出现明文')
-
   assert.equal(decryptSecret(ciphertext, masterKey), secret)
 })
 

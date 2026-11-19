@@ -3,13 +3,17 @@ import type { FastifyInstance } from 'fastify'
 
 import type { PrismaClient } from '../../../packages/db/src/index.ts'
 import type { Env } from './env.ts'
-import { AppError, validationFailed } from './lib/errors.ts'
+import { AppError, invalidJson, validationFailed } from './lib/errors.ts'
 import { createGuard } from './plugins/auth.ts'
+import { createApiKeyResolver } from './llm/credentials.ts'
+import { assertRegistryReady } from './nodes/registry.ts'
+import { selfCheck } from './nodes/registry.ts'
 import { registerCanvasRoutes } from './routes/canvases.ts'
 import { registerEdgeRoutes } from './routes/edges.ts'
 import { registerGraphRoutes } from './routes/graph.ts'
 import { registerNodeRoutes } from './routes/nodes.ts'
 import { registerRunRoutes } from './routes/run.ts'
+import { registerSystemRoutes } from './routes/system.ts'
 import { createObjectStore } from './storage/object-store.ts'
 
 export interface BuildAppOptions {
@@ -33,6 +37,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
 
   // 空 body 容忍：curl -X POST 带 content-type 却没给 body 时，Fastify 默认 400。
   // 对 /run、/mark-stale 这类"没有参数"的端点，这是客户端的坑而不是错误请求。
+  // 坏 JSON 则必须是 400 INVALID_JSON（SG-SUP-005 G2）——客户端写错不该看到 500。
   app.addContentTypeParser('application/json', { parseAs: 'string' }, (_request, body, done) => {
     const text = (body as string).trim()
     if (text.length === 0) {
@@ -42,7 +47,8 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     try {
       done(null, JSON.parse(text))
     } catch (error) {
-      done(error as Error, undefined)
+      const message = error instanceof Error ? error.message : String(error)
+      done(invalidJson(message), undefined)
     }
   })
 
@@ -94,6 +100,21 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     }
   })
 
+  // ── 启动自检（SG-SUP-005 缺陷 C：不通过就拒绝启动）────────────────────
+  const registryReport = selfCheck()
+  if (!registryReport.ok) {
+    app.log.error({ problems: registryReport.problems }, '执行器注册表自检未通过')
+    throw new Error(`执行器注册表自检未通过：\n- ${registryReport.problems.join('\n- ')}`)
+  }
+  app.log.info(
+    {
+      implemented: registryReport.implemented,
+      planned: registryReport.planned.length,
+      unionSize: registryReport.unionSize,
+    },
+    '执行器注册表自检通过',
+  )
+
   // ── 业务路由 ───────────────────────────────────────────────────────────
   const guard = createGuard(prisma)
   const objectStore = createObjectStore({
@@ -105,11 +126,19 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     forcePathStyle: true,
   })
 
+  // BYOK：按 userId 查 ProviderCredential → 解密；没有则回退 env；都没有 → null
+  const resolveApiKey = createApiKeyResolver({
+    prisma,
+    masterKey: env.BYOK_ENCRYPTION_KEY,
+    env: { OPENAI_API_KEY: env.OPENAI_API_KEY, ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY },
+  })
+
   registerCanvasRoutes(app, { prisma, guard, objectStore })
   registerNodeRoutes(app, { prisma, guard })
   registerEdgeRoutes(app, { prisma, guard })
   registerGraphRoutes(app, { prisma, guard })
   registerRunRoutes(app, { prisma, guard })
+  registerSystemRoutes(app, { guard, resolveApiKey })
 
   return app
 }

@@ -9,19 +9,25 @@
 
 | 项 | 状态 |
 | --- | --- |
-| Redis 容器 | ✅ healthy，`PING → PONG` |
-| S3 兼容存储 | ✅ SeaweedFS（MinIO 已下架，见 §2），put/get/delete 往返 sha256 一致 |
-| BullMQ / ioredis / @aws-sdk/client-s3 | ✅ 已装（版本见 `apps/api/package.json`） |
-| `LLMGateway` 接口 + 两个 provider | ✅ 代码路径与单测完成；**未真实调用**（无凭据） |
+| Redis 容器 | ✅ 真实证据：`redis-cli ping → PONG`，容器 `(healthy)` |
+| S3 兼容存储 | ✅ SeaweedFS：`scripts/s3-roundtrip.mjs` 往返 sha256 一致；容器 `(healthy)`，探针 `curl -sf :8333/` |
+| BullMQ / ioredis / @aws-sdk/client-s3 | ✅ 已装 ⚠ **队列未接线**（没有 executor，接了只能空跑） |
+| PDF 解析库 | ✅ `unpdf` 已装（`require.resolve` 有路径）；解析器代码随真实 PDF 一起写 |
+| `LLMGateway` 接口 + 两个 provider | ✅ 代码与单测；⚠ **未真实调用**（无 key） |
 | `routing.ts` 表 | ✅ 9 个 taskType → 小模型 / 前沿模型 |
-| BYOK（AES-256-GCM） | ✅ 加解密往返 + 篡改检测 + 无主密钥拒绝 |
+| BYOK（AES-256-GCM） | ✅ 加解密 + 篡改检测 + 无主密钥拒绝 + **已接线到认证链**（`credentials.ts` → `routes/system.ts`） |
+| 前缀缓存键 | ✅ `cachePrefixKey` 影响出站请求体（`prompt_cache_key`），单测断言 `sameRequest=false` |
 | 指纹算法 | ✅ 10 条断言（含"改 prompt 一个字必须变"） |
-| `SpanResolver` 校验 | ✅ 8 条断言（text 不符 / 零长度 / 越界 / 缺页 / 空白） |
-| registry + 自检 | ✅ 0 implemented + 17 planned = 17，未实现节点 501 |
+| `SpanResolver` 校验 | ✅ 10 条断言；缓存**绑定原文版本**（SG-SUP-005 A），原文变更后必判失败 |
+| 引用漂移巡检 | ✅ `citation-integrity.ts`：真实卡片在原文变更后降级 `UNVERIFIED`（实测） |
+| registry + 自检 | ✅ 双向差集自检 + **启动路径调用**，不通过拒绝启动；未实现节点 501 |
 | `POST /v1/nodes/:id/run` | ✅ dryRun 与正式执行都 501（未实现就明确失败） |
 | `source` / `chunk` / `extract` / `card` | ⬜ **未实现**（阻塞于真实 PDF 与模型凭据） |
 | span 溯源抽屉（前端） | ⬜ 未做（依赖 `card` 产物） |
 | 真实 60 页 PDF 验收 | ⬜ 无文件 |
+
+> 上一版这张表把"已装依赖"写成了"已完成准备项"，且启动路径没调自检（SG-SUP-005 B/C）。
+> 现在每一行都对应一条可复跑的命令，见 `docs/监理回报-006-SG-SUP-005整改.md`。
 
 ---
 

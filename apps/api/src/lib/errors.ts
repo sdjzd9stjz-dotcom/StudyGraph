@@ -32,9 +32,11 @@ export const ERROR_CODES = [
   'EXECUTOR_NOT_IMPLEMENTED',
   'LLM_CREDENTIAL_MISSING',
   'LLM_PROVIDER_ERROR',
+  'PROVIDER_RESPONSE_INVALID',
   'SOURCE_HAS_NO_TEXT_LAYER',
   // 通用
   'VALIDATION_FAILED',
+  'INVALID_JSON',
   'INTERNAL_ERROR',
 ] as const
 
@@ -122,6 +124,22 @@ export const llmCredentialMissing = (provider: string) =>
 
 export const llmProviderError = (provider: string, message: string) =>
   new AppError(502, 'LLM_PROVIDER_ERROR', `${provider} 调用失败：${message}`, { provider })
+
+/**
+ * 厂商响应缺 usage / model（SG-SUP-005 缺陷 D）。
+ * 不许"缺了就当 0"：那会让额度计量与指纹的 modelVersion 同时失真。
+ */
+export const providerResponseInvalid = (provider: string, missing: readonly string[]) =>
+  new AppError(
+    502,
+    'PROVIDER_RESPONSE_INVALID',
+    `${provider} 响应缺少或含非法字段：${missing.join(', ')}`,
+    { provider, missing },
+  )
+
+/** 客户端发了坏 JSON：400，不是 500。 */
+export const invalidJson = (reason: string) =>
+  new AppError(400, 'INVALID_JSON', `请求体不是合法 JSON：${reason}`)
 
 /** 扫描版 PDF：明确告诉学生为什么不能解析，而不是静默产出空卡。 */
 export const sourceHasNoTextLayer = (filename: string) =>
