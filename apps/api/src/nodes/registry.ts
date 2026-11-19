@@ -12,10 +12,13 @@ import type { NodeExecutor } from './contract.ts'
  */
 const REGISTRY = new Map<string, NodeExecutor>()
 
-/** 每个未实现节点的计划里程碑，用于 501 的 details.plan。 */
-export const PLANNED_PLAN: Record<NodeType, string> = {
-  SOURCE: 'M2',
-  CHUNK: 'M2',
+/**
+ * **尚未实现**的节点的计划里程碑，用于 501 的 `details.plan`。
+ *
+ * 已实现（SOURCE、CHUNK）的条目必须从这里删掉：
+ * 自检要求 `implemented ∩ planned = ∅`，同类型既"已实现"又"还在计划里"会被判冲突。
+ */
+export const PLANNED_PLAN: Partial<Record<NodeType, string>> = {
   EXTRACT: 'M2',
   CARD: 'M2',
   PREREQ: 'M3',

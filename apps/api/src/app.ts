@@ -6,6 +6,8 @@ import type { Env } from './env.ts'
 import { AppError, invalidJson, validationFailed } from './lib/errors.ts'
 import { createGuard } from './plugins/auth.ts'
 import { createApiKeyResolver } from './llm/credentials.ts'
+import { createGateway } from './llm/gateway.ts'
+import { registerBuiltinExecutors } from './nodes/executors/index.ts'
 import { assertRegistryReady } from './nodes/registry.ts'
 import { selfCheck } from './nodes/registry.ts'
 import { registerCanvasRoutes } from './routes/canvases.ts'
@@ -101,6 +103,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   })
 
   // ── 启动自检（SG-SUP-005 缺陷 C：不通过就拒绝启动）────────────────────
+  registerBuiltinExecutors()
   const registryReport = selfCheck()
   if (!registryReport.ok) {
     app.log.error({ problems: registryReport.problems }, '执行器注册表自检未通过')
@@ -133,11 +136,16 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     env: { OPENAI_API_KEY: env.OPENAI_API_KEY, ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY },
   })
 
+  const llm = createGateway({
+    resolveApiKey,
+    logger: { debug: (obj, msg) => app.log.debug(obj, msg) },
+  })
+
   registerCanvasRoutes(app, { prisma, guard, objectStore })
   registerNodeRoutes(app, { prisma, guard })
   registerEdgeRoutes(app, { prisma, guard })
   registerGraphRoutes(app, { prisma, guard })
-  registerRunRoutes(app, { prisma, guard })
+  registerRunRoutes(app, { prisma, guard, objectStore, llm })
   registerSystemRoutes(app, { guard, resolveApiKey })
 
   return app

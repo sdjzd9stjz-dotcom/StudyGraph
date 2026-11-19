@@ -275,6 +275,15 @@ enum SourceKind {
   TEXT
 }
 
+/// span 的文本来源区域（SG-SUP-007 §2.1）：
+/// PAGE = PDF 页正文，SLIDE = 幻灯片正文，NOTES = 备注页讲稿。
+/// 三者各自独立成文本基准，偏移不跨区域。
+enum SpanRegion {
+  PAGE
+  SLIDE
+  NOTES
+}
+
 enum PaperStatus {
   DRAFT
   READY
@@ -567,7 +576,10 @@ model Span {
   sourceId String
   source   Source @relation(fields: [sourceId], references: [id], onDelete: Cascade)
 
-  page      Int    @default(0)
+  page Int @default(0)
+  /// 文本来源区域（SG-SUP-007 §2.1）：正文页 / 幻灯片 / 备注页。
+  /// 备注页与正文各自独立成文本基准，绝不拼在一起，否则偏移基准会被污染。
+  region    SpanRegion @default(PAGE)
   charStart Int
   charEnd   Int
   text      String
@@ -583,7 +595,7 @@ model Span {
   /// 概念先修边的证据 span（见 ConceptEdge.evidenceSpanId）
   conceptEdgeEvidence ConceptEdge[]
 
-  @@unique([sourceId, page, charStart, charEnd])
+  @@unique([sourceId, page, region, charStart, charEnd])
   @@index([sourceId, page])
 }
 
