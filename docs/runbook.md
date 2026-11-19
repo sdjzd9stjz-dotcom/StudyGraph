@@ -177,4 +177,50 @@ node scripts/verify-sql.mjs
 | DDL 可渲染 | `migrate diff ... --script` | 34 表 / 27 枚举 |
 | guards 与 migration 一致 | `node scripts/check-guards-sync.mjs` | ✅ 同步 |
 | SQL 不变量 | `node scripts/verify-sql.mjs` | 7 / 6 / 4 + 四个 ✅ |
+| 端口矩阵契约 | `node packages/contracts/test/ports.test.ts` | 27 pass |
+| DAG / 下游收集 | `node apps/api/test/unit/dag.test.ts` | 11 pass |
 | 迁移与 schema 无漂移 | 建库后 `migrate diff --from-url ...` | 空 diff |
+
+## 8. 本机装 Docker 的实操记录（2026-11-18）
+
+机器是 **Windows 10 Home China**（Build 26300），无 Hyper-V，Docker Desktop 只能走 WSL2 后端。
+网络直连被 `Scholar Root CA v1` / `Scholar Verify` 做 TLS 中间人，**所有下载必须经代理 `127.0.0.1:7897`**。
+
+### 8.1 安装包（已下载并验证）
+
+| 项 | 值 |
+| --- | --- |
+| 路径 | `D:\docker-installer\DockerDesktopInstaller.exe` |
+| 大小 | 623,969,712 字节（与服务器 `content-length` 一致） |
+| 版本 | 4.99.0.245822 |
+| SHA256 | `A5E299131C9C53D60F3F752B162078945EB5FAF6EEDCF0BE20A214C6E6CEA444` |
+| Authenticode | **Valid**，`CN=Docker Inc, O=Docker Inc`，DigiCert Trusted G4 Code Signing RSA4096 SHA384 2021 CA1 |
+
+下载方法（代理启用的前提下）：`node tmp/resume-docker.mjs`（HTTP/1.1 CONNECT + Range 续传；
+直接 `fetch` 走 HTTP/2 会在 ~500 MiB 被中间设备重置流）。
+
+### 8.2 安装顺序
+
+```powershell
+# 管理员：让 Windows 服务 / WSL / Windows Update 也走代理
+netsh winhttp set proxy 127.0.0.1:7897
+
+# 管理员：先装 WSL2 运行时（Home 版必需），然后重启
+wsl --install --no-distribution
+
+# 管理员：装 Docker Desktop（静默、接受许可、指定 WSL2 后端）
+Start-Process -FilePath 'D:\docker-installer\DockerDesktopInstaller.exe' `
+  -ArgumentList 'install','--quiet','--accept-license','--backend=wsl-2' `
+  -Verb RunAs -Wait
+
+# 装完撤销系统级代理（可选，winget 仍需要代理时保留）
+netsh winhttp reset proxy
+```
+
+### 8.3 起来之后
+
+```powershell
+docker compose up -d postgres
+node scripts/prisma.mjs migrate deploy --schema packages/db/prisma/schema.prisma
+# 然后按 §5 的四条自检查询走
+```
