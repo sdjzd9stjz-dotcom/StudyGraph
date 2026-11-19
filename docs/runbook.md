@@ -135,7 +135,6 @@ node apps/api/test/integration/downstream-equivalence.test.ts    # 真库等价�
 3. 断言用 Node 内置的 `node:assert/strict`，不引入 vitest —— 保持"零新增依赖"，测试框架 M2 再定。
 
 ### 4.2 `migrate dev` 会删手写索引（已确认，必须防）
-
 Prisma 无法从 `schema.prisma` 推出 `Concept_embedding_hnsw`（HNSW）与 `Concept_name_trgm`（gin_trgm_ops），
 所以 `migrate diff` 会把它们当成多余索引并且生成：
 
@@ -150,6 +149,24 @@ DROP INDEX "Concept_name_trgm";
 - `migrate dev`（`pnpm db:migrate:dev`）只在改 schema 时用，且**生成的 migration 必须人工检查**
 - 出现上面两行 `DROP INDEX` 一律删掉再应用
 - 提交前跑 `node scripts/check-drift.mjs`：检测到就 exit 1 并打印原因（已实测会拦）
+
+### 4.3 起 API 与 Web（M1 起）
+
+```bash
+# API（127.0.0.1:3001）
+node apps/api/src/server.ts
+
+# Web：先构建，再启动（127.0.0.1:3000）
+cd apps/web
+node ../../node_modules/next/dist/bin/next build
+node ../../node_modules/next/dist/bin/next start -p 3000
+```
+
+- API 的环境变量来自仓库根 `.env`（`src/load-env.ts` 用 `process.loadEnvFile` 读，不引入 dotenv）
+- Web 需要 `apps/web/.env.local`（已 gitignore）：
+  `NEXT_PUBLIC_API_BASE_URL` / `NEXT_PUBLIC_DEV_PAT` / `STUDYGRAPH_DEV_PAT`
+- `next build` 依赖 `experimental.externalDir`：web 直接引用 `packages/contracts` 的端口矩阵，
+  **不允许为了打包方便复制第二份端口表**（前后端同源是硬要求）
 
 ## 5. 首次建库步骤（DB 就绪后按顺序做）
 

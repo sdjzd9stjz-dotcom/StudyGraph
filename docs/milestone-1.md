@@ -15,13 +15,15 @@
 | 自环边约束 | ✅ PG16 实测拒绝（`edge_no_self_loop`） |
 | 迁移漂移防护 | ✅ `scripts/check-drift.mjs` 实测 exit 1 |
 | stale 语义定死（只沿 DERIVED_FROM） | ✅ 纯函数 / SQL / 文档 / 等价性测试四者一致 |
-| 画布 CRUD | ⬜ 未开始（本轮只做到闸门） |
-| 17 个占位卡片 + 拖拽 | ⬜ 未开始 |
+| 画布 CRUD | ✅ POST/GET/DELETE 实测（§6.5） |
+| 节点创建 / PATCH 位置 | ✅ 17 种 type 全通过；位置落库复查一致 |
+| 17 个占位卡片 + 拖拽 | 🟡 调色板与卡片已实现并 SSR 验证；拖拽为客户端行为，无浏览器环境未实测 |
 | 端口矩阵（契约层） | ✅ 17×2 已定 + 27 条断言通过（`packages/contracts`） |
-| 端口校验（前端 + 后端 400） | 🟡 判定函数就绪；HTTP 400 未开始 |
+| 端口校验（后端 400） | ✅ N1–N5 实测 400，绕开 UI（§6.3） |
 | stale 下游收集（纯函数） | ✅ 13 条断言（`dag.ts`） |
 | stale 下游收集（SQL 递归 CTE） | ✅ PG16 等价性 2 条断言 |
-| `docs/milestone-1.md` | 🟡 本文件 |
+| `mark-stale` 接口 | ✅ 只标不跑，Run 行数不变（§6.6） |
+| `docs/milestone-1.md` | ✅ 本文件（§5/§6 已回填） |
 
 ---
 
@@ -198,21 +200,140 @@ M1 不实现执行，但必须先有**能跑的**下游收集：
 
 ---
 
-## 5. 验收清单（全部待勾）
+## 5. 验收清单（SG-SUP-003 §5 逐条）
 
-- [ ] `POST /v1/canvases` → 201，返回 id
-- [ ] `GET /v1/canvases/:id` → 200，包含节点与边
-- [ ] 17 个节点类型都能拖上画布（占位卡片，不执行）
-- [ ] N1–N5 五条负向用例：后端 400（curl 绕开 UI 实测）
-  - 契约层已覆盖：`node packages/contracts/test/ports.test.ts` → 27 pass
-- [ ] P1–P8 八个正例全部 201（契约层已通过）
-- [x] `collectDownstream` 单测通过（A→B→C）→ 13 pass
-- [x] 纯函数与 SQL 等价性（真库）→ 2 pass
-- [ ] 跨画布连边被拒绝（服务层 400 + DB 外键兜底；DB 侧已验）
-- [ ] `DELETE /v1/canvases/:id` 后无孤儿行、MinIO 无残留对象
+### 5.1 环境与启动
+
+- [x] `node scripts/seed-pat.ts` 签发 token，明文打印一次，库里只有 hash
+- [x] `SELECT "tokenHash"` 的值 ≠ 明文（等于 `sha256(明文)`，64 位十六进制）
+- [x] `GET /health` → 200 `{"status":"ok","db":"up"}`
+
+### 5.2 鉴权
+
+- [x] 无 token → 401 `UNAUTHENTICATED`
+- [x] 伪造 token → 401 `UNAUTHENTICATED`
+- [x] 只读 token 调 `POST /v1/canvases` → **403 `INSUFFICIENT_SCOPE`**
+- [x] 吊销后 → 401 `TOKEN_REVOKED`；过期 → 401 `TOKEN_EXPIRED`
+
+### 5.3 画布 CRUD
+
+- [x] `POST /v1/canvases` → 201，返回 `id`
+- [x] `GET /v1/canvases/:id` → 200，含 `nodes` / `edges`
+- [x] `DELETE /v1/canvases/:id` → 204，且 `Node` / `Edge` 归零（级联）
+- [x] 访问别人的画布 → 404（不是 403，不泄露存在性）
+
+### 5.4 节点
+
+- [x] 17 种 type 全部 201，`status = DRAFT`
+- [x] 非法 type → 400 `NODE_TYPE_INVALID`
+- [x] `PATCH /v1/nodes/:id` 落库位置（`posX=321,posY=654` 复查一致）
+
+### 5.5 边（核心）
+
+- [x] N1–N4 → 400 `EDGE_PORT_TYPE_MISMATCH`；N5 → 400 `EDGE_PORT_EXTERNAL`
+- [x] 自环 → 400 `EDGE_SELF_LOOP`
+- [x] 跨画布节点 → 400 `NODE_NOT_IN_CANVAS`
+- [x] 重复边 → 409 `EDGE_DUPLICATE`
+- [x] 并发两条相同边 → 一个 201 一个 409，库里只有 1 行
+- [x] body 带 `canvasId` → 400 `CANVAS_ID_IN_BODY`
+- [x] P1–P8 八条全部 201，`Edge` 行数 +8
+- [x] 绕过服务层直接 psql 插跨画布边 → 复合外键拒绝
+
+### 5.6 stale
+
+- [x] `A→B→C`（全 `DERIVED_FROM`），`mark-stale A` 后 A、B、C 都是 `STALE`
+- [x] `Run` 表行数前后不变（0 → 0），且响应里 `runCreated: false`
+- [x] `A--CITES--> D`，`mark-stale A` 后 D 仍是 `DRAFT`
+
+### 5.7 前端
+
+- [x] 画布页 200，调色板 SSR 出 17 个 `data-testid="palette-item"`
+- [x] 位置落库（PATCH 200 → GET 读回 321/654）
+- [x] stale 琥珀 `#f59e0b` 出现 6 次，红色 `#ef4444` 0 次
+- [x] 入口端口在页面上登记为"上传/粘贴槽（无连接点）"，3 个（SOLVE / PROBE / GRADE）
+- ⚠ 节点卡片的拖拽与连线是 ReactFlow 客户端行为，无浏览器环境下只能验证 SSR 部分与 API 契约
+
+### 5.8 文档
+
+- [x] 本节逐条勾选，§6 记录命令与输出
+- [x] 未通过项保持 `[ ]`（目前没有）
 
 ---
 
-## 6. 验收记录
+## 6. 验收记录（M1 主体，2026-11-19）
 
-（通过后逐条补命令与输出，未通过的不写）
+全部命令在 `D:\ai学习辅助工作流搭建` 执行；API 监听 `127.0.0.1:3001`，Web 监听 `127.0.0.1:3000`。
+
+### 6.1 token 只存哈希
+
+```
+$ node scripts/seed-pat.ts --email=dev@studygraph.local --name=dev --scopes=canvas:read,canvas:write,run:execute,problem:read
+   token     : sg_pat_iVRhkAWc-q7Perl-lV9cNqvgfm_YnRLEBYqL1CH1zls
+   tokenHash : 434d851c720518ae…  ← 库里存的是这个 64 位十六进制
+```
+
+```
+库中存的是 sha256(明文)   期望=ca40fb8c…a69a  实际=ca40fb8c…a69a   ✔（另一枚测试 token）
+明文不在库里             期望=true            实际=true            ✔
+tokenHash 长度 64        期望=64              实际=64              ✔
+```
+
+### 6.2 鉴权四种情况
+
+```
+✔ 未带 Authorization        期望=401 实际=401
+✔ 伪造 token               期望=401 实际=401
+✔ 只读 token 写画布          期望=403 实际=403  {"code":"INSUFFICIENT_SCOPE"}
+✔ 已吊销 token             期望=401 实际=401  {"code":"TOKEN_REVOKED"}
+✔ 已过期 token             期望=401 实际=401  {"code":"TOKEN_EXPIRED"}
+```
+
+### 6.3 边：五条负向 + 其他负向
+
+```
+✔ N1 source.out→card.in        期望=400 实际=400  {"code":"EDGE_PORT_TYPE_MISMATCH"}
+✔ N2 chunk.out→paper.in        期望=400 实际=400  {"code":"EDGE_PORT_TYPE_MISMATCH"}
+✔ N3 extract.out→check.in      期望=400 实际=400  {"code":"EDGE_PORT_TYPE_MISMATCH"}
+✔ N4 card.out→chunk.in         期望=400 实际=400  {"code":"EDGE_PORT_TYPE_MISMATCH"}
+✔ N5 chunk.out→solve.problem   期望=400 实际=400  {"code":"EDGE_PORT_EXTERNAL"}
+✔ 自环                          期望=400 实际=400  {"code":"EDGE_SELF_LOOP"}
+✔ body 带 canvasId              期望=400 实际=400  {"code":"CANVAS_ID_IN_BODY"}
+✔ 重复边                        期望=409 实际=409  {"code":"EDGE_DUPLICATE"}
+✔ 并发同一条边                   期望=201,409 实际=201,409
+✔ 并发后库中该边只有一行           期望=1 实际=1
+```
+
+### 6.4 绕过服务层（psql 直插）
+
+```
+ERROR:  insert or update on table "Edge" violates foreign key constraint "Edge_canvasId_toNodeId_fkey"
+DETAIL:  Key (canvasId, toNodeId)=(cv_a, n_b1) is not present in table "Node".
+ERROR:  new row for relation "Edge" violates check constraint "edge_no_self_loop"
+edges_in_cv_a=1        ← 同一批次里那条合法边插入成功
+```
+
+### 6.5 正例与级联
+
+```
+✔ P1…P8 全部 201，边总数期望=8 实际=8
+✔ 删除画布 204；级联后 Node=0、Edge=0
+```
+
+### 6.6 stale
+
+```
+✔ mark-stale 请求 200  {"staleNodeIds": […], "runCreated": false}
+✔ A/B/C 全部 STALE
+✔ CITES 下游 D 未被标 STALE（仍是 DRAFT）
+✔ Run 表行数不变（0 → 0）
+```
+
+### 6.7 前端 SSR
+
+```
+status=200 bytes=22482
+paletteItems=17  nodeChips=7  staleChips=3  draftChips=4
+externalSlots=3  amber(#f59e0b)=6  red(#ef4444)=0  has17Types=true
+```
+
+画布页：`http://127.0.0.1:3000/c/cmwmvv3o20041q5cce796wiye`

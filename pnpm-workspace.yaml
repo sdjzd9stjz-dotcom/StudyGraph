@@ -11,6 +11,10 @@ nodeLinker: hoisted
 # 因此依赖安装统一走 --ignore-scripts；Prisma 查询引擎随包体一起落盘即可用。
 verifyDepsBeforeRun: false
 
+# node_modules 布局变化时 pnpm 会要求"清空重建"，非 TTY 下会直接放弃（ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY）。
+# 非交互环境默认允许重建。
+confirmModulesPurge: false
+
 # pkg-types@2.4.0 的 dist 里 import 'confbox/json'，而它自己声明的 confbox ^0.2 没有该子路径。
 # 强制统一到导出了 './json' 的 0.3.x，否则 prisma CLI 一启动就 ERR_PACKAGE_PATH_NOT_EXPORTED。
 overrides:

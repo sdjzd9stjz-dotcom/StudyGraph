@@ -1,0 +1,91 @@
+import Fastify from 'fastify'
+import type { FastifyInstance } from 'fastify'
+
+import type { PrismaClient } from '../../../packages/db/src/index.ts'
+import type { Env } from './env.ts'
+import { AppError, validationFailed } from './lib/errors.ts'
+import { createGuard } from './plugins/auth.ts'
+import { registerCanvasRoutes } from './routes/canvases.ts'
+import { registerEdgeRoutes } from './routes/edges.ts'
+import { registerGraphRoutes } from './routes/graph.ts'
+import { registerNodeRoutes } from './routes/nodes.ts'
+import { createObjectStore } from './storage/object-store.ts'
+
+export interface BuildAppOptions {
+  readonly env: Env
+  readonly prisma: PrismaClient
+}
+
+/**
+ * 组装 Fastify 应用。测试用 `app.inject()` 直接打路由，不需要监听端口。
+ */
+export async function buildApp(options: BuildAppOptions): Promise<FastifyInstance> {
+  const { env, prisma } = options
+
+  const app = Fastify({
+    logger:
+      env.NODE_ENV === 'test'
+        ? false
+        : { level: process.env.LOG_LEVEL ?? 'info', transport: undefined },
+    bodyLimit: 2 * 1024 * 1024,
+  })
+
+  // ── 统一错误信封 ────────────────────────────────────────────────────────────
+  app.setErrorHandler((error, request, reply) => {
+    if (error instanceof AppError) {
+      return reply.status(error.status).send(error.toEnvelope())
+    }
+
+    const status = (error as { statusCode?: number }).statusCode
+    if (status && status >= 400 && status < 500) {
+      // Fastify 自带的 400（JSON 解析失败、content-type 不对）也走同一信封
+      return reply
+        .status(400)
+        .send(validationFailed({ reason: (error as Error).message }).toEnvelope())
+    }
+
+    request.log.error({ err: error }, 'unhandled error')
+    return reply.status(500).send({
+      error: { code: 'INTERNAL_ERROR', message: '服务器内部错误' },
+    })
+  })
+
+  app.setNotFoundHandler((request, reply) => {
+    reply.status(404).send({
+      error: {
+        code: 'CANVAS_NOT_FOUND',
+        message: `路由不存在：${request.method} ${request.url}`,
+      },
+    })
+  })
+
+  // ── 最小 CORS（web 跑在 3000，API 在 3001）──────────────────────────────
+  app.addHook('onSend', async (request, reply, payload) => {
+    reply.header('access-control-allow-origin', request.headers.origin ?? '*')
+    reply.header('access-control-allow-headers', 'authorization, content-type')
+    reply.header('access-control-allow-methods', 'GET, POST, PATCH, DELETE, OPTIONS')
+    return payload
+  })
+  app.options('/*', async (_request, reply) => reply.status(204).send())
+
+  // ── 健康检查（不鉴权）──────────────────────────────────────────────────
+  app.get('/health', async () => {
+    try {
+      await prisma.$queryRaw`select 1`
+      return { status: 'ok', db: 'up' }
+    } catch {
+      return { status: 'degraded', db: 'down' }
+    }
+  })
+
+  // ── 业务路由 ───────────────────────────────────────────────────────────
+  const guard = createGuard(prisma)
+  const objectStore = createObjectStore({ endpoint: env.S3_ENDPOINT, bucket: env.S3_BUCKET })
+
+  registerCanvasRoutes(app, { prisma, guard, objectStore })
+  registerNodeRoutes(app, { prisma, guard })
+  registerEdgeRoutes(app, { prisma, guard })
+  registerGraphRoutes(app, { prisma, guard })
+
+  return app
+}
