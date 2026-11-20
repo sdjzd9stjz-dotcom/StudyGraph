@@ -119,7 +119,7 @@ PREREQUISITE | CONTRAST | CONTAINS | APPLIES_TO | VARIANT_OF
 | 图谱 | PostgreSQL 邻接表 + 递归 CTE（**禁止引入 Neo4j**） |
 | 队列 | BullMQ + Redis |
 | 公式 | KaTeX（前端渲染）+ MathML（存储标准形） |
-| 模型 | 自建统一 LLM Gateway 抽象层，首期接 2 个供应商，支持 BYOK 与前缀缓存 |
+| 模型 | 自建统一 LLM Gateway 抽象层，**预置 10+ 供应商目录 + 学生自带凭据（BYOK）**，支持前缀缓存。详见「多供应商与 BYOK」一节 |
 
 **选型理由（写进 `docs/architecture.md`）：**
 
@@ -289,6 +289,185 @@ export function registerExecutor(e: NodeExecutor): void
 
 > **默认要求**：`CONDITION` 维度必须生成至少一道「条件缺失导致方法失效」的陷阱题。这是方法教学中被跳过最多、又最决定水平的一环。
 
+## 多供应商与 BYOK（学生自带模型凭据）
+
+**核心体验：学生填入自己的 key、选个模型就能用。预置常见厂商端点，无需知道 baseUrl；也可自定义 OpenAI 兼容端点。对标 Cherry Studio 的供应商管理体验。**
+
+### 为什么必须做
+
+1. 学生付不起平台统一供模型的成本，但每个人手上有不同的额度
+2. 校园网关、企业代理、本地 Ollama 各有各的端点，写死两三家覆盖不了
+3. 但**前端绝不许直连厂商 API** —— 凭据要加密落库、用量要计量、前缀缓存要生效，这些只能在服务端做
+
+> 「自建 Gateway」这条不变。变的是凭据来源：从一个系统密钥，变成每个用户自己的密钥。
+
+### 数据模型（4 张新表）
+
+```prisma
+/// 系统预置厂商目录（运维维护，学生只读）
+model Provider {
+  id          String   @id @default(cuid())
+  slug        String   @unique            // openai | deepseek | anthropic | moonshot | ...
+  name        String
+  protocol    ProviderProtocol            // OPENAI | ANTHROPIC | GEMINI
+  baseUrl     String
+  docsUrl     String?                     // 「去哪里拿 key」
+  byokEnabled Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  models      ProviderModel[]
+}
+
+model ProviderModel {
+  id            String  @id @default(cuid())
+  providerId    String
+  modelId       String                    // 请求时用的 model 名
+  displayName   String
+  contextWindow Int
+  maxOutput     Int?
+  /// { jsonObject: boolean, vision: boolean, reasoning: boolean, toolUse: boolean }
+  capabilities  Json
+  /// 每百万 token，用于估算花费；厂商不给价就留空，不要瞎填
+  inputPrice    Decimal? @db.Decimal(12, 6)
+  outputPrice   Decimal? @db.Decimal(12, 6)
+  enabled       Boolean @default(true)
+  @@unique([providerId, modelId])
+}
+
+/// 用户自己的凭据。**只进不出**
+model UserCredential {
+  id              String  @id @default(cuid())
+  userId          String
+  providerId      String
+  label           String?                 // 用户自起名："我的 DeepSeek"
+  ciphertext      Bytes                   // AES-256-GCM
+  iv              Bytes
+  authTag         Bytes
+  keyVersion      Int                     // 支持主密钥轮换时双版本并存
+  last4           String                  // 仅用于展示：sk-…a1b2
+  status          CredentialStatus        // UNVERIFIED | VALID | INVALID | RATE_LIMITED
+  lastCheckedAt   DateTime?
+  lastError       String?
+  /// 自定义 OpenAI 兼容端点用；为空则用 Provider.baseUrl
+  baseUrlOverride String?
+  createdAt       DateTime @default(now())
+  @@unique([userId, providerId, label])
+  @@index([userId])
+}
+
+/// 按任务类型的模型偏好（可选，不配则走默认）
+model UserModelPref {
+  id           String @id @default(cuid())
+  userId       String
+  taskType     String                     // chunk | extract | judge | quiz | check | variant | probe | method | solve
+  credentialId String
+  modelId      String
+  @@unique([userId, taskType])
+}
+```
+
+### 凭据安全（红线，不可协商）
+
+| 要求 | 具体 |
+| --- | --- |
+| 加密存储 | AES-256-GCM，主密钥来自进程环境变量 `STUDYGRAPH_SECRET_KEY`，**绝不进仓库、不进 .env 文件** |
+| **只进不出** | 任何 API 响应只返回 `last4` 掩码。**明文 key 一次都不许出现在响应体里** |
+| 不回显 | 编辑页展示 `sk-…a1b2`，用户要换就重填整串，**不做"显示原文"** |
+| 不进日志 | 不进日志、错误信息、`Run.errorMessage`、`details`、`NEXT_PUBLIC_*`、URL query |
+| 跨用户隔离 | 读取凭据的每条查询都必须带 `userId` 条件；**管理员也不能读明文** |
+| 导出剔除 | 备份 / 导出功能里 key 必须被剔除 |
+
+### 预置厂商目录（首期至少这些）
+
+| 厂商 | protocol | baseUrl |
+| --- | --- | --- |
+| OpenAI | OPENAI | `https://api.openai.com/v1` |
+| Anthropic | ANTHROPIC | `https://api.anthropic.com` |
+| Google Gemini | GEMINI | 原生协议 |
+| DeepSeek | OPENAI | `https://api.deepseek.com` |
+| Moonshot / Kimi | OPENAI | `https://api.moonshot.cn/v1` |
+| 智谱 GLM | OPENAI | `https://open.bigmodel.cn/api/paas/v4` |
+| 阿里通义 DashScope | OPENAI | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| 硅基流动 SiliconFlow | OPENAI | `https://api.siliconflow.cn/v1` |
+| OpenRouter | OPENAI | `https://openrouter.ai/api/v1` |
+| Ollama（本地） | OPENAI | `http://localhost:11434/v1`，key 可空 |
+| **自定义 OpenAI 兼容** | OPENAI | 用户自填 `baseUrlOverride` |
+
+**约束：**
+
+- 预置项**只填 key 就能用**，不要求用户知道 baseUrl
+- 每项都要有「获取 key」的文档链接
+- **OpenAI 兼容的厂商共用一个适配器，靠 `protocol` 分派**。不许复制粘贴多份适配器只改域名——那样修一个 bug 不会同步到其他家
+
+### 三个产品问题，必须先想清楚
+
+**① 用户不配 key 怎么办**
+
+```
+有系统 key   → 回落系统 key，界面明确标注「使用平台额度」
+无系统 key   → 报 NO_MODEL_CONFIGURED，中文提示引导去配置
+```
+
+**绝不允许**在无可用模型时静默跑一个假结果。
+
+**② 用户选了能力不够的模型**
+
+学生可能为了省钱选一个不支持 JSON 输出的模型跑 `extract`，结果整条链路产物作废，而他不知道为什么。
+
+- 每个 `taskType` 声明所需能力（如 `extract` 需要 `jsonObject: true`）
+- 选中不满足能力的模型时，**保存即拒绝**，并说明缺哪项能力
+- 厂商未声明能力时允许选择，但打 `UNTESTED` 标记；首次失败时给出针对性提示
+
+**③ 成本算谁的**
+
+`UsageRecord` 必须能回答「这笔 token 是谁的钱」：
+
+```
+credentialId 为空 → 平台承担
+credentialId 非空 → 该用户承担
+```
+
+按用户展示自己的月度用量与估算花费。**用户的 key 用量不许算进平台账。**
+
+### 测试连接：不能拿「保存成功」冒充「能用」
+
+- 保存时**不做自动探活**（拖慢且易误判）
+- 提供显式的「测试连接」：一次最小请求，超时 10s
+- **判定要分类，不能一锅烩：**
+
+| 结果 | 状态 |
+| --- | --- |
+| 200 + 合法响应 | `VALID` |
+| 401 / 403 | `INVALID` |
+| 429 | `RATE_LIMITED` —— **不是 INVALID**，key 是对的 |
+| 超时 / 网络错误 | **保持原状态**，只记 `lastError` |
+
+> 最后一行最容易做错。**不能因为一次网络抖动，把一把好 key 判死。**
+
+### 路由解析顺序
+
+```ts
+resolveModel(taskType, userId) → { credentialId | null, provider, model, baseUrl, apiKey }
+```
+
+```
+1. UserModelPref[taskType] 有配置        → 用用户的
+2. 无配置，但用户有该任务的默认凭证      → 用用户的
+3. 用户无凭证                            → 回落系统 key
+4. 都没有                                → NO_MODEL_CONFIGURED
+```
+
+**解析结果必须进指纹参数**（`credentialId` + `modelId` + `baseUrl` 都算）。
+
+> 否则「换了 key / 换了模型，却命中旧缓存」——这就是把缓存变成恒真函数的老毛病。
+
+### OpenAI 兼容代理
+
+`POST /v1/chat/completions` 必须走同一套路由与计量：
+
+- 请求里可以指定 `model`，但**不能指定 baseUrl 或 key**（那等于让调用方绕过凭据体系）
+- 计量写入 `UsageRecord`，归属按上文的 `credentialId` 规则
+
+
 ---
 
 ## API 契约（必须实现）
@@ -322,8 +501,33 @@ POST /v1/papers/assemble                    → 组卷，body 为 spec
 # 分析
 GET  /v1/analytics/error-tags?range=30d     → 错因分布
 
+# 供应商与凭据（BYOK）
+GET  /v1/providers                          → 预置目录（含 models、docsUrl，不含任何用密钥）
+GET  /v1/credentials                        → 只返回 last4 掩码与状态
+POST /v1/credentials                        → { providerId, apiKey, label?, baseUrlOverride? }
+PATCH  /v1/credentials/:id                  → 换 key / 改名 / 改 baseUrl
+DELETE /v1/credentials/:id
+POST /v1/credentials/:id/test               → 显式探活，返回 VALID|INVALID|RATE_LIMITED
+GET  /v1/model-prefs                        → 各 taskType 当前用哪个模型
+PUT  /v1/model-prefs/:taskType              → { credentialId, modelId }
+
 # 兼容层
 POST /v1/chat/completions                   → OpenAI 兼容代理（计量 + 路由 + 前缀缓存）
+GET  /v1/models                             → 当前路由表实际可用的模型
+POST /v1/embeddings                         → 向量化（同一解析链与归属规则）
+POST /v1/messages                           → Anthropic 兼容（含 stream）
+
+# Skill（F2）
+GET    /v1/skills                           → 内置 + 自己的；不含他人 USER skill
+POST   /v1/skills                           → 新建（scope=USER）
+PATCH  /v1/skills/:id                       → 改正文 / 开关（改 version）
+DELETE /v1/skills/:id
+PUT    /v1/nodes/:id/skills                 → { skillIds: [] } 绑定到节点（进指纹）
+
+# 草案（G1）
+POST /v1/canvases/:id/drafts                → { request } → 返回草案，不落画布
+POST /v1/drafts/:id/accept                  → 落画布（节点 DRAFT/READY，不执行）
+POST /v1/drafts/:id/discard
 ```
 
 ### MCP Server
@@ -422,6 +626,91 @@ problem.rejected
 
 ---
 
+## 新能力（2026-11-20 用户拍板：F2 / G1 / H1）
+
+> 范围定义与取舍理由见 `docs/需求-新能力范围定义.md`。本节只写**已拍板的约束**，未选中项不在范围内。
+
+### F2 · Skill 指令包
+
+**定位**：一段可加载的说明（可选附带脚本），在节点执行时作为**额外上下文**注入，用来扩展模型在某类任务上的做法。不是学习模块，不是前端插件。
+
+```prisma
+model Skill {
+  id           String   @id @default(cuid())
+  slug         String   @unique            // chinese-math-notation | citation-strict | ...
+  name         String
+  description  String                      // 何时该用它（用于选择）
+  instructions String                      // 注入 system 的正文
+  /// 可选的辅助材料（示例、检查清单），按需拼接，不参与指纹之外的隐式行为
+  assets       Json?                       // [{ name, kind, content }]
+  scope        SkillScope                  // BUILTIN | USER
+  ownerId      String?                     // scope=USER 时必填
+  enabled      Boolean  @default(true)
+  version      Int      @default(1)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model NodeSkill {
+  nodeId  String
+  skillId String
+  @@id([nodeId, skillId])
+}
+```
+
+**四条约束（与既有硬约束同级）：**
+
+1. **skill 必须显式绑定到节点**（`NodeSkill`），不做“全局自动加载”。绑了哪些、各自 `version` 多少，**全部进指纹**——否则「加了 skill 却命中旧缓存」就是 A 项错误的翻版
+2. **skill 正文只能追加到 system 前缀，不得改写用户输入**；含指令冲突时以硬约束为准（例如 skill 要求“无引文也可 VERIFIED”，一律无效）
+3. **`scope=USER` 的 skill 读取必须带 `ownerId` 条件**，与他人隔离；`BUILTIN` 由运维维护
+4. **skill 不得包含凭据**；加载路径与 BYOK 的 `ciphertext` 完全无关
+
+**注入顺序**（固定，写进指纹）：`硬约束摘要 → skill（按 slug 排序）→ 节点 prompt`
+
+### G1 · 对话式编排（草案，不自动执行）
+
+学生用一句话描述需求，系统生成**节点图草案**。草案与真实画布严格分离。
+
+```prisma
+model GraphDraft {
+  id        String   @id @default(cuid())
+  canvasId  String
+  ownerId   String
+  request   String                          // 学生的原话
+  proposal  Json                            // { nodes: [...], edges: [...] }
+  status    DraftStatus                     // PROPOSED | ACCEPTED | DISCARDED
+  createdAt DateTime @default(now())
+}
+```
+
+**三条约束：**
+
+1. **草案不落画布、不执行、不消耗任务 token**（生成草案本身的那一次模型调用除外，且必须计入 `UsageRecord`）
+2. **必须由学生显式确认才落画布**，落地后节点状态是 `DRAFT`/`READY`，仍需逐节点显式执行——**绝不因为“草案被确认”就自动开跑**（硬约束 2）
+3. 草案里的每个节点必须给出**端口类型与上游依赖**，落画布时走与手工创建相同的校验，不做特权通道
+
+> 明确不做：agent 连续自动执行多步（TapNow 式的“一路做到底”）。这与硬约束 2 直接冲突。
+
+### H1 · 兼容网关
+
+让第三方客户端（ChatGPT 兼容 / Claude 兼容）能把本服务当作模型端点使用，并复用同一套路由、计量与前缀缓存。
+
+| 端点 | 要求 |
+| --- | --- |
+| `GET /v1/models` | 返回**当前路由表实际可用**的模型；不含未启用的、不含任何凭据信息 |
+| `POST /v1/chat/completions` | 已规划；本轮补 **SSE 流式**（`stream: true`） |
+| `POST /v1/embeddings` | 走同一解析链；`credentialId` 归属规则不变 |
+| `POST /v1/messages` | **Anthropic 兼容**（含 `content` 数组与 `stream`），映射到同一 Gateway |
+
+**四条约束：**
+
+1. **调用方不得指定 `baseUrl` 或 `apiKey`**——只能选模型名，凭据由服务端解析
+2. 计量写入 `UsageRecord`，归属按 `credentialId`：为空即平台承担，非空即该用户承担
+3. 兼容层**不得绕过**任何硬约束：不带 span 的概念卡仍然不能 `VERIFIED`
+4. 鉴权用 PAT（`run:execute` scope），与画布 API 同一套
+
+---
+
 ## 实施顺序（严格按此推进，每阶段产出可运行 demo）
 
 ### M1 画布底座
@@ -435,6 +724,7 @@ problem.rejected
 - `source` / `chunk` / `extract` / `card` 四节点跑通
 - span 溯源抽屉
 - 指纹缓存
+- **BYOK 后端**：Provider 目录、凭据加密存储、按 taskType 路由、用量归属（界面留给 UI 阶段）
 
 ### M3 知识视图
 - `prereq` 节点
@@ -448,6 +738,13 @@ problem.rejected
 - MCP server
 - PAT 鉴权
 - 克隆接口
+
+### M4.5 新能力（F2 / G1 / H1，2026-11-20 拍板）
+- **F2** `Skill` / `NodeSkill` 两表 + 绑定进指纹 + 注入顺序
+- **G1** `GraphDraft` 草案：生成不落画布，确认后仍需逐节点执行
+- **H1** `/v1/models`、`/v1/embeddings`、`/v1/messages`、`chat/completions` 流式
+
+> 顺序上排在 M4 之后：兼容网关依赖 PAT 与路由表，草案落画布依赖画布 CRUD。**M2 未关门之前不开工。**
 
 ### M5 解题方法
 - `probe` / `method` / `solve` / `diagnose`
@@ -518,3 +815,10 @@ problem.rejected
 | 生成无 span 的概念卡 | `UNVERIFIED` 拦截 |
 | 组卷时悄悄用相似题补足缺口 | 明确报缺口 |
 | 写作节点直接生成成段正文 | 骨架 + 证据槽位 + AI 参与度元数据 |
+| 把用户的 API key 明文存库或返回给前端 | AES-256-GCM 加密，响应只给 `last4` |
+| 任何网络异常都判 key 失效 | 超时保持原状态，只有 401/403 判 INVALID |
+| 给节点绑了 skill 却没进指纹 | `skillId + version` 必须进指纹，否则命中旧缓存 |
+| 草案被确认后自动开跑下游 | 确认只落画布；执行仍要逐节点显式触发 |
+| agent 自己连跑多步（TapNow 式） | 只出草案，等人点执行 |
+| 兼容层放宽硬约束（如无 span 也给 VERIFIED） | 兼容层只是入口，判据一处不放 |
+| skill 里塞凭据或全局自动加载 | skill 只追加 system；绑定必须逐节点显式 |

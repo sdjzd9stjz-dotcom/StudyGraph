@@ -1,0 +1,10 @@
+{"event":"canvas","canvasId":"cmwot6x7r0001q5nkbxzta4x4","ownerId":"cmwmvqkhu0000q5l0m1s11739","fixture":"D:\\ai学习辅助工作流搭建\\.tmp-backup\\fixtures\\controlled-012.pptx"}
+{"event":"run","label":"SOURCE","nodeId":"cmwot6x7x0003q5nk614oi7d2","runId":"cmwot6x870005q5nkwk0lfv1g","status":"SUCCEEDED","tokensIn":0,"tokensOut":0}
+{"event":"run","label":"CHUNK","nodeId":"cmwot6xa9000jq5nknl4y1hkb","runId":"cmwot6xag000nq5nkcqyj1dmj","status":"SUCCEEDED","tokensIn":0,"tokensOut":0}
+{"event":"run","label":"EXTRACT","nodeId":"cmwot6xav000rq5nkpt0ry7xl","runId":"cmwot6xb0000vq5nkb44qrel2","status":"SUCCEEDED","tokensIn":430,"tokensOut":266}
+{"event":"extract-summary","claims":5,"byStatus":{"VERIFIED":3,"UNVERIFIED":2}}
+{"event":"run","label":"CARD","nodeId":"cmwot6z0t0010q5nklsyhfjm5","runId":"cmwot6z100014q5nki7d857ya","status":"SUCCEEDED","tokensIn":0,"tokensOut":0}
+{"event":"artifact-completeness","canvasId":"cmwot6x7r0001q5nkbxzta4x4","extractArtifacts":1,"claims":5,"byStatus":{"VERIFIED":3,"UNVERIFIED":2},"fields":{"quote":5,"spanText":5,"classifierVersion":5,"similarity":5,"lengthRatio":5,"total":5},"classifierVersions":["387fbb711ed1"],"expectedClassifierVersion":"387fbb711ed1","missingSamples":{"quote":[],"spanText":[],"classifierVersion":[],"similarity":[],"lengthRatio":[]}}
+{"event":"cards","created":3,"skipped":2}
+{"event":"audit","audit":{"checked":3,"downgraded":[],"failures":[],"unverifiableSources":[]}}
+{"event":"completed","canvasId":"cmwot6x7r0001q5nkbxzta4x4","tokensIn":430,"tokensOut":266,"conceptsByStatus":{"VERIFIED":3},"claimsByStatus":{"VERIFIED":3,"UNVERIFIED":2}}
