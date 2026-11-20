@@ -177,3 +177,154 @@ routing：`chunk/extract/judge/check/quiz → 小模型`，`probe/method/solve/v
 2. **真实 PDF**：给路径与页数，我完成 `source`（含扫描版拒识）→ `chunk` → `extract` → `card`。
 
 这两样一到，§4.3 之后的验收我按天推进，不再有未验证项。
+
+---
+
+## 7. 2026-11-20 · 环境恢复后的第一批（M2 收尾 §3.4 第 2 / 7 / 13 项）
+
+> **本文件 §0–§6 写于 M2 早期，已严重过时**（那里说四节点未实现，而实际 10 份 PPTX 已跑出 40 次 SUCCEEDED、
+> 266 页 / 220 span、27 条候选 → 7 张 VERIFIED）。未重写旧段落，只在本节记录本轮实测。
+> 当前权威台账是 `docs/监理交接-状态快照.md` §5。
+
+### 7.1 环境（env-check 原文）
+
+```
+docker engine  : OK (29.9.3)
+postgres       : OK (PostgreSQL 16.16 (Debian 16.16-1.pgdg12+1) on x86_64-pc-linu)
+redis          : OK
+s3             : OK (SeaweedFS, HTTP 200)
+deepseek key   : MISSING
+deepseek probe : SKIP (no key)
+
+❌ 环境未就绪：后续步骤不执行
+=== EXIT: 1 ===
+```
+
+容器身份复核：`pgvector/pgvector:pg16` + `PostgreSQL 16.16` + `pgvector 0.8.7`，三容器 healthy。
+**LLM key 仍缺**，所以 4 / 8 / 9 / 10 / 11 项（依赖模型调用的全链路重跑与校准）依然不做。
+
+### 7.2 §3.4 第 2 项 · 迁移两路径
+
+**空库路径**（临时库 `studygraph_emptycheck`，一次 deploy 全部 7 份）：
+
+```
+7 migrations found in prisma/migrations
+Applying migration `20261118030000_init`
+Applying migration `20261118030100_guards`
+Applying migration `20261119000000_edge_no_self_loop`
+Applying migration `20261119000000_pending_review_enum`
+Applying migration `20261119000100_pending_review_guards`
+Applying migration `20261120000000_span_region`
+Applying migration `20261120000100_card_review_decision`
+All migrations have been successfully applied.
+=== EXIT: 0 ===
+```
+
+形状：`tables=39 checks=8 triggers=6 views=4`，枚举 29 个（现库 28 → 差的就是 `PENDING_REVIEW`）。
+
+**老库路径**（现库 `studygraph`，升级前先 `pg_dump -Fc` 到 `.tmp-backup/`，195 KB）：
+
+```
+7 migrations found in prisma/migrations
+Applying migration `20261119000000_pending_review_enum`
+Applying migration `20261119000100_pending_review_guards`
+Applying migration `20261120000100_card_review_decision`
+All migrations have been successfully applied.
+=== EXIT: 0 ===
+```
+
+升级后：`VerificationStatus=UNVERIFIED,VERIFIED,PENDING_REVIEW,MERGED`、`ProblemStatus=PENDING,VERIFIED,REJECTED`、
+`tables=39 checks=8 triggers=6 views=4`。
+
+**行为验证**（事务内实测，结尾 `ROLLBACK`，脚本 `.tmp-backup/trigger-behavior-test.sql`）：
+
+```
+NOTICE:  NEG1 PASS: rejected, sqlstate=23514 msg=Concept tst_c1 cannot be VERIFIED without at least one source span citation
+NOTICE:  NEG2 PASS: rejected, sqlstate=23514 msg=Problem tst_p_bad cannot be VERIFIED without at least one source span citation
+ phase  |   ent   |  status
+--------+---------+----------
+ BEFORE | Concept | VERIFIED
+ BEFORE | Method  | VERIFIED
+ BEFORE | Problem | VERIFIED
+ phase |   ent   |   status
+-------+---------+------------
+ AFTER | Concept | UNVERIFIED
+ AFTER | Method  | UNVERIFIED
+ AFTER | Problem | PENDING
+view_verified_without_citation_rows=0
+view_method_concept_mismatch_rows=0
+```
+
+`PENDING_REVIEW` 也不是免检口（空库上测）：无引文置 `PENDING_REVIEW` 被拒
+（`T3 PASS: ... cannot be PENDING_REVIEW without at least one source span citation`），
+先插引文再置 `PENDING_REVIEW` 成功（`T4 | PENDING_REVIEW`）。
+
+- **删掉这条断言会漏什么**：只验「migrate deploy 退出码 0」会漏掉「触发器对 `Problem` 传了不存在的枚举值」
+  （即 010 那次 22P02 的同型错误），以及「`PENDING_REVIEW` 被当成无引文通道」。
+- 降级目标是**按实体传参**的：Concept/Method → `UNVERIFIED`，Problem → `PENDING`（`ProblemStatus` 无 `UNVERIFIED`），
+  与 `20261119000100_pending_review_guards/migration.sql` 的注释一致。
+
+### 7.3 §3.4 第 7 项 · 包级 tsc
+
+```
+node node_modules/typescript/bin/tsc -p apps/api/tsconfig.json --noEmit
+=== EXIT: 0 ===
+```
+
+`apps/api/tsconfig.json` 已存在（012 补的），`strict: true` 未降，`include` 覆盖 `src/**` + `test/**`。
+
+### 7.4 §3.4 第 13 项 · guards-sync 反向自测（本轮发现并修了真缺陷）
+
+**先看到的现象**：`node scripts/check-guards-sync.mjs` 原本报红——
+`guards.sql 缺少 TRIGGER:concept_verified_needs_citation`，但该触发器就在 `guards.sql` 第 5 行。方向是反的。
+
+根因有两条，都在校验器自己身上：
+
+1. **切分器不认 dollar-quote**：按 `;` 切，PL/pgSQL 的 `RAISE EXCEPTION ...;` 把 `CREATE FUNCTION` 截断，
+   两个函数对象整条丢失。
+2. **语句开头的注释行未剥除**：`-- 说明\nCREATE TRIGGER ...` 这种写法因 `^CREATE` 匹配失败被跳过，
+   `guards.sql` 的首条触发器与两个函数因此长期隐身。
+
+修后重建，对象数由 6 → **12**（2 FUNCTION / 6 TRIGGER / 4 VIEW），与库里 `triggers=6 views=4` 对得上：
+
+```
+✅ 已重建 guards.sql（12 个守卫对象）
+   FUNCTION:studygraph_assert_citation_before_verify  ← 20261118030100_guards -> 20261119000100_pending_review_guards
+   ...
+✅ guards 同步（12 个守卫对象，覆盖全部 migration）
+```
+
+**反向自测（8 条，全部要求「报红且点名该对象」）**：
+
+```
+✅ 基线：未改动时无差异 — 0 条差异
+✅ 删掉触发器 → 报红且点名该对象 — TRIGGER:problem_verified_needs_citation 定义不一致…
+✅ 删掉 $$ 函数 → 报红且点名该函数 — FUNCTION:studygraph_downgrade_when_last_citation_removed 定义不一致…
+✅ 函数体改一个字符 → 报红且点名该函数 — …
+✅ 触发器参数改值 → 报红且点名该触发器 — …
+✅ guards.sql 缺对象 → 报红
+✅ guards.sql 多对象 → 报红
+✅ 同名重定义留下 provenance — 9 个对象记录了 20261118030100_guards -> 20261119000100_pending_review_guards
+✅ 自测全部通过（8 条）
+```
+
+- **删掉这条断言会漏什么**：删掉「删 $$ 函数」一条，就无法发现切分器吞掉函数——
+  而这正是修复前真实存在的状态（校验器绿，函数体随便改都不报）。
+- 自测第一版写成了「只要有差异就算过」，在基线本来就红的情况下 4 条用例是蒙过去的；
+  已收紧为「差异必须点名被改的对象」。
+
+### 7.5 顺带发现（未修，登记）
+
+| 项 | 现象 | 影响 |
+| --- | --- | --- |
+| `scripts/check-drift.mjs` | 本轮 `migrate diff` 仍报两条 `DROP INDEX`（`Concept_embedding_hnsw` / `Concept_name_trgm`），退出码 1 | 预期行为（Prisma 推不出 HNSW/trgm），不是缺陷；只要不生成新迁移就不受影响 |
+| `tmp/build-guards-sql.mjs` | 只拼两份 migration 的旧工具，已被 `--rebuild` 取代，且 `tmp/` 在 gitignore 内 | 谁再跑一次就会把 `guards.sql` 打回 6 对象状态。建议删除 |
+| `packages/db/sql/guards.sql` 可读性 | `--rebuild` 输出为单行压缩格式，丢了原先的说明注释 | 文件是「供人阅读的同步副本」，现在不好读；需要的话让生成器保留 `-- name ← 来源迁移` |
+
+### 7.6 本轮仍未完成
+
+- §3.4 第 1 项（DeepSeek key）、第 4/8/9/10/11 项（全链路、产物完整性、27 条校准表、三态落库数、新画布重跑）——**等 key**
+- §3.4 第 3 项（写库实验 a/b/c/d + 两条降级 + 视图 0 行）——视图空已在 7.2 顺带验了，写库实验未做
+- §3.4 第 5 项（巡检 A–F 落库实测）、第 6 项（复核接口四条 curl）——未做
+- §3.4 第 12 项（前端溯源抽屉）——**UI 阶段，开工前需先问用户一次**
+- 第 13 项（BullMQ 队列）——可延后
