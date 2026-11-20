@@ -137,6 +137,11 @@ enum EdgeReviewStatus {
 }
 
 /// UNVERIFIED 资产不得进入卡片、不得作为出题依据。
+enum CardReviewDecision {
+  ACCEPT
+  REJECT
+}
+
 enum VerificationStatus {
   UNVERIFIED
   VERIFIED
@@ -620,6 +625,7 @@ model Concept {
   /// 人工复核痕迹（SG-SUP-010 §2.5）：PENDING_REVIEW → VERIFIED/UNVERIFIED 时写入
   reviewedAt DateTime?
   reviewedBy String?
+  reviewDecision CardReviewDecision?
 
   // ── 记忆掌握度（FSRS 调度，独立于 Method.proficiency）──
   mastery        Float    @default(0)
@@ -749,6 +755,7 @@ model Method {
   /// 人工复核痕迹（SG-SUP-010 §2.5），与 Concept 同口径
   reviewedAt DateTime?
   reviewedBy String?
+  reviewDecision CardReviewDecision?
 
   /// ① 看到什么用它 —— 识别特征
   trigger Json

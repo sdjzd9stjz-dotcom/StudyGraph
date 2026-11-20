@@ -48,10 +48,10 @@ export const TEXT_LAYER = {
  * T2（PENDING_REVIEW）= 引文逐字可查 + 定义是转述。判定只用字符 bigram Jaccard，
  * 纯机械、可复现、**没有模型参与**（自己出题自己答不算判据）。
  *
- * `REVIEW_MIN_BIGRAM_SIMILARITY` 用 27 条真实被拒 claim 校准过，校准表见
- * `docs/交付/监理回报-010-分层校验与M2收尾.md` §1；改它必须说明理由。
+ * 014 新批次中，目录型弱引文最高 J=0.520，正确切线转述 J=0.537。
+ * 当前取两者之间的 0.53；逐条复核记录见 docs/交付/校准证据-014-真实候选.md。
  */
-export const REVIEW_MIN_BIGRAM_SIMILARITY = 0.45
+export const REVIEW_MIN_BIGRAM_SIMILARITY = 0.53
 
 /** 定义长度 / 引文长度 的允许区间：太短往往是空话，太长往往是加了外部知识 */
 export const REVIEW_MIN_LENGTH_RATIO = 0.5

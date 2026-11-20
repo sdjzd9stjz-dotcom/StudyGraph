@@ -37,7 +37,7 @@ test('C：删掉一个未实现的计划项 → ok:false、该类型进 missingP
     assert.equal(report.planned.includes('PREREQ'), false)
     assert.deepEqual(report.missingPlan, ['PREREQ'])
   } finally {
-    ;(PLANNED_PLAN as Record<string, string>).PREREQ = saved
+    ;(PLANNED_PLAN as Record<string, string>).PREREQ = saved as string
   }
 
   assert.equal(selfCheck().ok, true)

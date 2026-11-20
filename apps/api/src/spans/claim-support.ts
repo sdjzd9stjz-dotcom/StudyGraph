@@ -12,12 +12,38 @@
  *
  * **A1 一秒都不能松**：T2（待人复核）的引文同样是逐字可查的，它只是措辞不是原文。
  */
+import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+
 import {
   MIN_RESIDUAL_CHARS,
   REVIEW_MAX_LENGTH_RATIO,
   REVIEW_MIN_BIGRAM_SIMILARITY,
   REVIEW_MIN_LENGTH_RATIO,
 } from '../../../../packages/contracts/src/index.ts'
+
+/**
+ * 分类器版本（SG-SUP-012 §2.4）：规则或阈值一变，这个值就变。
+ *
+ * 由两部分哈希而成：**判定规则源码** + **阈值常量**。
+ * 产物里带上它，"这批数据是旧规则判的"就能一眼看出来，不用靠人记。
+ */
+export const CLASSIFIER_RULES = {
+  MIN_RESIDUAL_CHARS,
+  REVIEW_MIN_BIGRAM_SIMILARITY,
+  REVIEW_MIN_LENGTH_RATIO,
+  REVIEW_MAX_LENGTH_RATIO,
+} as const
+
+export function computeClassifierVersion(source: string, thresholds: Record<string, unknown>): string {
+  return createHash('sha256').update(source).update(JSON.stringify(thresholds)).digest('hex').slice(0, 12)
+}
+
+export const CLASSIFIER_VERSION = computeClassifierVersion(
+  readFileSync(fileURLToPath(import.meta.url), 'utf8'),
+  CLASSIFIER_RULES,
+)
 
 export type ClaimVerdict = 'VERIFIED' | 'PENDING_REVIEW' | 'UNVERIFIED'
 
@@ -43,7 +69,18 @@ export interface ClaimClassification {
   readonly lengthRatio: number
 }
 
-const PREDICATE = /是|指|称为|叫做|称作|等于|满足|存在|定义为|当且仅当|\b(?:is|are|means|denotes|refers to)\b/iu
+const words = new Intl.Segmenter('zh', { granularity: 'word' })
+const predicate = /^(?:是|指|称为|叫做|称作|等于|满足|存在|定义为|当且仅当|is|are|means|denotes)$/iu
+
+function containsPredicate(definition: string, name: string): boolean {
+  if (!name) return false
+  // Keep word boundaries for English and exclude the subject even when its spacing varies.
+  const namePattern = [...name].map(ch => ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[\\s\\p{P}\\p{S}]*')
+  const remaining = definition.replace(new RegExp(namePattern, 'gu'), '\uFFFC')
+  if (/\uFFFC\s*(?:是(?!否)|指(?!导|引|南|数|标))/u.test(remaining)) return true
+  if (/\brefers\s+to\b/iu.test(remaining) || /(?:统称|定义)为|当且仅当/u.test(remaining)) return true
+  return Array.from(words.segment(remaining)).some(word => predicate.test(word.segment))
+}
 
 /** 去空白、标点、符号：中文没有词边界，只能按字比较 */
 export function normalizeForCompare(text: string): string {
@@ -103,7 +140,7 @@ export function classifyClaim(input: {
   }
   if (normalizedDefinition === normalizedName) reasons.push('DEFINITION_EQUALS_NAME')
   if (residual.length < MIN_RESIDUAL_CHARS) reasons.push('RESIDUAL_TOO_SHORT')
-  if (!PREDICATE.test(residual)) reasons.push('NO_PREDICATE')
+  if (!containsPredicate(definition, normalizedName)) reasons.push('NO_PREDICATE')
   if (normalizedDefinition.length < normalizedName.length + MIN_RESIDUAL_CHARS) {
     reasons.push('DEFINITION_TOO_SHORT')
   }

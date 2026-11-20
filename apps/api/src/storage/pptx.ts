@@ -73,7 +73,7 @@ function decodeEntities(text: string): string {
 
 function textOf(xml: string): string {
   const pieces: string[] = []
-  for (const match of xml.matchAll(TEXT_NODE)) pieces.push(decodeEntities(match[1]))
+  for (const match of xml.matchAll(TEXT_NODE)) pieces.push(decodeEntities(match[1] ?? ''))
   return pieces.join('')
 }
 

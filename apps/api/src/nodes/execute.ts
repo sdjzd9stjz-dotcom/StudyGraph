@@ -9,6 +9,7 @@ import type { ObjectStore } from '../storage/object-store.ts'
 import { collectDownstream } from '../domain/graph/dag.ts'
 import type { EdgeLike } from '../domain/graph/dag.ts'
 import { getExecutor } from './registry.ts'
+import { cardCacheIsCurrent } from './executors/card.ts'
 
 /**
  * 执行链路（M2 版，同步执行）。
@@ -108,7 +109,8 @@ export async function executeNode(
     promptVersion: executor.promptVersion,
   })
   let fingerprint = fingerprintFor(expectedVersion)
-  const cacheHit = node.fingerprint === fingerprint
+  const cacheHit = node.fingerprint === fingerprint &&
+    (node.type !== 'CARD' || await cardCacheIsCurrent(deps.prisma, node.id, node.canvasId))
 
   if (options.dryRun) {
     return {

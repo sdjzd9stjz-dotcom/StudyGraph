@@ -2,7 +2,28 @@ import { classifyClaim, matchesStoredSpan } from '../../spans/claim-support.ts'
 import { readPageTexts } from '../../storage/page-text.ts'
 import type { ConceptClaims } from '../../../../../packages/contracts/src/index.ts'
 import type { NodeExecutor } from '../contract.ts'
+import type { PrismaClient } from '../../../../../packages/db/src/index.ts'
 import { ZERO_USAGE } from '../contract.ts'
+
+/** Review decisions can change independently of the upstream artifact hash. */
+export async function cardCacheIsCurrent(prisma: PrismaClient, nodeId: string, canvasId: string): Promise<boolean> {
+  const artifact = await prisma.artifact.findFirst({
+    where: { nodeId, kind: 'CONCEPT_CARD' }, orderBy: { createdAt: 'desc' }, select: { structured: true },
+  })
+  const saved = artifact?.structured as { cards?: {
+    cards?: { conceptId: string; status: string }[]
+    skipped?: { reason: string }[]
+  } } | null
+  if (!Array.isArray(saved?.cards?.cards) || !Array.isArray(saved.cards.skipped)) return false
+  // Re-evaluate skips that depended on the current entity or on resolving its evidence.
+  if (saved.cards.skipped.some(item => !item.reason.startsWith('UNVERIFIED('))) return false
+  const cards = saved.cards.cards
+  const rows = await prisma.concept.findMany({
+    where: { canvasId, id: { in: cards.map(card => card.conceptId) } }, select: { id: true, status: true },
+  })
+  const states = new Map(rows.map(row => [row.id, row.status]))
+  return cards.every(card => states.get(card.conceptId) === card.status)
+}
 
 /**
  * `card` 执行器（SG-SUP-009 §4.2）。
@@ -19,7 +40,7 @@ import { ZERO_USAGE } from '../contract.ts'
 export const cardExecutor: NodeExecutor = {
   type: 'CARD',
   artifactKind: 'CONCEPT_CARD',
-  promptVersion: 'extractive-card-v2',
+  promptVersion: 'extractive-card-v3',
   inputs: { type: 'object', properties: { conceptClaims: { type: 'object' } }, required: ['conceptClaims'] },
   outputs: { type: 'object', properties: { cards: { type: 'object' } }, required: ['cards'] },
 
@@ -64,15 +85,20 @@ export const cardExecutor: NodeExecutor = {
 
           // 被人工拒绝过的：不得被重跑重新打开（SG-SUP-011 §4.1）
           if (current.status === 'UNVERIFIED' && current.reviewedBy && !evidenceChanged) {
-            return { kind: 'REJECTED_BY_REVIEWER' as const }
+            if (current.reviewDecision === 'REJECT') return { kind: 'REJECTED_BY_REVIEWER' as const }
+            if (!current.reviewDecision) return { kind: 'LEGACY_REVIEW_UNKNOWN' as const }
+            if (current.definition === claim.definition) {
+              const restored = await tx.concept.update({ where: { id: current.id }, data: { status: 'VERIFIED' } })
+              return { kind: 'KEPT' as const, concept: restored }
+            }
           }
           if (current.status !== 'UNVERIFIED') {
             if (current.definition !== claim.definition) return { kind: 'CONFLICT' as const }
             return evidenceChanged ? { kind: 'CONFLICT' as const } : { kind: 'KEPT' as const, concept: current }
           }
           // 证据变了 → 清空复核记录，按新证据重新分类
-          if (current.status === 'UNVERIFIED' && current.reviewedBy && evidenceChanged) {
-            await tx.concept.update({ where: { id: current.id }, data: { reviewedAt: null, reviewedBy: null } })
+          if (current.status === 'UNVERIFIED' && current.reviewedBy) {
+            await tx.concept.update({ where: { id: current.id }, data: { reviewedAt: null, reviewedBy: null, reviewDecision: null } })
           }
         }
 
@@ -89,8 +115,8 @@ export const cardExecutor: NodeExecutor = {
         return { kind: 'CREATED' as const, concept: updated }
       })
 
-      if (outcome.kind === 'REJECTED_BY_REVIEWER') {
-        skipped.push({ name: claim.name, reason: 'REJECTED_BY_REVIEWER' })
+      if (outcome.kind === 'REJECTED_BY_REVIEWER' || outcome.kind === 'LEGACY_REVIEW_UNKNOWN') {
+        skipped.push({ name: claim.name, reason: outcome.kind })
       } else if (outcome.kind === 'CONFLICT') {
         skipped.push({ name: claim.name, reason: '同名概念已有不同证据' })
       } else {

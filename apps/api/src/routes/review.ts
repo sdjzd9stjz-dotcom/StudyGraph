@@ -1,4 +1,4 @@
-import type { FastifyInstance } from 'fastify'
+import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { z } from 'zod'
 
 import type { PrismaClient } from '../../../../packages/db/src/index.ts'
@@ -29,10 +29,11 @@ export interface ReviewRouteDeps {
 export function registerReviewRoutes(app: FastifyInstance, deps: ReviewRouteDeps): void {
   const { prisma, guard } = deps
 
-  const handle = async (kind: 'concept' | 'method', request: never, _reply: never) => {
+  type ReviewRoute = { Params: { id: string } }
+  const handle = async (kind: 'concept' | 'method', request: FastifyRequest<ReviewRoute>) => {
     const auth = getAuth(request)
-    const { id } = (request as unknown as { params: { id: string } }).params
-    const body = bodySchema.parse((request as unknown as { body: unknown }).body ?? {})
+    const { id } = request.params
+    const body = bodySchema.parse(request.body ?? {})
 
     if (body.reviewerUserId && body.reviewerUserId !== auth.user.id) {
       throw new AppError(403, 'INSUFFICIENT_SCOPE', '不能代替他人复核', { reviewerUserId: body.reviewerUserId })
@@ -66,6 +67,7 @@ export function registerReviewRoutes(app: FastifyInstance, deps: ReviewRouteDeps
               status: body.decision === 'ACCEPT' ? ('VERIFIED' as const) : ('UNVERIFIED' as const),
               reviewedAt,
               reviewedBy,
+              reviewDecision: body.decision,
             },
           })
         : await prisma.method.updateMany({
@@ -74,6 +76,7 @@ export function registerReviewRoutes(app: FastifyInstance, deps: ReviewRouteDeps
               status: body.decision === 'ACCEPT' ? ('VERIFIED' as const) : ('UNVERIFIED' as const),
               reviewedAt,
               reviewedBy,
+              reviewDecision: body.decision,
             },
           })
 
@@ -89,13 +92,9 @@ export function registerReviewRoutes(app: FastifyInstance, deps: ReviewRouteDeps
     return { ...updated, note: body.note ?? null }
   }
 
-  app.post('/v1/concepts/:id/review', { preHandler: guard('CANVAS_WRITE') }, async (request, reply) => {
-    const result = await handle('concept', request as never, reply as never)
-    return reply.status(200).send(result)
-  })
+  app.post<ReviewRoute>('/v1/concepts/:id/review', { preHandler: guard('CANVAS_WRITE') },
+    request => handle('concept', request))
 
-  app.post('/v1/methods/:id/review', { preHandler: guard('CANVAS_WRITE') }, async (request, reply) => {
-    const result = await handle('method', request as never, reply as never)
-    return reply.status(200).send(result)
-  })
+  app.post<ReviewRoute>('/v1/methods/:id/review', { preHandler: guard('CANVAS_WRITE') },
+    request => handle('method', request))
 }

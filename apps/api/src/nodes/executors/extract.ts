@@ -1,9 +1,8 @@
-import { supportsDefinition } from '../../spans/claim-support.ts'
 import { createHash } from 'node:crypto'
 
 import { conceptClaimsSchema } from '../../../../../packages/contracts/src/index.ts'
 import type { ChunkSet, ConceptClaims } from '../../../../../packages/contracts/src/index.ts'
-import { classifyClaim } from '../../spans/claim-support.ts'
+import { CLASSIFIER_VERSION, classifyClaim } from '../../spans/claim-support.ts'
 import type { ClaimVerdict } from '../../spans/claim-support.ts'
 import type { NodeExecutor } from '../contract.ts'
 
@@ -23,9 +22,12 @@ const SYSTEM_PROMPT = [
   '规则：',
   '1. 只能从【给定文本】里抽取，禁止补充任何外部知识、禁止编造定义。',
   '2. 文本里没有明确讲到的概念，不要输出。只有标题、目录或不完整短语时跳过。',
+  '目录中的“指导”“指引”等词不能作为定义的依据。',
   '3. quote：必须是原文中【逐字连续】的一句话，不得改写、不得拼接。',
   '4. definition：用你自己的话说明这个概念是什么，必须包含概念名称；不得引入原文之外的信息。',
   '   允许与 quote 措辞不同，但语义必须一致。',
+  '   若原文已含概念名称且完整说明其含义，可以直接照录作 definition，保留原标点。其余有明确依据的转述可送人工复核。',
+  '   优先提取有实质内容的定义、判据和法则。仅有章节名称、公式名或定理清单时跳过；不为增加数量补写结论。',
   '5. 只输出一个 json 对象，形如 {"claims":[{"chunk":0,"name":"...","definition":"...","quote":"..."}]}。',
   '6. 没有可抽取的概念时输出 {"claims":[]}。',
 ].join('\n')
@@ -71,6 +73,8 @@ export const extractExecutor: NodeExecutor<ExtractParams> = {
       verdict: ClaimVerdict
       reasons: string[]
       similarity: number
+      lengthRatio: number
+      spanText: string
     }> = []
 
     let tokensIn = 0
@@ -161,12 +165,17 @@ export const extractExecutor: NodeExecutor<ExtractParams> = {
           verdict: classification.verdict,
           reasons: classification.reasons,
           similarity: classification.similarity,
+          lengthRatio: classification.lengthRatio,
+          // 判定输入快照（SG-SUP-012 §2.2）：脱离数据库也能重放
+          spanText: chunk.text,
         })
       }
     }
 
     const conceptClaims: ConceptClaims = conceptClaimsSchema.parse({
       sourceId: chunkSet.sourceId,
+      promptVersion: EXTRACT_PROMPT_VERSION,
+      classifierVersion: CLASSIFIER_VERSION,
       claims: claims.map((claim) => ({
         id: claim.id,
         name: claim.name,
@@ -175,6 +184,12 @@ export const extractExecutor: NodeExecutor<ExtractParams> = {
         spanIds: claim.spanIds,
         status: claim.verdict,
         reasons: claim.reasons,
+        // 判定输入快照：quote/definition 之外，还要留住当时的原文与两个相似度指标
+        spanText: claim.spanText,
+        similarity: claim.similarity,
+        lengthRatio: claim.lengthRatio,
+        promptVersion: EXTRACT_PROMPT_VERSION,
+        classifierVersion: CLASSIFIER_VERSION,
       })),
     })
 

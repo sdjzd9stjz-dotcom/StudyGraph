@@ -101,8 +101,11 @@ export async function checkConceptCitations(deps: IntegrityDeps, canvasFilter?: 
     }
 
     if (conceptFailed) {
-      await deps.prisma.concept.update({ where: { id: concept.id }, data: { status: 'UNVERIFIED' } })
-      downgraded.push(concept.id)
+      const result = await deps.prisma.concept.updateMany({
+        where: { id: concept.id, status: concept.status, updatedAt: concept.updatedAt },
+        data: { status: 'UNVERIFIED' },
+      })
+      if (result.count === 1) downgraded.push(concept.id)
     }
   }
 

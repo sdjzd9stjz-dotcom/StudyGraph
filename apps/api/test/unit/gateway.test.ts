@@ -246,7 +246,7 @@ test('BYOK：密文被篡改 → 解密抛错（GCM tag 校验）', () => {
   const payload = JSON.parse(encryptSecret('sk-test', masterKey)) as { ciphertext: string }
 
   const tampered = Buffer.from(payload.ciphertext, 'base64')
-  tampered[0] = tampered[0] ^ 0xff
+  tampered[0] = (tampered[0] ?? 0) ^ 0xff
   payload.ciphertext = tampered.toString('base64')
 
   assert.throws(() => decryptSecret(JSON.stringify(payload), masterKey))

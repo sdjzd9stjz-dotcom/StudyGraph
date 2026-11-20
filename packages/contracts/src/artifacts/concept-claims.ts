@@ -22,6 +22,15 @@ export const conceptClaimSchema = z
     rationale: z.string().optional(),
     /** 分类器给出的失败原因（UNVERIFIED 时非空），便于事后统计 */
     reasons: z.array(z.string()).optional(),
+    // ── 判定输入快照（SG-SUP-012 §2.2）：产物必须能脱离数据库重放分类 ──
+    /** 判定当时那段 span 原文；span 以后可能被改/删，这里必须留底 */
+    spanText: z.string().optional(),
+    /** 字符 bigram Jaccard 相似度 */
+    similarity: z.number().optional(),
+    /** definition.length / quote.length */
+    lengthRatio: z.number().optional(),
+    promptVersion: z.string().optional(),
+    classifierVersion: z.string().optional(),
   })
   .superRefine((claim, ctx) => {
     if (claim.status !== 'UNVERIFIED' && claim.spanIds.length === 0) {
@@ -38,6 +47,9 @@ export type ConceptClaim = z.infer<typeof conceptClaimSchema>
 export const conceptClaimsSchema = z.object({
   sourceId: z.string().min(1),
   claims: z.array(conceptClaimSchema),
+  /** 这一批是谁判的（SG-SUP-012 §2.4），便于区分新旧规则 */
+  promptVersion: z.string().optional(),
+  classifierVersion: z.string().optional(),
 })
 
 export type ConceptClaims = z.infer<typeof conceptClaimsSchema>
