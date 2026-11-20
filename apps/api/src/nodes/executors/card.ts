@@ -51,16 +51,31 @@ export const cardExecutor: NodeExecutor = {
         continue
       }
 
-      const concept = await ctx.prisma.$transaction(async tx => {
+      const outcome = await ctx.prisma.$transaction(async (tx) => {
         const where = { canvasId_name: { canvasId: ctx.canvasId, name: claim.name } }
         const current = await tx.concept.findUnique({ where })
-        if (current && current.status !== 'UNVERIFIED') {
-          if (current.definition !== claim.definition) return null
-          const sameEvidence = await tx.conceptCitation.findUnique({
+
+        if (current) {
+          const existingCitation = await tx.conceptCitation.findUnique({
             where: { conceptId_spanId: { conceptId: current.id, spanId: span.id } },
           })
-          return sameEvidence?.quote === claim.quote ? current : null
+          // 「证据变了」= span 不同 或 quote 不同；定义文本变了不算（同一句引文还是同一条证据）
+          const evidenceChanged = !existingCitation || existingCitation.quote !== claim.quote
+
+          // 被人工拒绝过的：不得被重跑重新打开（SG-SUP-011 §4.1）
+          if (current.status === 'UNVERIFIED' && current.reviewedBy && !evidenceChanged) {
+            return { kind: 'REJECTED_BY_REVIEWER' as const }
+          }
+          if (current.status !== 'UNVERIFIED') {
+            if (current.definition !== claim.definition) return { kind: 'CONFLICT' as const }
+            return evidenceChanged ? { kind: 'CONFLICT' as const } : { kind: 'KEPT' as const, concept: current }
+          }
+          // 证据变了 → 清空复核记录，按新证据重新分类
+          if (current.status === 'UNVERIFIED' && current.reviewedBy && evidenceChanged) {
+            await tx.concept.update({ where: { id: current.id }, data: { reviewedAt: null, reviewedBy: null } })
+          }
         }
+
         const entry = await tx.concept.upsert({
           where, create: { ...where.canvasId_name, definition: claim.definition, status: 'UNVERIFIED' },
           update: { definition: claim.definition },
@@ -70,10 +85,17 @@ export const cardExecutor: NodeExecutor = {
         await tx.conceptCitation.create({ data: {
           conceptId: entry.id, spanId: span.id, isPrimary: true, quote: claim.quote!,
         } })
-        return tx.concept.update({ where: { id: entry.id }, data: { status: classification.verdict } })
+        const updated = await tx.concept.update({ where: { id: entry.id }, data: { status: classification.verdict } })
+        return { kind: 'CREATED' as const, concept: updated }
       })
-      if (concept) created.push({ conceptId: concept.id, name: claim.name, spanId: span.id, status: concept.status })
-      else skipped.push({ name: claim.name, reason: '同名概念已有不同证据' })
+
+      if (outcome.kind === 'REJECTED_BY_REVIEWER') {
+        skipped.push({ name: claim.name, reason: 'REJECTED_BY_REVIEWER' })
+      } else if (outcome.kind === 'CONFLICT') {
+        skipped.push({ name: claim.name, reason: '同名概念已有不同证据' })
+      } else {
+        created.push({ conceptId: outcome.concept.id, name: claim.name, spanId: span.id, status: outcome.concept.status })
+      }
     }
 
     return {

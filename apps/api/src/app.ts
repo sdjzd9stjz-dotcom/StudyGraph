@@ -1,5 +1,6 @@
 import Fastify from 'fastify'
 import type { FastifyInstance } from 'fastify'
+import { ZodError } from 'zod'
 
 import type { PrismaClient } from '../../../packages/db/src/index.ts'
 import type { Env } from './env.ts'
@@ -59,6 +60,15 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof AppError) {
       return reply.status(error.status).send(error.toEnvelope())
+    }
+
+    // 全项目统一：Zod 校验失败一律 400 VALIDATION_FAILED，附 issues（SG-SUP-011 §4.3）
+    if (error instanceof ZodError) {
+      return reply.status(400).send(
+        validationFailed({
+          issues: error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })),
+        }).toEnvelope(),
+      )
     }
 
     const status = (error as { statusCode?: number }).statusCode

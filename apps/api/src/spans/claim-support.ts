@@ -13,6 +13,7 @@
  * **A1 一秒都不能松**：T2（待人复核）的引文同样是逐字可查的，它只是措辞不是原文。
  */
 import {
+  MIN_RESIDUAL_CHARS,
   REVIEW_MAX_LENGTH_RATIO,
   REVIEW_MIN_BIGRAM_SIMILARITY,
   REVIEW_MIN_LENGTH_RATIO,
@@ -26,9 +27,12 @@ export type ClaimReason =
   | 'EMPTY_DEFINITION'
   | 'NAME_NOT_IN_DEFINITION'
   | 'NO_PREDICATE'
+  | 'RESIDUAL_TOO_SHORT'
+  | 'DEFINITION_TOO_SHORT'
   | 'BELOW_SIMILARITY'
   | 'LENGTH_RATIO_OUT_OF_RANGE'
   | 'DEFINITION_EQUALS_NAME'
+  | 'UNSUPPORTED_DEFINITION'
 
 export interface ClaimClassification {
   readonly verdict: ClaimVerdict
@@ -88,14 +92,21 @@ export function classifyClaim(input: {
     return { verdict: 'UNVERIFIED', reasons: ['EMPTY_DEFINITION'], similarity, lengthRatio }
   }
 
-  // 结构条件：名称要在定义里，定义要有谓词（"X 是/指/称为…"），否则只是标题
+  // 结构条件：名称要在定义里，且**谓词必须来自名称之外**
+  // （SG-SUP-011 §2.2：名称自带谓词字时，整句测谓词会把纯标题放进来）
   const normalizedName = normalizeForCompare(name)
   const normalizedDefinition = normalizeForCompare(definition)
+  const residual = normalizedDefinition.split(normalizedName).join('')
+
   if (normalizedName.length === 0 || !normalizedDefinition.includes(normalizedName)) {
     reasons.push('NAME_NOT_IN_DEFINITION')
   }
   if (normalizedDefinition === normalizedName) reasons.push('DEFINITION_EQUALS_NAME')
-  if (!PREDICATE.test(definition)) reasons.push('NO_PREDICATE')
+  if (residual.length < MIN_RESIDUAL_CHARS) reasons.push('RESIDUAL_TOO_SHORT')
+  if (!PREDICATE.test(residual)) reasons.push('NO_PREDICATE')
+  if (normalizedDefinition.length < normalizedName.length + MIN_RESIDUAL_CHARS) {
+    reasons.push('DEFINITION_TOO_SHORT')
+  }
 
   if (reasons.length > 0) return { verdict: 'UNVERIFIED', reasons, similarity, lengthRatio }
 

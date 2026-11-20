@@ -22,10 +22,12 @@ const SYSTEM_PROMPT = [
   '你是课程材料的概念抽取器。',
   '规则：',
   '1. 只能从【给定文本】里抽取，禁止补充任何外部知识、禁止编造定义。',
-  '2. 文本里没有明确讲到的概念，不要输出。',
-  '3. definition 和 quote 均填同一句完整原文，句中须有概念名称及解释。只有标题、目录或不完整短语时跳过。',
-  '4. 只输出一个 json 对象，形如 {"claims":[{"chunk":0,"name":"...","definition":"...","quote":"..."}]}。',
-  '5. 没有可抽取的概念时输出 {"claims":[]}。',
+  '2. 文本里没有明确讲到的概念，不要输出。只有标题、目录或不完整短语时跳过。',
+  '3. quote：必须是原文中【逐字连续】的一句话，不得改写、不得拼接。',
+  '4. definition：用你自己的话说明这个概念是什么，必须包含概念名称；不得引入原文之外的信息。',
+  '   允许与 quote 措辞不同，但语义必须一致。',
+  '5. 只输出一个 json 对象，形如 {"claims":[{"chunk":0,"name":"...","definition":"...","quote":"..."}]}。',
+  '6. 没有可抽取的概念时输出 {"claims":[]}。',
 ].join('\n')
 
 export const EXTRACT_PROMPT_VERSION = createHash('sha256').update(SYSTEM_PROMPT).digest('hex').slice(0, 12)

@@ -1,6 +1,7 @@
 import type { PrismaClient } from '../../../../packages/db/src/index.ts'
 import type { ObjectStore } from '../storage/object-store.ts'
 import { classifyClaim, matchesStoredSpan } from './claim-support.ts'
+import { assessIntegrity } from './integrity-policy.ts'
 import { readPageTexts } from '../storage/page-text.ts'
 import type { StoredPageText } from '../storage/page-text.ts'
 export { pageTextKey } from '../storage/page-text.ts'
@@ -83,12 +84,19 @@ export async function checkConceptCitations(deps: IntegrityDeps, canvasFilter?: 
         quote: citation.quote ?? undefined,
         spanText: span.text,
       })
-      // PENDING_REVIEW 的卡同样要复查：挂着"待审"却没人看，等于无人区
-      // 这里只要求 A1（引文逐字可查）成立；定义措辞的好坏由人判，不由巡检判
-      const supported = classification.reasons.every((reason) => reason !== 'A1_QUOTE_NOT_IN_SPAN' && reason !== 'NO_QUOTE')
-      if (!rangeValid || !supported) {
+      // 分级巡检（SG-SUP-011 §3.2）：人工认可过的只看引文，自动 VERIFIED 要过完整 T1
+      const verdict = assessIntegrity(
+        { status: concept.status, reviewedBy: concept.reviewedBy },
+        classification,
+      )
+      if (!rangeValid || !verdict.keep) {
         conceptFailed = true
-        failures.push({ conceptId: concept.id, spanId: span.id, reason: rangeValid ? 'UNSUPPORTED_DEFINITION' : 'TEXT_MISMATCH', detail: `page=${span.page} region=${span.region}` })
+        failures.push({
+          conceptId: concept.id,
+          spanId: span.id,
+          reason: !rangeValid ? 'TEXT_MISMATCH' : (verdict.keep ? 'TEXT_MISMATCH' : verdict.reason),
+          detail: `mode=${verdict.mode} page=${span.page} region=${span.region}`,
+        })
       }
     }
 

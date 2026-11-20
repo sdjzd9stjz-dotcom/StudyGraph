@@ -9,7 +9,7 @@ import type { Guard } from '../plugins/auth.ts'
 
 const bodySchema = z.object({
   decision: z.enum(['ACCEPT', 'REJECT']),
-  /** 兼容指令里的字段；服务端以鉴权得到的用户为准，不接受伪造他人 */
+  /** 兼容指令里的字段；服务端以鉴权得到的用户为准 */
   reviewerUserId: z.string().optional(),
   note: z.string().max(500).optional(),
 })
@@ -20,56 +20,82 @@ export interface ReviewRouteDeps {
 }
 
 /**
- * 人工复核入口（SG-SUP-010 §2.5）。
+ * 人工复核入口（SG-SUP-010 §2.5，SG-SUP-011 §4.2/§4.3 修正）。
  *
- * `PENDING_REVIEW` 如果没有出口，就是一个永远不进不退的死状态——
- * 比少几张卡更难解释。M2 不做 UI，但接口必须有。
- *
- * 约束：
- * - 只有**该画布的编辑者**能复核（复用 M1 的 CanvasRole）
- * - `reviewedBy` 用鉴权用户，不采信 body 里的 reviewerUserId
- * - **不提供批量接口**：批量通过等于把人工复核变成一键放行
+ * 两个并发裁决不能都成功：状态检查做成**写入条件**（compare-and-set），
+ * `updateMany` 返回 `count: 0` 就是竞争失败 → 409。
+ * 不要"先读、再判、后写"——那中间有窗口。
  */
 export function registerReviewRoutes(app: FastifyInstance, deps: ReviewRouteDeps): void {
   const { prisma, guard } = deps
 
-  const review = (kind: 'concept' | 'method') =>
-    async (request: { params: unknown; body: unknown }) => {
-      const auth = getAuth(request as never)
-      const { id } = request.params as { id: string }
-      const body = bodySchema.parse(request.body ?? {})
+  const handle = async (kind: 'concept' | 'method', request: never, _reply: never) => {
+    const auth = getAuth(request)
+    const { id } = (request as unknown as { params: { id: string } }).params
+    const body = bodySchema.parse((request as unknown as { body: unknown }).body ?? {})
 
-      if (body.reviewerUserId && body.reviewerUserId !== auth.user.id) {
-        throw new AppError(403, 'INSUFFICIENT_SCOPE', '不能代替他人复核', { reviewerUserId: body.reviewerUserId })
-      }
-
-      const entity =
-        kind === 'concept'
-          ? await prisma.concept.findUnique({ where: { id }, select: { id: true, canvasId: true, status: true } })
-          : await prisma.method.findUnique({ where: { id }, select: { id: true, canvasId: true, status: true } })
-      if (!entity) throw new AppError(404, kind === 'concept' ? 'NODE_NOT_FOUND' : 'NODE_NOT_FOUND', '对象不存在', { id })
-
-      // 复用 M1 的画布权限：非编辑者 → 403
-      await requireCanvasWrite(prisma, entity.canvasId, auth.user.id)
-
-      if (entity.status !== 'PENDING_REVIEW') {
-        throw new AppError(409, 'VALIDATION_FAILED', `只有 PENDING_REVIEW 可以复核，当前是 ${entity.status}`, {
-          id,
-          status: entity.status,
-        })
-      }
-
-      const nextStatus = body.decision === 'ACCEPT' ? 'VERIFIED' : 'UNVERIFIED'
-      const data = { status: nextStatus, reviewedAt: new Date(), reviewedBy: auth.user.id }
-
-      const updated =
-        kind === 'concept'
-          ? await prisma.concept.update({ where: { id }, data, select: { id: true, status: true, reviewedAt: true, reviewedBy: true } })
-          : await prisma.method.update({ where: { id }, data, select: { id: true, status: true, reviewedAt: true, reviewedBy: true } })
-
-      return { id: updated.id, status: updated.status, reviewedAt: updated.reviewedAt, reviewedBy: updated.reviewedBy, note: body.note ?? null }
+    if (body.reviewerUserId && body.reviewerUserId !== auth.user.id) {
+      throw new AppError(403, 'INSUFFICIENT_SCOPE', '不能代替他人复核', { reviewerUserId: body.reviewerUserId })
     }
 
-  app.post('/v1/concepts/:id/review', { preHandler: guard('CANVAS_WRITE') }, review('concept') as never)
-  app.post('/v1/methods/:id/review', { preHandler: guard('CANVAS_WRITE') }, review('method') as never)
+    const entity =
+      kind === 'concept'
+        ? await prisma.concept.findUnique({ where: { id }, select: { canvasId: true, status: true } })
+        : await prisma.method.findUnique({ where: { id }, select: { canvasId: true, status: true } })
+    if (!entity) throw new AppError(404, 'NODE_NOT_FOUND', '对象不存在', { id })
+
+    // 复用 M1 的画布权限：非编辑者 → 403
+    await requireCanvasWrite(prisma, entity.canvasId, auth.user.id)
+
+    if (entity.status !== 'PENDING_REVIEW') {
+      throw new AppError(409, 'CONFLICT', `只有 PENDING_REVIEW 可以复核，当前是 ${entity.status}`, {
+        id,
+        status: entity.status,
+      })
+    }
+
+    const reviewedAt = new Date()
+    const reviewedBy = auth.user.id
+
+    // CAS：把 "status = PENDING_REVIEW" 作为写入条件，两个并发请求只有一个能改到行
+    const result =
+      kind === 'concept'
+        ? await prisma.concept.updateMany({
+            where: { id, status: 'PENDING_REVIEW' },
+            data: {
+              status: body.decision === 'ACCEPT' ? ('VERIFIED' as const) : ('UNVERIFIED' as const),
+              reviewedAt,
+              reviewedBy,
+            },
+          })
+        : await prisma.method.updateMany({
+            where: { id, status: 'PENDING_REVIEW' },
+            data: {
+              status: body.decision === 'ACCEPT' ? ('VERIFIED' as const) : ('UNVERIFIED' as const),
+              reviewedAt,
+              reviewedBy,
+            },
+          })
+
+    if (result.count === 0) {
+      throw new AppError(409, 'CONFLICT', '该条目已被他人复核', { id })
+    }
+
+    const updated =
+      kind === 'concept'
+        ? await prisma.concept.findUnique({ where: { id }, select: { id: true, status: true, reviewedAt: true, reviewedBy: true } })
+        : await prisma.method.findUnique({ where: { id }, select: { id: true, status: true, reviewedAt: true, reviewedBy: true } })
+
+    return { ...updated, note: body.note ?? null }
+  }
+
+  app.post('/v1/concepts/:id/review', { preHandler: guard('CANVAS_WRITE') }, async (request, reply) => {
+    const result = await handle('concept', request as never, reply as never)
+    return reply.status(200).send(result)
+  })
+
+  app.post('/v1/methods/:id/review', { preHandler: guard('CANVAS_WRITE') }, async (request, reply) => {
+    const result = await handle('method', request as never, reply as never)
+    return reply.status(200).send(result)
+  })
 }

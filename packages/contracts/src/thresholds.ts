@@ -57,4 +57,14 @@ export const REVIEW_MIN_BIGRAM_SIMILARITY = 0.45
 export const REVIEW_MIN_LENGTH_RATIO = 0.5
 export const REVIEW_MAX_LENGTH_RATIO = 2.0
 
+/**
+ * 谓词必须来自"名称之外"（SG-SUP-011 §2.2）。
+ *
+ * 「指数函数练习目录」里名称自带「指」，旧实现直接在整句上测谓词，
+ * 于是纯标题被判成了定义。现在先去掉名称得到 residual，只在 residual 上测，
+ * 并要求 residual 足够长——残差太短说明这句话只是标题。
+ */
+export const MIN_RESIDUAL_CHARS = 6
+
+
 

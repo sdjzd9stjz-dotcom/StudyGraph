@@ -37,6 +37,7 @@ export const ERROR_CODES = [
   'SOURCE_TEXT_LAYER_UNUSABLE',
   // 通用
   'VALIDATION_FAILED',
+  'CONFLICT',
   'INVALID_JSON',
   'INTERNAL_ERROR',
 ] as const
