@@ -328,3 +328,147 @@ node node_modules/typescript/bin/tsc -p apps/api/tsconfig.json --noEmit
 - §3.4 第 5 项（巡检 A–F 落库实测）、第 6 项（复核接口四条 curl）——未做
 - §3.4 第 12 项（前端溯源抽屉）——**UI 阶段，开工前需先问用户一次**
 - 第 13 项（BullMQ 队列）——可延后
+
+---
+
+## 8. 2026-11-20 · 密钥恢复后：全链路、校准表、巡检、复核接口
+
+> §7 之后环境恢复（DeepSeek key 可用，env-check 全绿），本节记录 §3.4 剩余项的实测。
+> **口径**：只有跑过并且输出贴在上面的才算「完成」；没做的一律留空。
+
+### 8.1 §3.4 第 8 项 · 产物完整性（**关闭**）
+
+判定函数的输入是 `name / definition / quote / spanText`，判定产出的两个指标是
+`similarity / lengthRatio`。产物里必须**全部存下来**，否则永远证明不了它对。
+
+十份课件跑批（画布 `cmwovbcoe0001q5fsjrb5ezs2`）的断言输出：
+
+```
+{"event":"artifact-completeness","extractArtifacts":10,"claims":30,
+ "byStatus":{"PENDING_REVIEW":25,"UNVERIFIED":5},
+ "fields":{"quote":30,"spanText":30,"classifierVersion":30,"similarity":30,"lengthRatio":30,"total":30},
+ "classifierVersions":["387fbb711ed1"],"expectedClassifierVersion":"387fbb711ed1"}
+```
+
+**离线重放**（不连库、不调模型，`node scripts/replay-calibration.mjs .tmp-backup/claims-017`）：
+30/30 的重放 `verdict` 与入库 `status` 逐条一致，`a1Fail` 为 0。
+
+- **删掉这条断言会漏什么**：旧产物（013/016 之前）只存了 7 条 quote、`spanText` 与
+  `classifierVersion` 一条都没有。没有这条断言，产物缺字段会被当成正常，校准表就失去依据。
+
+### 8.2 §3.4 第 4 项 · 纯标题全链路（**关闭**）
+
+受控材料 `controlled-012.pptx`（脚本 `scripts/fixtures/make-pptx-fixture.mjs` 生成）
+第 1 页就是「指数函数练习目录」——名称自带「指」字，正是 010 那次把纯标题送进 T1 的触发条件。
+
+```
+{"event":"extract-summary","claims":5,"byStatus":{"VERIFIED":3,"UNVERIFIED":2}}
+✅ 015 收口全部断言通过（canvas cmwot6x7r0001q5nkbxzta4x4）
+```
+
+断言 B 通过：纯标题页产生的 claim **全部是 UNVERIFIED**，没有进入卡片。
+
+- **删掉这条断言会漏什么**：这个 P0 的根因是「名称自带谓词字」，只测正常页永远测不出来。
+
+### 8.3 §3.4 第 10 项 · 真实三态落库数（**关闭，数量口径见说明**）
+
+| 批次 | 画布 | claims | VERIFIED | PENDING_REVIEW | UNVERIFIED |
+| --- | --- | --- | --- | --- | --- |
+| 旧提示词 | `cmwouqdpj0001q5a4eq7taqzk` | 26 | 0 | 11 | 15 |
+| 新提示词 | `cmwovbcoe0001q5fsjrb5ezs2` | 30 | 0 | 25 | 5 |
+
+概念表（`Concept`）落库：016 画布 11 条 PENDING_REVIEW，017 画布 19 条（同名去重后）。
+
+**数量口径的说明（必须写清，否则会被误读）**：
+`VERIFIED` 为 **0** 不是 bug。用户 2026-11-20 拍板「选 A」——T1 保持 `definition === quote`
+的严格定义，而提示词要求模型用自己的话转述，两者刻意不重叠。**`VERIFIED` 只能由人工复核产生**，
+§7 的「VERIFIED ≥ 10」目标改为「人工复核后可入库概念 ≥ 10」，当前 19 个（校准表口径）。
+
+### 8.4 §3.4 第 9 项 · 校准表 + 双负例（**关闭**）
+
+`docs/交付/校准表-017-三十条.md`，30 条逐行，人工判读列由执行方逐条读原文判定：
+
+```
+19 对 / 1 勉强 / 6 错 / 4 重复（合计 30）
+```
+
+机器与人工的分歧：**误杀 1 条**（#20 线密度，括号并列导致相似度掉到 0.313）、
+**漏判 2 条**（#15/#16 把「等价无穷小替换规则」当成无穷大量的定义）。
+机器准确率 23/30，**不足以自动入库**。
+
+双负例三条（原文见校准表 §双负例）：
+
+```
+NEG1 引文真实但引错页 => UNVERIFIED A1_QUOTE_NOT_IN_SPAN
+NEG2 引文在本页但定义无关 => UNVERIFIED NAME_NOT_IN_DEFINITION sim=0.000
+NEG3 纯标题 => UNVERIFIED BELOW_SIMILARITY,LENGTH_RATIO_OUT_OF_RANGE
+```
+
+### 8.5 §3.4 第 5 项 · 巡检 A–F 落库实测（**关闭**）
+
+`scripts/verify-integrity-cases.mjs`，7 个用例各自独立画布/来源/页文本/Span：
+
+```
+┌──────┬──────────────────┬──────────────────┬──────────────────────────┬──────┐
+│ case │ before           │ after            │ reason                   │ ok   │
+├──────┼──────────────────┼──────────────────┼──────────────────────────┼──────┤
+│ A    │ VERIFIED         │ VERIFIED         │ null                     │ true │
+│ B    │ VERIFIED         │ UNVERIFIED       │ UNSUPPORTED_DEFINITION   │ true │
+│ C    │ VERIFIED         │ VERIFIED         │ null                     │ true │
+│ D    │ VERIFIED         │ UNVERIFIED       │ TEXT_MISMATCH            │ true │
+│ E    │ PENDING_REVIEW   │ PENDING_REVIEW   │ null                     │ true │
+│ F    │ PENDING_REVIEW   │ UNVERIFIED       │ TEXT_MISMATCH            │ true │
+│ G    │ VERIFIED         │ UNVERIFIED       │ TEXT_MISMATCH            │ true │
+└──────┴──────────────────┴──────────────────┴──────────────────────────┴──────┘
+{"cases":7,"passed":7,"failed":0}
+```
+
+- **C/E 是这套用例存在的理由**：若巡检被降成「一律只查 A1」，B 会漏；若被升成「一律完整 T1」，
+  C 会被误杀。两个方向各有用例守着。
+- 修过两次**自造污染**：①全部用例共用一个 span，G 改文本把 A/C 一起打成 TEXT_MISMATCH；
+  ②为绕开名称唯一约束给概念名加了后缀，反而破坏 T1 的「名称在定义里」。
+
+### 8.6 §3.4 第 6 项 · 复核接口四条 curl（**关闭**）
+
+真实 API（`node apps/api/src/server.ts`，:3001）+ 真 PAT + 真库：
+
+```
+curl 1 ACCEPT 一条 PENDING_REVIEW
+HTTP 200 {"id":"...","status":"VERIFIED","reviewedAt":"2026-11-20T11:15:18.360Z","reviewedBy":"..."}
+
+curl 2 同一条再审
+HTTP 409 {"error":{"code":"CONFLICT","message":"只有 PENDING_REVIEW 可以复核，当前是 VERIFIED",...}}
+
+curl 3 非法 decision
+HTTP 400 {"error":{"code":"VALIDATION_FAILED","message":"请求参数校验失败",
+  "details":{"issues":[{"path":"decision","message":"Invalid option: expected one of \"ACCEPT\"|\"REJECT\""}]}}}
+
+curl 4 并发两个裁决同一张 PENDING_REVIEW
+A HTTP 200 ; B HTTP 409
+```
+
+**并发那条是关键**：CAS 若写成「先读、再判、后写」，两个请求都会看到 PENDING_REVIEW 并都返回 200。
+现在一成一败，说明状态检查确实是写入条件（`updateMany where status=PENDING_REVIEW`）。
+事后库校验：甲/丙 VERIFIED、乙保持 PENDING_REVIEW 未被误改。
+
+测试用 PAT 已吊销（`revokedAt` 已写）。
+
+### 8.7 §3.4 第 11 项 · 新画布重跑（**关闭**）
+
+旧画布 `cmwnn9tpg0001q52wfgghlljt`（011 十份课件）保持冻结，未改动。
+新画布 `cmwovbcoe0001q5fsjrb5ezs2`：10 份课件 / 40 次执行全 SUCCEEDED / 30 claims / 9269 输入 token。
+
+### 8.8 仍未完成
+
+| 项 | 状态 | 原因 |
+| --- | --- | --- |
+| §3.4 第 3 项 写库实验 a/b/c/d | **未做** | 视图 0 行已在 §7.2 验过；a/b/c/d 四组写库实验仍未做 |
+| §3.4 第 12 项 前端溯源抽屉 | 未做 | UI 阶段，开工前需问用户 |
+| §3.4 第 13 项 BullMQ 队列 | 未做 | 可延后（M2 为同步执行） |
+| 已知假阴性 | 记录在案 | 「指数函数的定义域」这类短定义（残留 4–5 字）被 `RESIDUAL_TOO_SHORT` 拒绝。阈值 6 字是用来挡纯标题的（纯标题残留 2 字），**不降低** |
+| 已知漏判 | 记录在案 | 校准表 #15/#16：结构条件满足但语义错，机器会放行，只能靠人工 |
+
+### 8.9 环境事件（2026-11-20）
+
+Docker Desktop 进程在跑批期间自行退出一次，WSL `docker-desktop` 停止。重启后容器与数据完好
+（`ai_pgdata` 具名卷），10 个旧画布与 015–017 新画布均在。**数据无损**。
