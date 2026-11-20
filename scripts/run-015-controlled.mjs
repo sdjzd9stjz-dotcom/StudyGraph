@@ -245,17 +245,27 @@ for (const claim of positiveClaims) {
 }
 
 // E. 卡与 claim 对齐：CARD 产物的形状是 { cards: { cards: [...], skipped: [...] } }
-// 多材料时每个材料各有一个 CARD 节点，因此要合计全部卡片产物
+// 多材料时每个材料各有一个 CARD 节点，因此要合计全部卡片产物。
+// 注意：同一画布内同名概念会被 card 复用（不重复建卡），所以比较的是
+// 「去重后的概念名数量」而不是 claim 条数 —— 否则跨讲义重复的概念会让断言假红。
 const cardArtifacts = artifacts.filter((a) => a.structured?.cards)
 const created = cardArtifacts.flatMap((a) => a.structured.cards.cards ?? [])
 const skipped = cardArtifacts.flatMap((a) => a.structured.cards.skipped ?? [])
+const distinctPositiveNames = new Set(positiveClaims.map((c) => String(c.name ?? '').trim()))
 assert.ok(cardArtifacts.length > 0, '整条链路没有产出 CARD 产物')
 assert.equal(
   created.length,
-  positiveClaims.length,
-  `卡片数 ${created.length} 与"非 UNVERIFIED 的 claim 数" ${positiveClaims.length} 不一致`,
+  distinctPositiveNames.size,
+  `卡片数 ${created.length} 与"去重后的正例概念名" ${distinctPositiveNames.size} 不一致`,
 )
-ledger({ event: 'cards', cardNodes: cardArtifacts.length, created: created.length, skipped: skipped.length })
+ledger({
+  event: 'cards',
+  cardNodes: cardArtifacts.length,
+  created: created.length,
+  skipped: skipped.length,
+  positiveClaims: positiveClaims.length,
+  distinctPositiveNames: distinctPositiveNames.size,
+})
 
 const audit = await checkConceptCitations({ prisma, objectStore }, canvas.id)
 ledger({ event: 'audit', audit })
