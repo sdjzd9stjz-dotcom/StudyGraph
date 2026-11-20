@@ -458,17 +458,60 @@ A HTTP 200 ; B HTTP 409
 旧画布 `cmwnn9tpg0001q52wfgghlljt`（011 十份课件）保持冻结，未改动。
 新画布 `cmwovbcoe0001q5fsjrb5ezs2`：10 份课件 / 40 次执行全 SUCCEEDED / 30 claims / 9269 输入 token。
 
-### 8.8 仍未完成
+### 8.8 §3.4 第 3 项 · 写库实验 a/b/c/d + 两条降级 + 视图 0 行（**关闭**）
+
+脚本 `scripts/verify-write-experiments.mjs`，**空库与老库两条路径各跑一遍**（011 §1.3 要求）。
+空库路径用临时库 `studygraph_writetest`：从零 deploy 全部 7 份 migration 后再跑，跑完即删。
+
+```
+[PASS] a. Concept 无引用 → PENDING_REVIEW
+  SQL    : UPDATE "Concept" SET status='PENDING_REVIEW' WHERE id='...'
+  实际返回: SQLSTATE=23514 Concept ... cannot be PENDING_REVIEW without at least one source span citation
+            | HINT: Insert the citation row first, then set status.
+
+[PASS] b. Concept 无引用 → VERIFIED
+  实际返回: SQLSTATE=23514 Concept ... cannot be VERIFIED without at least one source span citation | HINT: ...
+
+[PASS] c. Problem 无引用 → VERIFIED
+  实际返回: SQLSTATE=23514 Problem ... cannot be VERIFIED without at least one source span citation | HINT: ...
+
+[PASS] d. Problem → PENDING / REJECTED（带理由）
+  实际返回: status=REJECTED rejectReason=三检未过
+
+[PASS] 降级 1. Concept 删光引用：PENDING_REVIEW → ?
+  实际返回: PENDING_REVIEW → UNVERIFIED
+
+[PASS] 降级 2. Problem 删光引用：VERIFIED → ?（必须是 PENDING）
+  实际返回: VERIFIED → PENDING
+
+[PASS] 视图 v_verified_without_citation（本画布）必须 0 行
+  实际返回: rows=0
+
+{ "database": "studygraph?schema=public",           "total": 7, "passed": 7, "failed": [] }
+{ "database": "studygraph_writetest?schema=public", "total": 7, "passed": 7, "failed": [] }
+```
+
+**为什么 d 与降级 2 是重点**（011 §1.3 原话）：d 证明没把 `Problem` 的既有流程改坏
+（`ProblemStatus` 只有 PENDING/VERIFIED/REJECTED）；降级 2 证明降级目标**按实体传参**——
+`Problem` 落到 `PENDING` 而不是 `UNVERIFIED`。
+
+- **删掉这条断言会漏什么**：这正是 010 那次 22P02 的同型错误现场。只验「迁移退出码 0」，
+  发现不了共享触发器函数硬编码了某个实体没有的枚举值。
+
+**验证过程中修掉的一处自造问题**：第一版 `expectFailure` 只判断「抛没抛异常」，
+输出里 SQLSTATE 是空的——任何异常都会让它通过，等于没验证。现在要求
+`code === '23514'` **且**报错文本匹配守卫的 RAISE 原文才算 PASS。
+
+### 8.9 仍未完成
 
 | 项 | 状态 | 原因 |
 | --- | --- | --- |
-| §3.4 第 3 项 写库实验 a/b/c/d | **未做** | 视图 0 行已在 §7.2 验过；a/b/c/d 四组写库实验仍未做 |
 | §3.4 第 12 项 前端溯源抽屉 | 未做 | UI 阶段，开工前需问用户 |
 | §3.4 第 13 项 BullMQ 队列 | 未做 | 可延后（M2 为同步执行） |
 | 已知假阴性 | 记录在案 | 「指数函数的定义域」这类短定义（残留 4–5 字）被 `RESIDUAL_TOO_SHORT` 拒绝。阈值 6 字是用来挡纯标题的（纯标题残留 2 字），**不降低** |
 | 已知漏判 | 记录在案 | 校准表 #15/#16：结构条件满足但语义错，机器会放行，只能靠人工 |
 
-### 8.9 环境事件（2026-11-20）
+### 8.10 环境事件（2026-11-20）
 
 Docker Desktop 进程在跑批期间自行退出一次，WSL `docker-desktop` 停止。重启后容器与数据完好
 （`ai_pgdata` 具名卷），10 个旧画布与 015–017 新画布均在。**数据无损**。
