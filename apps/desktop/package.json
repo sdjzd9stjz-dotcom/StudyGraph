@@ -1,0 +1,14 @@
+{
+  "name": "@studygraph/desktop",
+  "version": "0.0.0",
+  "private": true,
+  "description": "StudyGraph 桌面客户端：Electron 外壳 + 本机 Fastify + 内置 PostgreSQL",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "pack": "node ../../scripts/build-desktop.mjs"
+  },
+  "devDependencies": {
+    "electron": "33.4.11"
+  }
+}

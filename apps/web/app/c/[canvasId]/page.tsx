@@ -1,15 +1,17 @@
 import Link from 'next/link'
 
 import { CanvasEditor } from '../../../components/CanvasEditor'
-import { NODE_PORTS, NODE_TYPES } from '../../../../../packages/contracts/src/index'
-import type { NodeType } from '../../../../../packages/contracts/src/index'
-import { fetchCanvas, serverToken } from '../../../lib/api'
+import { ConceptPanel } from '../../../components/ConceptPanel'
+import { NODE_PORTS, NODE_TYPES } from '../../../../../packages/contracts/src/client'
+import type { NodeType } from '../../../../../packages/contracts/src/client'
+import { API_BASE_URL, fetchCanvas, fetchCanvasConcepts, serverToken } from '../../../lib/api'
 import { NODE_TYPE_LABELS, STATUS_COLORS } from '../../../lib/status'
 
 export const dynamic = 'force-dynamic'
 
 export default async function CanvasPage({ params }: { params: { canvasId: string } }) {
   const canvas = await fetchCanvas(params.canvasId)
+  const concepts = canvas ? await fetchCanvasConcepts(canvas.id) : []
 
   if (!canvas) {
     return (
@@ -84,8 +86,13 @@ export default async function CanvasPage({ params }: { params: { canvasId: strin
         </div>
       </header>
 
+      <div style={{ padding: '8px 24px 16px' }}>
+        <ConceptPanel canvasId={canvas.id} apiBaseUrl={API_BASE_URL} token={serverToken()} initialConcepts={concepts} />
+      </div>
+
       <CanvasEditor
         canvasId={canvas.id}
+        apiBaseUrl={API_BASE_URL}
         token={serverToken()}
         initialNodes={canvas.nodes.map((node) => ({
           id: node.id,

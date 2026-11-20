@@ -26,3 +26,9 @@ Thumbs.db
 
 # 数据库备份与一次性验证脚本（含真实数据，绝不入库）
 .tmp-backup/
+
+# 桌面打包产物（每份约 500MB，含 Electron 二进制与依赖，绝不入库）
+dist-desktop/
+
+# 由 scripts/build-api.mjs 生成的编译配置
+apps/api/tsconfig.build.json

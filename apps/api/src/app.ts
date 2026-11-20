@@ -12,6 +12,7 @@ import { registerBuiltinExecutors } from './nodes/executors/index.ts'
 import { assertRegistryReady } from './nodes/registry.ts'
 import { selfCheck } from './nodes/registry.ts'
 import { registerCanvasRoutes } from './routes/canvases.ts'
+import { registerConceptRoutes } from './routes/concepts.ts'
 import { registerEdgeRoutes } from './routes/edges.ts'
 import { registerGraphRoutes } from './routes/graph.ts'
 import { registerNodeRoutes } from './routes/nodes.ts'
@@ -104,12 +105,16 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   app.options('/*', async (_request, reply) => reply.status(204).send())
 
   // ── 健康检查（不鉴权）──────────────────────────────────────────────────
-  app.get('/health', async () => {
+  // 数据库不可达时**必须返回 5xx**：桌面客户端主进程按状态码判断"真的能用了"，
+  // 如果这里仍返回 200，库挂掉时窗口会打开在错误页上，用户看到的是"软件坏了"而不是"数据库没起来"。
+  app.get('/health', async (_request, reply) => {
     try {
       await prisma.$queryRaw`select 1`
       return { status: 'ok', db: 'up' }
-    } catch {
-      return { status: 'degraded', db: 'down' }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      reply.code(503)
+      return { status: 'degraded', db: 'down', detail: message.slice(0, 200) }
     }
   })
 
@@ -163,6 +168,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   registerRunRoutes(app, { prisma, guard, objectStore, llm })
   registerSystemRoutes(app, { guard, resolveApiKey })
   registerReviewRoutes(app, { prisma, guard })
+  registerConceptRoutes(app, { prisma, guard, objectStore })
 
   return app
 }

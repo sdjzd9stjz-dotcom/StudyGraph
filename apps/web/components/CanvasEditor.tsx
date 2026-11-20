@@ -15,9 +15,8 @@ import {
 import type { Connection, Edge as FlowEdge, Node as FlowNode } from '@xyflow/react'
 import { useCallback, useMemo, useRef } from 'react'
 
-import { NODE_PORTS, NODE_TYPES } from '../../../packages/contracts/src/index'
-import type { NodeType } from '../../../packages/contracts/src/index'
-import { API_BASE_URL } from '../lib/api'
+import { NODE_PORTS, NODE_TYPES } from '../../../packages/contracts/src/client'
+import type { NodeType } from '../../../packages/contracts/src/client'
 import { NODE_TYPE_LABELS, STATUS_COLORS } from '../lib/status'
 
 interface PortView {
@@ -132,12 +131,14 @@ function toFlowNode(node: {
 
 export interface CanvasEditorProps {
   canvasId: string
+  /** 运行时注入（桌面版端口每次启动都不同） */
+  apiBaseUrl: string
   token: string
   initialNodes: Array<{ id: string; type: string; status: string; posX: number; posY: number }>
   initialEdges: Array<{ id: string; fromNodeId: string; toNodeId: string; fromPort: string; toPort: string }>
 }
 
-function Inner({ canvasId, token, initialNodes, initialEdges }: CanvasEditorProps) {
+function Inner({ canvasId, apiBaseUrl, token, initialNodes, initialEdges }: CanvasEditorProps) {
   const [nodes, setNodes, onNodesChange] = useNodesState<FlowNode>(initialNodes.map(toFlowNode))
   const [edges, setEdges, onEdgesChange] = useEdgesState<FlowEdge>(
     initialEdges.map(
@@ -155,7 +156,7 @@ function Inner({ canvasId, token, initialNodes, initialEdges }: CanvasEditorProp
 
   const onConnect = useCallback(
     async (connection: Connection) => {
-      const response = await fetch(`${API_BASE_URL}/v1/canvases/${canvasId}/edges`, {
+      const response = await fetch(`${apiBaseUrl}/v1/canvases/${canvasId}/edges`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
         body: JSON.stringify({
@@ -184,7 +185,7 @@ function Inner({ canvasId, token, initialNodes, initialEdges }: CanvasEditorProp
         ),
       )
     },
-    [canvasId, setEdges, token],
+    [apiBaseUrl, canvasId, setEdges, token],
   )
 
   const onDrop = useCallback(
@@ -194,7 +195,7 @@ function Inner({ canvasId, token, initialNodes, initialEdges }: CanvasEditorProp
       if (!type) return
 
       const position = screenToFlowPosition({ x: event.clientX, y: event.clientY })
-      const response = await fetch(`${API_BASE_URL}/v1/canvases/${canvasId}/nodes`, {
+      const response = await fetch(`${apiBaseUrl}/v1/canvases/${canvasId}/nodes`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
         body: JSON.stringify({ type, posX: position.x, posY: position.y }),
@@ -206,18 +207,18 @@ function Inner({ canvasId, token, initialNodes, initialEdges }: CanvasEditorProp
       }
       setNodes((current) => [...current, toFlowNode(created)])
     },
-    [canvasId, screenToFlowPosition, setNodes, token],
+    [apiBaseUrl, canvasId, screenToFlowPosition, setNodes, token],
   )
 
   const onNodeDragStop = useCallback(
     async (_event: unknown, node: FlowNode) => {
-      await fetch(`${API_BASE_URL}/v1/nodes/${node.id}`, {
+      await fetch(`${apiBaseUrl}/v1/nodes/${node.id}`, {
         method: 'PATCH',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
         body: JSON.stringify({ posX: Math.round(node.position.x), posY: Math.round(node.position.y) }),
       })
     },
-    [token],
+    [apiBaseUrl, token],
   )
 
   const palette = useMemo(() => NODE_TYPES.map((type) => ({ type, label: NODE_TYPE_LABELS[type] ?? type })), [])
