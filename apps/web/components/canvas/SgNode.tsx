@@ -6,7 +6,8 @@ import { useState } from 'react'
 
 import { NODE_PORTS, validateConnection } from '../../../../packages/contracts/src/client'
 import type { NodeType } from '../../../../packages/contracts/src/client'
-import { ADVANCED_NODES, PRIMARY_NODES, nodeColor, nodeHint } from '../../lib/canvas-meta'
+import { ADVANCED_NODES, PRIMARY_NODES, PROMPT_FIELD, nodeColor, nodeHint, paramFieldsFor } from '../../lib/canvas-meta'
+import type { ParamField } from '../../lib/canvas-meta'
 
 export interface SgNodeData {
   nodeType: string
@@ -37,6 +38,10 @@ export interface SgNodeData {
   onOpenPrompt?: (nodeId: string) => void
   /** GATE 专用：放行 / 拒绝。其它节点类型没有这两个按钮。 */
   onGateDecision?: (nodeId: string, approved: boolean) => void
+  /** 保存节点参数（题型识别、变式等需要填题目原文） */
+  onSaveParams?: (nodeId: string, params: Record<string, unknown>) => void
+  /** 节点当前参数，用于输入框回填 */
+  params?: Record<string, unknown> | null
   /** GATE 当前是否已放行（来自 params.approved） */
   gateApproved?: boolean
   /** GATE 的拒绝理由（来自 params.note） */
@@ -60,6 +65,17 @@ export function SgNode({ id, data }: NodeProps) {
   const [hover, setHover] = useState(false)
   const [hoverPort, setHoverPort] = useState<{ side: 'in' | 'out'; name: string; type: string; top: number } | null>(null)
   const color = nodeColor(d.nodeType)
+
+  /**
+   * 参数草稿：把已有 params 摊平成字符串，供输入框直接绑定。
+   *
+   * 用草稿而不是直接读写 params：参数有数字、数组、布尔三种形态，
+   * 输入框里只能放字符串。改动期间保持草稿，点「保存参数」才转回类型写库 ——
+   * 中途每敲一个字就提交，会让"12"先变成 1 再变成 12，节点被无谓标脏。
+   */
+  const [draft, setDraft] = useState<Record<string, string>>(() => flattenParams(d.nodeType, d.params))
+  // 提示词对每个节点都开放；类型专属参数排在后面
+  const fields = [PROMPT_FIELD, ...paramFieldsFor(d.nodeType)]
   const connectionInputs = d.inputs.filter((port) => !port.external)
   const compatible = d.connectHighlight === 'compatible'
   const incompatible = d.connectHighlight === 'incompatible'
@@ -246,7 +262,8 @@ export function SgNode({ id, data }: NodeProps) {
         data-testid="prompt-panel"
         data-expanded={hover ? 'true' : 'false'}
         style={{
-          maxHeight: hover ? 128 : 0,
+          // 有参数要填的节点给更高的展开高度：题目原文是多行的，128px 装不下
+          maxHeight: hover ? (fields.length > 0 ? 300 : 128) : 0,
           opacity: hover ? 1 : 0,
           overflow: 'hidden',
           transition: 'max-height .16s ease, opacity .12s',
@@ -254,8 +271,76 @@ export function SgNode({ id, data }: NodeProps) {
           background: '#f8fafc',
         }}
       >
-        <div style={{ padding: '7px 9px' }}>
-          <div style={{ fontSize: 10, color: '#64748b', marginBottom: 3 }}>提示词 / 绑定技能</div>
+        <div style={{ padding: '7px 9px', maxHeight: 292, overflowY: 'auto' }}>
+          {/* ① 参数：这六个节点处理的是某一道具体的题，原文没法从上游拿 */}
+          {fields.length > 0 && (
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 10, color: '#64748b', marginBottom: 4 }}>节点参数</div>
+              <div style={{ display: 'grid', gap: 4 }}>
+                {fields.map((field) => {
+                  const value = draft[field.key] ?? ''
+                  const onChange = (next: string) => setDraft((current) => ({ ...current, [field.key]: next }))
+                  if (field.type === 'textarea') {
+                    return (
+                      <label key={field.key} style={fieldLabel}>
+                        <span>{field.label}</span>
+                        <textarea
+                          data-testid={`param-${id}-${field.key}`}
+                          value={value}
+                          placeholder={field.placeholder}
+                          onChange={(event) => onChange(event.target.value)}
+                          onPointerDown={(event) => event.stopPropagation()}
+                          rows={3}
+                          style={{ ...fieldInput, resize: 'vertical', fontFamily: 'inherit' }}
+                        />
+                      </label>
+                    )
+                  }
+                  if (field.type === 'bool') {
+                    return (
+                      <label key={field.key} style={{ ...fieldLabel, flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                        <input
+                          type="checkbox"
+                          data-testid={`param-${id}-${field.key}`}
+                          checked={value === 'true'}
+                          onChange={(event) => onChange(event.target.checked ? 'true' : 'false')}
+                        />
+                        <span>{field.label}</span>
+                      </label>
+                    )
+                  }
+                  return (
+                    <label key={field.key} style={fieldLabel}>
+                      <span>{field.label}</span>
+                      <input
+                        data-testid={`param-${id}-${field.key}`}
+                        type={field.type === 'number' ? 'number' : 'text'}
+                        value={value}
+                        placeholder={field.placeholder}
+                        onChange={(event) => onChange(event.target.value)}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        style={fieldInput}
+                      />
+                    </label>
+                  )
+                })}
+              </div>
+              <button
+                type="button"
+                data-testid={`save-params-${id}`}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  d.onSaveParams?.(id, buildParams(fields, draft, d.params))
+                }}
+                style={saveButton}
+              >
+                保存参数
+              </button>
+            </div>
+          )}
+
+          {/* ② 技能 */}
+          <div style={{ fontSize: 10, color: '#64748b', marginBottom: 3 }}>绑定技能</div>
           {d.skills.length > 0 ? (
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
               {d.skills.map((skill) => (
@@ -265,7 +350,7 @@ export function SgNode({ id, data }: NodeProps) {
               ))}
             </div>
           ) : (
-            <div style={{ color: '#94a3b8', fontSize: 11 }}>未绑定技能 · 点此编辑</div>
+            <div style={{ color: '#94a3b8', fontSize: 11 }}>未绑定技能</div>
           )}
           <button
             type="button"
@@ -276,7 +361,7 @@ export function SgNode({ id, data }: NodeProps) {
             }}
             style={{ marginTop: 6, fontSize: 11, border: '1px solid #cbd5e1', background: '#fff', borderRadius: 4, padding: '2px 7px', cursor: 'pointer' }}
           >
-            编辑提示词
+            编辑技能绑定
           </button>
         </div>
       </div>
@@ -345,6 +430,90 @@ function handleStyle(state: 'ok' | 'no' | undefined, color: string, top: number)
     return { ...base, opacity: 0.22, transition: 'opacity .1s' }
   }
   return base
+}
+
+/** 已有 params → 输入框能绑定的字符串 */
+function flattenParams(nodeType: string, params: Record<string, unknown> | null | undefined): Record<string, string> {
+  const result: Record<string, string> = {}
+  for (const field of paramFieldsFor(nodeType)) {
+    const raw = params?.[field.key]
+    if (raw === undefined || raw === null) continue
+    if (Array.isArray(raw)) result[field.key] = raw.join(', ')
+    else if (typeof raw === 'boolean') result[field.key] = raw ? 'true' : 'false'
+    else result[field.key] = String(raw)
+  }
+  return result
+}
+
+/**
+ * 草稿 → params。空字符串一律**不写进 params**，不是写成空串。
+ *
+ * 理由：执行器用 `params.count ?? 5` 这类写法取默认值，
+ * 空串会让 `??` 失效（空串不是 null），然后 Number('') = 0 把数量变成 0。
+ */
+function buildParams(
+  fields: readonly ParamField[],
+  draft: Record<string, string>,
+  existing: Record<string, unknown> | null | undefined,
+): Record<string, unknown> {
+  // 从已有 params 出发再覆盖：表单里没有的字段（课件的 localPath、闸门的 approved）必须原样留着。
+  // 用空对象重建会把它们一起抹掉 —— 保存一次提示词就把课件路径弄丢，是最难查的那种坏法。
+  const result: Record<string, unknown> = { ...(existing ?? {}) }
+  for (const field of fields) {
+    const value = (draft[field.key] ?? '').trim()
+    if (field.type === 'bool') {
+      // 布尔是显式的：false 也要写进去，否则执行器会当成没设
+      result[field.key] = value === 'true'
+      continue
+    }
+    if (value.length === 0) {
+      // 清空 = 删掉这个字段，而不是写成空串（空串会让 `?? 默认值` 失效）
+      delete result[field.key]
+      continue
+    }
+    if (field.type === 'number') {
+      const parsed = Number(value)
+      result[field.key] = Number.isFinite(parsed) ? parsed : value
+      continue
+    }
+    if (field.type === 'csv') {
+      const items = value.split(/[,，\s]+/).map((item) => item.trim()).filter(Boolean)
+      if (items.length > 0) result[field.key] = items
+      continue
+    }
+    result[field.key] = value
+  }
+  return result
+}
+
+const fieldLabel: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 2,
+  fontSize: 10,
+  color: '#475569',
+}
+
+const fieldInput: React.CSSProperties = {
+  fontSize: 11,
+  padding: '3px 5px',
+  border: '1px solid #cbd5e1',
+  borderRadius: 4,
+  background: '#fff',
+  color: '#0f172a',
+  width: '100%',
+  boxSizing: 'border-box',
+}
+
+const saveButton: React.CSSProperties = {
+  marginTop: 6,
+  fontSize: 11,
+  border: 'none',
+  borderRadius: 4,
+  background: '#2563eb',
+  color: '#fff',
+  padding: '3px 9px',
+  cursor: 'pointer',
 }
 
 /**

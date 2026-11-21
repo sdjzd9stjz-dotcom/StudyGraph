@@ -78,7 +78,15 @@ export function registerProviderRoutes(app: FastifyInstance, deps: ProviderRoute
       prisma.provider.findMany({
         where: { OR: [{ isCustom: false }, { ownerId: auth.user.id }] },
         orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
-        include: { models: { where: { enabled: true }, orderBy: { displayName: 'asc' } } },
+        /**
+         * 停用的模型也要返回，只靠 `enabled` 标记区分。
+         *
+         * 之前这里 `where: { enabled: true }`：一旦某次操作把模型停用，它就从列表里
+         * 彻底消失 —— 界面上既看不到、也没法重新启用，任务下拉跟着变空，
+         * 用户只会看到"拉到 2 个模型"却一个都选不了（实际遇到）。
+         * 可见性优先：能不能选由 enabled 决定，但你必须看得见它。
+         */
+        include: { models: { orderBy: [{ enabled: 'desc' }, { displayName: 'asc' }] } },
       }),
       prisma.userCredential.findMany({
         where: { userId: auth.user.id, isActive: true },
@@ -105,6 +113,9 @@ export function registerProviderRoutes(app: FastifyInstance, deps: ProviderRoute
           displayName: m.displayName,
           contextWindow: m.contextWindow,
           capabilities: m.capabilities,
+          // 必须带上：界面靠它把停用的模型显示成灰色并给出「启用」按钮。
+          // 少了它，前面「停用模型也要可见」就只剩可见、没有状态 —— 停用的模型会被当成可选。
+          enabled: m.enabled,
         })),
         credentials: credentials
           .filter((c) => c.providerId === provider.id)

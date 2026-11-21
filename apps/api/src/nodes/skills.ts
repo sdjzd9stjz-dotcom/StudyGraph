@@ -76,3 +76,26 @@ export const HARD_RULE_SUMMARY = [
   '2. 执行必须显式触发：你只回答问题，不得自行触发其他步骤。',
   '3. 写作类只给骨架：不代写正文。',
 ].join('\n')
+
+/**
+ * 把节点自己写的提示词（`params.prompt`）合成为一条附加 skill。
+ *
+ * 为什么走 skill 通道：所有执行器拼系统提示词都只调 `composeSystemPrompt`，
+ * 而它把 skills 放在硬约束**之后**。这样学生能补充要求（"只考计算题"），
+ * 但推不翻硬约束（"没有原文引用不得成为已确认知识"）。
+ *
+ * 不逐个执行器加参数：13 个执行器少改一个，那个节点的提示词就会被静默忽略 ——
+ * 而这种忽略在界面上完全看不出来（提示词存进去了，就是不生效）。
+ */
+export function withNodePrompt(
+  boundSkills: readonly BoundSkill[],
+  prompt: unknown,
+): readonly BoundSkill[] {
+  if (typeof prompt !== 'string') return boundSkills
+  const text = prompt.trim()
+  if (text.length === 0) return boundSkills
+  return [
+    ...boundSkills,
+    { id: 'node-prompt', slug: 'node-prompt', name: '节点提示词', instructions: text, version: 1 },
+  ]
+}

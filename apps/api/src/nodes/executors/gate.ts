@@ -33,7 +33,7 @@ interface GateParams {
 
 export const gateExecutor: NodeExecutor<GateParams> = {
   type: 'GATE',
-  artifactKind: 'REVIEW_PLAN',
+  artifactKind: 'GATE_DECISION',
   promptVersion: 'no-prompt',
   inputs: {
     type: 'object',

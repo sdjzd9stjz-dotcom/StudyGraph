@@ -70,6 +70,9 @@ function toFlowNode(node: WorkbenchNode, skillsByNode: Map<string, string[]>): F
     outputSummary: null,
     inputs: ports.inputs.map((port) => ({ name: port.name, type: port.type, external: port.external === true })),
     outputs: ports.outputs.map((port) => ({ name: port.name, type: port.type, external: port.external === true })),
+    // 参数要在节点上可编辑：题型识别、变式这些节点处理的是具体某道题，
+    // 原文没法从上游拿到，界面不给填就是死的
+    params: node.params ?? null,
   }
 
   // GATE 的闸门状态来自 params：刷新页面后仍要看得出"这张卡放行了没有"
@@ -261,6 +264,39 @@ function Inner({
       }
     },
     [apiBaseUrl, notify, setNodes, token],
+  )
+
+  /**
+   * 保存节点参数。
+   *
+   * 用 PATCH 而不是单独的 params 接口：`PATCH /v1/nodes/:id` 本来就接受 params，
+   * 客户端再包一层只会多一处需要保持一致的地方。
+   *
+   * 保存后**不自动运行**（硬约束 2）：改参数会改变指纹，节点会失效，
+   * 但什么时候花这笔钱由学生决定。
+   */
+  const saveNodeParams = useCallback(
+    async (nodeId: string, params: Record<string, unknown>) => {
+      const response = await fetch(`${apiBaseUrl}/v1/nodes/${nodeId}`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ params }),
+      })
+      if (!response.ok) {
+        const body = (await response.json().catch(() => null)) as { error?: { message?: string } } | null
+        notify(body?.error?.message ?? `保存失败：HTTP ${response.status}`)
+        return
+      }
+      setNodes((current) =>
+        current.map((node) =>
+          node.id === nodeId
+            ? { ...node, data: { ...node.data, params, status: 'DRAFT' } }
+            : node,
+        ),
+      )
+      notify('参数已保存，需要点 ▶ 重新运行才生效')
+    },
+    [apiBaseUrl, headers, notify, setNodes],
   )
 
   /**
@@ -478,12 +514,13 @@ function Inner({
             onDelete: deleteNode,
             onOpenPrompt: openPrompt,
             onGateDecision: decideGateNode,
+            onSaveParams: saveNodeParams,
             connectHighlight,
             portState,
           },
         }
       }),
-    [nodes, runNode, deleteNode, openPrompt, decideGateNode, connectDraft],
+    [nodes, runNode, deleteNode, openPrompt, decideGateNode, saveNodeParams, connectDraft],
   )
 
   // ── 连线 ────────────────────────────────────────────────────────────────

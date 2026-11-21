@@ -40,7 +40,7 @@ interface ProbeParams {
 
 export const probeExecutor: NodeExecutor<ProbeParams> = {
   type: 'PROBE',
-  artifactKind: 'PROBLEM_ANALYSIS',
+  artifactKind: 'PROBE_PROFILE',
   promptVersion: 'probe-v1',
   inputs: { type: 'object', properties: {}, required: [] },
   outputs: { type: 'object', properties: { analysis: { type: 'object' } }, required: ['analysis'] },

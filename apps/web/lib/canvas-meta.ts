@@ -46,3 +46,92 @@ export const nodeHint = (type: string): string =>
 /** 友好的节点名：新手看到的应该是「课件」而不是「文件解析」 */
 export const nodeLabel = (type: string): string =>
   [...PRIMARY_NODES, ...ADVANCED_NODES].find((node) => node.type === type)?.label ?? type
+
+// ── 节点参数表单 ────────────────────────────────────────────────────────────
+/**
+ * 每个节点要填哪些参数。
+ *
+ * 为什么需要这张表：有六个节点（题型识别、解法抽取、分步解法、变式、干扰项、
+ * 质量闸门）处理的是**某一道具体的题**，题目原文没法从上游自动获得 ——
+ * 不给填参数的地方，这六个节点在界面上就是死的，一运行就报"缺少 params.text"。
+ *
+ * 字段类型：
+ *   text/textarea  字符串
+ *   number         数字（空字符串视为不填，不写进 params）
+ *   csv            逗号分隔 → string[]
+ */
+export type ParamFieldType = 'text' | 'textarea' | 'number' | 'csv' | 'bool'
+
+export interface ParamField {
+  readonly key: string
+  readonly label: string
+  readonly type: ParamFieldType
+  readonly placeholder?: string
+}
+
+export const NODE_PARAM_FIELDS: Partial<Record<NodeType, ParamField[]>> = {
+  CHUNK: [{ key: 'maxChars', label: '每片目标字数', type: 'number', placeholder: '留空按页切' }],
+  EXTRACT: [
+    { key: 'batchSize', label: '每批段数', type: 'number', placeholder: '默认 15' },
+    { key: 'maxClaimsPerChunk', label: '每段最多几条', type: 'number', placeholder: '留空不限制' },
+  ],
+  REVIEW: [
+    { key: 'limit', label: '一次排几张', type: 'number', placeholder: '默认 20' },
+    { key: 'includeNew', label: '带上没复习过的新卡', type: 'bool' },
+  ],
+  QUIZ: [
+    { key: 'count', label: '出几道', type: 'number', placeholder: '默认 5' },
+    { key: 'difficulty', label: '难度 1–5', type: 'number', placeholder: '留空由模型判断' },
+    { key: 'types', label: '限定题型', type: 'csv', placeholder: 'SINGLE_CHOICE, FILL_BLANK' },
+  ],
+  PROBE: [{ key: 'text', label: '题目原文', type: 'textarea', placeholder: '把这道题的题干粘进来' }],
+  METHOD: [{ key: 'text', label: '例题原文', type: 'textarea', placeholder: '例题题干与解法' }],
+  SOLVE: [{ key: 'text', label: '题目原文', type: 'textarea', placeholder: '要分步讲解的题' }],
+  DIAGNOSE: [
+    { key: 'answer', label: '你的作答', type: 'textarea', placeholder: '把写下的答案粘进来' },
+    { key: 'problemText', label: '题目原文', type: 'textarea', placeholder: '可选，给了定位更准' },
+  ],
+  VARIANT: [
+    { key: 'stem', label: '原题题干', type: 'textarea', placeholder: '变式会保留它的方法结构' },
+    { key: 'count', label: '出几道', type: 'number', placeholder: '默认按维度数' },
+  ],
+  DISTRACTOR: [
+    { key: 'stem', label: '题干', type: 'textarea' },
+    { key: 'answer', label: '正确答案', type: 'text' },
+    { key: 'count', label: '几个干扰项', type: 'number', placeholder: '默认 3' },
+  ],
+  CHECK: [
+    { key: 'stem', label: '题干', type: 'textarea' },
+    { key: 'answer', label: '给定答案', type: 'text' },
+  ],
+  PAPER: [
+    { key: 'title', label: '卷子标题', type: 'text', placeholder: '留空用默认标题' },
+    { key: 'durationMin', label: '时长（分钟）', type: 'number', placeholder: '默认 60' },
+    { key: 'types', label: '限定题型', type: 'csv', placeholder: 'SINGLE_CHOICE, COMPUTATION' },
+  ],
+  GRADE: [
+    {
+      key: 'items',
+      label: '要批的作答（JSON）',
+      type: 'textarea',
+      placeholder: '[{"problemId":"…","answer":"A"}]',
+    },
+  ],
+}
+
+export const paramFieldsFor = (type: string): ParamField[] =>
+  NODE_PARAM_FIELDS[type as NodeType] ?? []
+
+/**
+ * 每个节点都能填的「提示词」。
+ *
+ * 它会作为**附加说明**拼进系统提示词，位置在所有硬约束和技能之后 ——
+ * 也就是说：学生可以补充要求，但不能推翻溯源、不能推翻"不许编造出处"这类硬约束。
+ * 之所以不做成"完全自定义提示词"：那等于让执行器的全部安全规则可被覆盖。
+ */
+export const PROMPT_FIELD: ParamField = {
+  key: 'prompt',
+  label: '提示词（你希望它怎么做）',
+  type: 'textarea',
+  placeholder: '例如：只考计算题，不要考概念记忆',
+}

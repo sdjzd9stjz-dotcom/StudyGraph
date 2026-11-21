@@ -61,7 +61,7 @@ const outputSchema: JSONSchema = {
 
 export const prereqExecutor: NodeExecutor = {
   type: 'PREREQ',
-  artifactKind: 'PREREQ_GRAPH',
+  artifactKind: 'PREREQ_PROPOSAL',
   promptVersion: 'prereq-v1',
   inputs: { type: 'object', properties: { cards: { type: 'object', description: '上游 card 节点产物（可选）' } }, required: [] },
   outputs: {

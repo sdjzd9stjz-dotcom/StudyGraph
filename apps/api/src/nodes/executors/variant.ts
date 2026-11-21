@@ -65,7 +65,7 @@ interface VariantParams {
 
 export const variantExecutor: NodeExecutor<VariantParams> = {
   type: 'VARIANT',
-  artifactKind: 'PROBLEM_SET',
+  artifactKind: 'VARIANT_SET',
   promptVersion: 'variant-v1',
   inputs: { type: 'object', properties: { method: { type: 'object' } }, required: [] },
   outputs: { type: 'object', properties: { variants: { type: 'array' } }, required: ['variants'] },

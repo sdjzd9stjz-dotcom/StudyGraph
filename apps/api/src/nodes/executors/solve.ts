@@ -58,7 +58,7 @@ const SKIP_MARKERS = ['由上式可得', '显然', '易得', '整理得', '综�
 
 export const solveExecutor: NodeExecutor<SolveParams> = {
   type: 'SOLVE',
-  artifactKind: 'SOLUTION_STEPS',
+  artifactKind: 'SOLUTION_TRACE',
   promptVersion: 'solve-v1',
   inputs: { type: 'object', properties: { analysis: { type: 'object' }, method: { type: 'object' } }, required: [] },
   outputs: { type: 'object', properties: { steps: { type: 'array' } }, required: ['steps'] },

@@ -58,7 +58,7 @@ const VALID_CODES = new Set(['CONCEPT_GAP', 'METHOD_MISMATCH', 'CONDITION_MISSED
 
 export const diagnoseExecutor: NodeExecutor<DiagnoseParams> = {
   type: 'DIAGNOSE',
-  artifactKind: 'ERROR_DIAGNOSIS',
+  artifactKind: 'DIAGNOSIS',
   promptVersion: 'diagnose-v1',
   inputs: { type: 'object', properties: { steps: { type: 'array' } }, required: [] },
   outputs: { type: 'object', properties: { tags: { type: 'array' } }, required: ['tags'] },

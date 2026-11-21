@@ -298,29 +298,73 @@ export function ProviderSettings({ data, apiBaseUrl, token }: { data: ProvidersP
               </div>
             )}
 
-            {/* 模型标签只做展示，点一下不会消失。
-                之前的实现是"点击切换启用/停用"，而列表只返回启用的模型 ——
-                点一下就停用、停用就从列表消失，看起来像把模型删掉了（用户实际遇到）。 */}
+            {/* 模型标签只做展示，**点标签本身什么都不会发生**。
+                启用/停用走旁边那个明确的按钮：标签可点 + 点一下就消失，是这个页面
+                之前最坏的体验（用户点了两下，模型全没了，还以为密钥没保存）。
+
+                停用的模型也必须显示出来（灰色 + 「启用」按钮）——
+                看不见就等于删掉了，而且任务下拉会莫名其妙变空，没人能想到原因。 */}
             {provider.models.length > 0 && (
-              <div data-testid={`models-${provider.slug}`} style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {provider.models.map((model) => (
-                  <span
-                    key={model.id}
-                    data-testid={`model-${provider.slug}-${model.modelId}`}
-                    data-enabled={String(model.enabled !== false)}
-                    title={`${model.modelId}${model.enabled === false ? '（已停用）' : ''}`}
-                    style={{
-                      fontSize: 11,
-                      padding: '3px 8px',
-                      borderRadius: 999,
-                      border: '1px solid #bfdbfe',
-                      background: '#eff6ff',
-                      color: '#1d4ed8',
+              <div data-testid={`models-${provider.slug}`} style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+                {provider.models.map((model) => {
+                  const enabled = model.enabled !== false
+                  return (
+                    <span
+                      key={model.id}
+                      data-testid={`model-${provider.slug}-${model.modelId}`}
+                      data-enabled={String(enabled)}
+                      title={`${model.modelId}${enabled ? '' : '（已停用：停用的模型不出现在任务下拉里）'}`}
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 5,
+                        fontSize: 11,
+                        padding: '2px 3px 2px 8px',
+                        borderRadius: 999,
+                        border: `1px solid ${enabled ? '#bfdbfe' : '#d1d5db'}`,
+                        background: enabled ? '#eff6ff' : '#f3f4f6',
+                        color: enabled ? '#1d4ed8' : '#9ca3af',
+                      }}
+                    >
+                      {model.displayName || model.modelId}
+                      <button
+                        type="button"
+                        data-testid={`toggle-model-${provider.slug}-${model.modelId}`}
+                        disabled={busy !== null}
+                        onClick={() => void toggleModel(provider, model.modelId, !enabled)}
+                        style={{
+                          fontSize: 10,
+                          lineHeight: '14px',
+                          border: 'none',
+                          borderRadius: 999,
+                          padding: '0 6px',
+                          cursor: busy !== null ? 'wait' : 'pointer',
+                          background: enabled ? '#dbeafe' : '#2563eb',
+                          color: enabled ? '#1d4ed8' : '#fff',
+                        }}
+                      >
+                        {enabled ? '停用' : '启用'}
+                      </button>
+                    </span>
+                  )
+                })}
+                {provider.models.some((model) => model.enabled === false) && (
+                  <button
+                    type="button"
+                    data-testid={`enable-all-${provider.slug}`}
+                    disabled={busy !== null}
+                    onClick={() => {
+                      const disabled = provider.models.filter((model) => model.enabled === false)
+                      void (async () => {
+                        for (const model of disabled) await toggleModel(provider, model.modelId, true)
+                        setMessage({ ok: true, text: `已启用 ${provider.name} 的 ${disabled.length} 个模型` })
+                      })()
                     }}
+                    style={secondaryButton}
                   >
-                    {model.displayName || model.modelId}
-                  </span>
-                ))}
+                    全部启用
+                  </button>
+                )}
               </div>
             )}
           </div>

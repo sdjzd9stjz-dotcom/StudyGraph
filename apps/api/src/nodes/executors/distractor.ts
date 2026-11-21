@@ -63,7 +63,7 @@ interface DistractorParams {
 
 export const distractorExecutor: NodeExecutor<DistractorParams> = {
   type: 'DISTRACTOR',
-  artifactKind: 'PROBLEM_SET',
+  artifactKind: 'DISTRACTOR_SET',
   promptVersion: 'distractor-v1',
   inputs: { type: 'object', properties: { variants: { type: 'array' } }, required: [] },
   outputs: { type: 'object', properties: { options: { type: 'array' } }, required: ['options'] },

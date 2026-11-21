@@ -31,7 +31,7 @@ interface PaperParams extends PaperSpec {
 
 export const paperExecutor: NodeExecutor<PaperParams> = {
   type: 'PAPER',
-  artifactKind: 'PAPER',
+  artifactKind: 'PAPER_SPEC',
   promptVersion: 'no-prompt',
   inputs: {
     type: 'object',

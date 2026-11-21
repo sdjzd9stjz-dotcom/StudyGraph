@@ -44,7 +44,7 @@ interface CheckParams {
 
 export const checkExecutor: NodeExecutor<CheckParams> = {
   type: 'CHECK',
-  artifactKind: 'QUALITY_CHECK',
+  artifactKind: 'CHECK_VERDICT',
   promptVersion: 'check-v1',
   inputs: { type: 'object', properties: { options: { type: 'array' } }, required: [] },
   outputs: { type: 'object', properties: { passed: { type: 'boolean' }, result: { type: 'object' } }, required: ['passed', 'result'] },

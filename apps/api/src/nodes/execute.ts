@@ -9,7 +9,7 @@ import type { ObjectStore } from '../storage/object-store.ts'
 import { collectDownstream } from '../domain/graph/dag.ts'
 import type { EdgeLike } from '../domain/graph/dag.ts'
 import { getExecutor } from './registry.ts'
-import { loadNodeSkills, skillFingerprintPayload } from './skills.ts'
+import { loadNodeSkills, skillFingerprintPayload, withNodePrompt } from './skills.ts'
 import { cardCacheIsCurrent } from './executors/card.ts'
 
 /**
@@ -138,7 +138,10 @@ export async function executeNode(
     : (node.params ?? {})
 
   // F2：显式绑定到本节点的 skill（已过滤 enabled=false、按 slug 排序）
-  const skills = await loadNodeSkills(deps.prisma, node.id, deps.user.id)
+  const boundSkills = await loadNodeSkills(deps.prisma, node.id, deps.user.id)
+
+  // 节点自己写的提示词（`params.prompt`）：合成为附加 skill，见 withNodePrompt 的说明
+  const skills = withNodePrompt(boundSkills, (node.params as { prompt?: unknown } | null)?.prompt)
   const skillPayload = skillFingerprintPayload(skills)
 
   const route = node.type === 'EXTRACT' ? deps.llm.routeFor('extract') : null

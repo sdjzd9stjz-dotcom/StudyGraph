@@ -110,6 +110,8 @@ enum ArtifactKind {
   DISTRACTOR_SET
   CHECK_VERDICT
   PAPER_SPEC
+  /// 人工闸门的放行/拒绝决定（以前借用 REVIEW_PLAN，语义是错的）
+  GATE_DECISION
   OUTLINE_SKELETON
   DRAFT_SKELETON
 }
