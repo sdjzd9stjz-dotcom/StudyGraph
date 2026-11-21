@@ -144,8 +144,8 @@ export const cardExecutor: NodeExecutor = {
         created.push({
           conceptId: outcome.concept.id,
           name: claim.name,
-          definition: outcome.concept.definition ?? claim.definition,
-          quote: claim.quote,
+          definition: outcome.concept.definition ?? claim.definition ?? '',
+          quote: claim.quote ?? '',
           spanId: span.id,
           status: outcome.concept.status,
         })
