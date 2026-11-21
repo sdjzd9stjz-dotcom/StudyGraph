@@ -108,9 +108,26 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   })
 
   // ── 最小 CORS（web 跑在 3000，API 在 3001）──────────────────────────────
+  /**
+   * 允许的头必须**回显浏览器请求的那些**，不能写死。
+   *
+   * 之前写死成 `authorization, content-type`，而上传课件还要带 `x-filename`：
+   * 预检响应里没有它 → 浏览器直接判为不允许 → 请求根本没发出去 →
+   * 前端只看到 `TypeError: Failed to fetch`，服务端日志里一行都没有。
+   * 这种"什么错都看不到"的失败，最难查。
+   *
+   * 回显而不是继续追加白名单：以后再加自定义头（比如断点续传的 x-upload-id）
+   * 不会再踩同一个坑。允许的来源仍然收窄到本机与 file://（桌面版）。
+   */
   app.addHook('onSend', async (request, reply, payload) => {
     reply.header('access-control-allow-origin', request.headers.origin ?? '*')
-    reply.header('access-control-allow-headers', 'authorization, content-type')
+    const requested = request.headers['access-control-request-headers']
+    reply.header(
+      'access-control-allow-headers',
+      typeof requested === 'string' && requested.trim().length > 0
+        ? requested
+        : 'authorization, content-type',
+    )
     reply.header('access-control-allow-methods', 'GET, POST, PATCH, DELETE, OPTIONS')
     return payload
   })

@@ -279,6 +279,8 @@ enum UsageSurface {
 enum SourceKind {
   PDF
   PPTX
+  /// Office 97–2003 的二进制 .ppt（复合文档 OLE2），与 .pptx 的 zip 结构完全不同
+  PPT
   WEB
   AUDIO
   IMAGE

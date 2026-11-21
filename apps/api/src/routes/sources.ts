@@ -15,7 +15,8 @@ export interface SourceRouteDeps {
 
 /** 课件上限：60 页 PPTX 通常几 MB，100MB 足够，再大多半是误传 */
 const MAX_SOURCE_BYTES = 100 * 1024 * 1024
-const ALLOWED_EXT = /\.(pptx|pdf)$/i
+// .ppt 是 Office 97–2003 的二进制格式，走单独的解析器（storage/ppt.ts）
+const ALLOWED_EXT = /\.(pptx|ppt|pdf)$/i
 
 /**
  * `POST /v1/canvases/:canvasId/sources` —— 上传课件，落成一个 SOURCE 节点。
@@ -62,7 +63,11 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
         throw new AppError(400, 'SOURCE_EMPTY', '上传内容为空')
       }
 
-      const ext = filename.toLowerCase().endsWith('.pptx') ? '.pptx' : '.pdf'
+      // 按扩展名决定落盘后缀 —— 千万别写成"不是 .pptx 就是 .pdf"：
+      // 那会把 .ppt 存成 original.pdf，之后 PDF 解析器拿到二进制 PPT 文件，
+      // 报出来的错和真正的原因完全无关。
+      const lower = filename.toLowerCase()
+      const ext = lower.endsWith('.pptx') ? '.pptx' : lower.endsWith('.ppt') ? '.ppt' : '.pdf'
       // 节点 id 先定下来，key 里才能带上它，省一次「建了节点再改 key」的写
       const nodeId = crypto.randomUUID()
       const key = `canvas/${canvasId}/source/${nodeId}/original${ext}`

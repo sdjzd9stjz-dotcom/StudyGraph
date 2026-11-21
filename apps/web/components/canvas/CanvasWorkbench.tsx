@@ -110,6 +110,24 @@ function Inner({
   }, [nodeSkills])
 
   const [nodes, setNodes, onNodesChange] = useNodesState<FlowNode>(initialNodes.map((node) => toFlowNode(node, skillsByNode)))
+
+  /**
+   * 把服务端新出现的节点并进画布。
+   *
+   * 为什么需要：`useNodesState` 只在挂载时取一次初值。上传课件后调 `router.refresh()`，
+   * props 变了、库里也真建好了 SOURCE 节点，但画布上的 `nodes` 是本地 state，不会跟着变 ——
+   * 用户看到"已上传"却一张节点都没有，会以为上传失败了（实际遇到）。
+   *
+   * 只做**追加**，不整体替换：替换会把用户正在拖拽的位置、本地删掉的节点一起冲掉。
+   */
+  useEffect(() => {
+    const incoming = initialNodes.map((node) => toFlowNode(node, skillsByNode))
+    setNodes((current) => {
+      const known = new Set(current.map((node) => node.id))
+      const added = incoming.filter((node) => !known.has(node.id))
+      return added.length === 0 ? current : [...current, ...added]
+    })
+  }, [initialNodes, skillsByNode, setNodes])
   const [edges, setEdges, onEdgesChange] = useEdgesState<FlowEdge>(
     initialEdges.map((edge) => ({ id: edge.id, source: edge.fromNodeId, target: edge.toNodeId, sourceHandle: edge.fromPort, targetHandle: edge.toPort })),
   )

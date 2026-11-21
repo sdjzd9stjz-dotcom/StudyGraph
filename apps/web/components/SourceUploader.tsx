@@ -20,7 +20,7 @@ export function SourceUploader({ canvasId, apiBaseUrl, token }: { canvasId: stri
       <input
         ref={inputRef}
         type="file"
-        accept=".pptx,.pdf"
+        accept=".pptx,.ppt,.pdf"
         data-testid="source-file-input"
         style={{ display: 'none' }}
         onChange={async (event) => {
