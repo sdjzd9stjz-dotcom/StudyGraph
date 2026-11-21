@@ -21,6 +21,30 @@ export function serverToken(): string {
   return process.env.STUDYGRAPH_DEV_PAT ?? process.env.NEXT_PUBLIC_DEV_PAT ?? ''
 }
 
+/**
+ * GATE 节点的放行 / 拒绝。
+ *
+ * 为什么走独立接口而不是 PATCH params：放行是一次有后果的决策，
+ * 要留下「谁、什么时候、为什么」。拒绝必须给理由，否则上游不知道要改什么。
+ */
+export async function decideGate(
+  nodeId: string,
+  decision: { approved: boolean; note?: string },
+): Promise<{ ok: true; approved: boolean } | { ok: false; message: string }> {
+  const response = await fetch(`${API_BASE_URL}/v1/nodes/${nodeId}/gate-decision`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${serverToken()}` },
+    body: JSON.stringify(decision),
+  })
+  const body = (await response.json().catch(() => null)) as
+    | { approved?: boolean; error?: { message?: string } }
+    | null
+  if (!response.ok) {
+    return { ok: false, message: body?.error?.message ?? `HTTP ${response.status}` }
+  }
+  return { ok: true, approved: body?.approved === true }
+}
+
 export interface CanvasNode {
   id: string
   type: string
@@ -29,6 +53,8 @@ export interface CanvasNode {
   posX: number
   posY: number
   staleReason?: string | null
+  /** GATE 节点靠 params.approved / params.note 显示闸门状态 */
+  params?: Record<string, unknown> | null
 }
 
 export interface CanvasEdge {

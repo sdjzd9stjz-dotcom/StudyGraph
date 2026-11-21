@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
+import { NODE_TYPES } from '../../../../packages/contracts/src/node-types.ts'
 import { AppError } from '../../src/lib/errors.ts'
 import { registerBuiltinExecutors } from '../../src/nodes/executors/index.ts'
 import {
@@ -16,28 +17,45 @@ import {
 // 模拟启动路径：注册内置执行器后再自检
 registerBuiltinExecutors()
 
-test('自检：已实现 ∪ 计划 = 17，且没有问题项', () => {
+test('自检：17 个 NodeType 全部有执行器，计划表为空，没有问题项', () => {
   const report = selfCheck()
   assert.equal(report.unionSize, 17)
   assert.deepEqual(report.problems, [])
   assert.deepEqual(report.missingPlan, [])
   assert.equal(report.ok, true)
-  assert.equal(report.implemented.length + report.planned.length, 17)
-  assert.deepEqual(report.implemented.slice().sort(), ['CARD', 'CHUNK', 'EXTRACT', 'SOURCE'])
+
+  // 这一条是重点：以前 implemented 只有 4 个，现在必须等于全部 17 个。
+  // 如果有人把某个执行器从 index.ts 里摘掉，这里立刻红。
+  assert.equal(report.implemented.length, 17)
+  assert.deepEqual(report.implemented.slice().sort(), [...NODE_TYPES].sort())
+  assert.deepEqual(report.planned, [], '计划表必须为空：没有"排了期但没做"的节点')
+  assert.deepEqual(Object.keys(PLANNED_PLAN), [])
 })
 
-test('C：删掉一个未实现的计划项 → ok:false、该类型进 missingPlan、且不在 planned 里', () => {
+test('每个 NodeType 都必须能取到执行器，且类型自洽', () => {
+  for (const type of NODE_TYPES) {
+    assert.equal(hasExecutor(type), true, `${type} 没有执行器`)
+    const executor = getExecutor(type)
+    assert.equal(executor.type, type)
+    // artifactKind / promptVersion 是落库必填项，空值会让 Run 写入出问题
+    assert.equal(typeof executor.artifactKind, 'string')
+    assert.ok(executor.artifactKind.length > 0, `${type} 的 artifactKind 为空`)
+    assert.equal(typeof executor.promptVersion, 'string')
+    assert.ok(executor.promptVersion.length > 0, `${type} 的 promptVersion 为空`)
+  }
+})
+
+test('C：把一个已实现类型写进计划表 → ok:false（实现与计划不能重叠）', () => {
   const saved = PLANNED_PLAN.PREREQ
   try {
-    delete (PLANNED_PLAN as Record<string, string>).PREREQ
+    ;(PLANNED_PLAN as Record<string, string>).PREREQ = 'M3'
     const report = selfCheck()
 
-    assert.equal(report.ok, false, '缺计划必须让自检失败')
-    assert.ok(report.problems.length >= 1)
-    assert.equal(report.planned.includes('PREREQ'), false)
-    assert.deepEqual(report.missingPlan, ['PREREQ'])
+    assert.equal(report.ok, false, '已实现又出现在计划表里必须让自检失败')
+    assert.ok(report.problems.some((problem) => problem.includes('PREREQ')))
   } finally {
-    ;(PLANNED_PLAN as Record<string, string>).PREREQ = saved as string
+    if (saved === undefined) delete (PLANNED_PLAN as Record<string, string>).PREREQ
+    else (PLANNED_PLAN as Record<string, string>).PREREQ = saved
   }
 
   assert.equal(selfCheck().ok, true)
@@ -59,40 +77,43 @@ test('C：extra（计划表里出现 17 之外的类型）必须被点名', () =
 
 test('C：断言直接拦下未通过的自检（启动路径用它）', () => {
   const saved = PLANNED_PLAN.PAPER
+  ;(PLANNED_PLAN as Record<string, string>).PAPER = 'M6'
   try {
-    delete (PLANNED_PLAN as Record<string, string>).PAPER
     assert.throws(() => assertRegistryReady(), /执行器注册表自检未通过/)
   } finally {
-    ;(PLANNED_PLAN as Record<string, string>).PAPER = saved as string
+    if (saved === undefined) delete (PLANNED_PLAN as Record<string, string>).PAPER
+    else (PLANNED_PLAN as Record<string, string>).PAPER = saved
   }
   assert.doesNotThrow(() => assertRegistryReady())
 })
 
-test('已实现的节点必须能从注册表取到执行器', () => {
-  for (const type of ['SOURCE', 'CHUNK', 'EXTRACT', 'CARD']) {
-    assert.equal(hasExecutor(type), true)
-    assert.equal(getExecutor(type).type, type)
-  }
-})
-
-test('调用未实现的节点 → 501 EXECUTOR_NOT_IMPLEMENTED，且带计划里程碑', () => {
-  assert.equal(hasExecutor('PREREQ'), false)
-
+test('调用不在 17 之内的类型 → 501 EXECUTOR_NOT_IMPLEMENTED', () => {
+  // 17 个都实现了，所以"未实现"这条路只能从 17 之外的类型走。
+  // 这条仍要留：它保证 getExecutor 对未知输入不会返回 undefined。
   assert.throws(
-    () => getExecutor('PREREQ'),
+    () => getExecutor('NOT_A_TYPE'),
     (error: unknown) => {
       assert.ok(error instanceof AppError)
       assert.equal(error.status, 501)
       assert.equal(error.code, 'EXECUTOR_NOT_IMPLEMENTED')
-      assert.equal(error.details?.plan, 'M3')
       return true
     },
   )
 })
 
-test('未实现的节点不会返回 undefined（否则上层会把它当成功）', () => {
-  for (const type of ['PREREQ', 'PAPER', 'GATE']) {
-    assert.throws(() => getExecutor(type), (error: unknown) => error instanceof AppError)
+test('getExecutor 对任何类型都不会返回 undefined', () => {
+  for (const type of ['NOT_A_TYPE', '', 'GATE', 'PAPER']) {
+    // 已实现的返回执行器；未实现的抛错。两种都不是 undefined。
+    let value: unknown
+    assert.doesNotThrow(() => {
+      try {
+        value = getExecutor(type)
+      } catch (error) {
+        assert.ok(error instanceof AppError)
+        value = error
+      }
+    })
+    assert.notEqual(value, undefined)
   }
 })
 
@@ -114,9 +135,12 @@ test('registerExecutor 拒绝 17 个之外的类型', () => {
 })
 
 test('registerExecutor 拒绝重复注册', () => {
+  // 用一个 17 之内、但当前还没注册的类型来测——不能拿已注册的当靶子，
+  // 那会在断言之前就撞上"重复注册"。
+  assert.equal(hasExecutor('CARD'), true)
   const executor = {
-    type: 'PREREQ',
-    artifactKind: 'CHUNKS',
+    type: 'CARD',
+    artifactKind: 'CHUNKS' as const,
     promptVersion: 'no-prompt',
     inputs: {},
     outputs: {},
@@ -124,8 +148,11 @@ test('registerExecutor 拒绝重复注册', () => {
       return { outputs: {}, usage: { tokensIn: 0, tokensOut: 0, cachedTokens: 0 } }
     },
   }
-
-  registerExecutor(executor)
-  assert.equal(hasExecutor('CARD'), true)
   assert.throws(() => registerExecutor(executor), /重复注册/)
+  // 重复注册失败后，原执行器必须还在（不能被半覆盖）
+  assert.equal(getExecutor('CARD').type, 'CARD')
+})
+
+test('implementedTypes 与 NODE_TYPES 完全一致（顺序无关）', () => {
+  assert.deepEqual(implementedTypes().slice().sort(), [...NODE_TYPES].sort())
 })

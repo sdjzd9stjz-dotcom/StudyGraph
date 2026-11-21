@@ -73,6 +73,10 @@ export function registerAttemptRoutes(app: FastifyInstance, deps: AttemptRouteDe
         id: true,
         canvasId: true,
         type: true,
+        // options 必须 select：错因靠选项自带的 errorTag 反查。
+        // 少了这一行，下面 `problem.options` 永远是 undefined，
+        // 错因标记静默失效 —— 作答有数据、看板永远空，最难查的那种坏法。
+        options: true,
         answer: true,
         judgeRule: true,
         judgeSpec: true,

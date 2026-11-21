@@ -64,6 +64,7 @@ export default async function CanvasPage({ params }: { params: { canvasId: strin
           status: node.status,
           posX: node.posX,
           posY: node.posY,
+          params: node.params ?? null,
         }))}
         initialEdges={canvas.edges.map((edge) => ({
           id: edge.id,

@@ -35,6 +35,12 @@ export interface SgNodeData {
   onRun?: (nodeId: string) => void
   onDelete?: (nodeId: string) => void
   onOpenPrompt?: (nodeId: string) => void
+  /** GATE 专用：放行 / 拒绝。其它节点类型没有这两个按钮。 */
+  onGateDecision?: (nodeId: string, approved: boolean) => void
+  /** GATE 当前是否已放行（来自 params.approved） */
+  gateApproved?: boolean
+  /** GATE 的拒绝理由（来自 params.note） */
+  gateNote?: string | null
   [key: string]: unknown
 }
 
@@ -187,6 +193,54 @@ export function SgNode({ id, data }: NodeProps) {
         </span>
       </div>
 
+      {/*
+        GATE 的闸门条。
+        放在标题栏下方而不是悬停面板里：闸门是"必须做决定"的节点，
+        把决定入口藏进悬停，学生会以为它坏了。
+      */}
+      {d.nodeType === 'GATE' && (
+        <div
+          data-testid={`gate-bar-${id}`}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            padding: '6px 9px',
+            background: d.gateApproved ? '#ecfdf5' : '#fffbeb',
+            borderBottom: '1px solid #e5e7eb',
+            fontSize: 11,
+          }}
+        >
+          <span style={{ color: d.gateApproved ? '#047857' : '#b45309', fontWeight: 600 }}>
+            {d.gateApproved ? '已放行' : '待确认'}
+          </span>
+          <span style={{ marginLeft: 'auto', display: 'flex', gap: 4 }}>
+            <button
+              type="button"
+              data-testid={`gate-approve-${id}`}
+              onClick={(event) => {
+                event.stopPropagation()
+                d.onGateDecision?.(id, true)
+              }}
+              style={gateButton('#059669')}
+            >
+              放行
+            </button>
+            <button
+              type="button"
+              data-testid={`gate-reject-${id}`}
+              onClick={(event) => {
+                event.stopPropagation()
+                d.onGateDecision?.(id, false)
+              }}
+              style={gateButton('#dc2626')}
+            >
+              拒绝
+            </button>
+          </span>
+        </div>
+      )}
+
       {/* 提示词窗：悬停才展开 */}
       <div
         data-testid="prompt-panel"
@@ -291,6 +345,27 @@ function handleStyle(state: 'ok' | 'no' | undefined, color: string, top: number)
     return { ...base, opacity: 0.22, transition: 'opacity .1s' }
   }
   return base
+}
+
+/**
+ * 闸门按钮。
+ *
+ * 不能复用 iconButton：那个是 18×18 的图标按钮（只放 ▶ / ✕），
+ * 用它装两个汉字会被截成"放""拒"。闸门的两个动作必须写全，
+ * 否则学生分不清哪个是放行。
+ */
+function gateButton(background: string): React.CSSProperties {
+  return {
+    border: 'none',
+    borderRadius: 4,
+    background,
+    color: '#fff',
+    fontSize: 11,
+    lineHeight: '18px',
+    padding: '0 8px',
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+  }
 }
 
 const iconButton: React.CSSProperties = {

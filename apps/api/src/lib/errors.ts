@@ -19,6 +19,8 @@ export const ERROR_CODES = [
   'NODE_NOT_FOUND',
   'NODE_TYPE_INVALID',
   'NODE_PARAMS_INVALID',
+  /** 对非 GATE 节点调用放行/拒绝接口 */
+  'NODE_NOT_GATE',
   'NODE_NOT_IN_CANVAS',
   // 边
   'EDGE_SELF_LOOP',

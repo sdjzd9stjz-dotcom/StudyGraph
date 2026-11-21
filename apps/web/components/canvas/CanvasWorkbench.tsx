@@ -17,6 +17,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { NODE_PORTS, validateConnection } from '../../../../packages/contracts/src/client'
 import type { NodeType } from '../../../../packages/contracts/src/client'
 import { ADVANCED_NODES, PRIMARY_NODES, nodeLabel, nodeColor } from '../../lib/canvas-meta'
+import { decideGate } from '../../lib/api'
 import { AssistantBar } from './AssistantBar'
 import { ContextMenu } from './ContextMenu'
 import type { MenuContext } from './ContextMenu'
@@ -35,6 +36,8 @@ export interface WorkbenchNode {
   status: string
   posX: number
   posY: number
+  /** 只有 GATE 用到（approved / note），其余类型忽略 */
+  params?: Record<string, unknown> | null
 }
 
 export interface WorkbenchEdge {
@@ -68,6 +71,13 @@ function toFlowNode(node: WorkbenchNode, skillsByNode: Map<string, string[]>): F
     inputs: ports.inputs.map((port) => ({ name: port.name, type: port.type, external: port.external === true })),
     outputs: ports.outputs.map((port) => ({ name: port.name, type: port.type, external: port.external === true })),
   }
+
+  // GATE 的闸门状态来自 params：刷新页面后仍要看得出"这张卡放行了没有"
+  if (node.type === 'GATE') {
+    data.gateApproved = node.params?.approved === true
+    data.gateNote = typeof node.params?.note === 'string' ? node.params.note : null
+  }
+
   return { id: node.id, type: 'sg', position: { x: node.posX, y: node.posY }, data }
 }
 
@@ -253,6 +263,40 @@ function Inner({
     [apiBaseUrl, notify, setNodes, token],
   )
 
+  /**
+   * GATE 放行 / 拒绝。
+   *
+   * 拒绝时必须问理由：无理由的拒绝，上游不知道要改什么（服务端也会拒）。
+   * 这里用 prompt 而不是弹窗组件，是因为拒绝是低频动作，
+   * 为它引入一套 Modal 不值得；但绝不能静默拒绝。
+   */
+  const decideGateNode = useCallback(
+    async (nodeId: string, approved: boolean) => {
+      let note: string | undefined
+      if (!approved) {
+        const input = window.prompt('拒绝的理由（上游据此修改，必填）：')
+        if (input === null) return
+        note = input.trim()
+        if (note.length === 0) {
+          notify('必须填写拒绝理由')
+          return
+        }
+      }
+      const result = await decideGate(nodeId, note ? { approved, note } : { approved })
+      if (!result.ok) {
+        notify(`闸门操作失败：${result.message}`)
+        return
+      }
+      notify(approved ? '已放行（下游需自己点运行）' : '已拒绝')
+      setNodes((current) =>
+        current.map((node) =>
+          node.id === nodeId ? { ...node, data: { ...node.data, gateApproved: result.approved } } : node,
+        ),
+      )
+    },
+    [notify, setNodes],
+  )
+
   const openPrompt = useCallback(
     async (nodeId: string) => {
       const bound = skillsByNode.get(nodeId) ?? []
@@ -428,10 +472,18 @@ function Inner({
 
         return {
           ...node,
-          data: { ...node.data, onRun: runNode, onDelete: deleteNode, onOpenPrompt: openPrompt, connectHighlight, portState },
+          data: {
+            ...node.data,
+            onRun: runNode,
+            onDelete: deleteNode,
+            onOpenPrompt: openPrompt,
+            onGateDecision: decideGateNode,
+            connectHighlight,
+            portState,
+          },
         }
       }),
-    [nodes, runNode, deleteNode, openPrompt, connectDraft],
+    [nodes, runNode, deleteNode, openPrompt, decideGateNode, connectDraft],
   )
 
   // ── 连线 ────────────────────────────────────────────────────────────────

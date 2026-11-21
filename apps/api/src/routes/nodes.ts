@@ -6,6 +6,7 @@ import type { PrismaClient } from '../../../../packages/db/src/index.ts'
 import { collectDownstream } from '../domain/graph/dag.ts'
 import type { EdgeLike } from '../domain/graph/dag.ts'
 import { requireCanvasWrite } from '../lib/access.ts'
+import { AppError } from '../lib/errors.ts'
 import { nodeNotFound, nodeParamsInvalid, nodeTypeInvalid } from '../lib/errors.ts'
 import { parse } from '../lib/validate.ts'
 import { getAuth } from '../plugins/auth.ts'
@@ -29,6 +30,15 @@ const patchNodeBody = z
     posY: z.number().finite().optional(),
   })
   .refine((value) => Object.keys(value).length > 0, { message: '至少提供一个字段' })
+
+const gateDecisionBody = z
+  .object({
+    approved: z.boolean(),
+    note: z.string().trim().max(2000).optional(),
+  })
+  .refine((value) => value.approved || (value.note !== undefined && value.note.length > 0), {
+    message: '拒绝时必须填写理由（note）',
+  })
 
 function validateParams(raw: unknown): Record<string, unknown> {
   if (raw === undefined) return {}
@@ -130,6 +140,59 @@ export function registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDeps): v
       staleNodeIds,
       // 明确写出来，验收时会查 Run 表行数前后不变
       runCreated: false,
+    }
+  })
+
+  /**
+   * 人工闸门放行 / 拒绝（GATE 节点专用）。
+   *
+   * 为什么单独一个接口而不是让学生去 PATCH params.approved：
+   * 放行是**一次有后果的决策**，需要留下「谁、什么时候、看了什么、为什么」。
+   * 直接改 params 只能改到值，改不出这些痕迹；而且任何人都能改 params，
+   * 闸门的意义就被绕开了。
+   *
+   * 拒绝必须给理由 —— 无理由的拒绝，上游不知道要改什么。
+   */
+  app.post('/v1/nodes/:id/gate-decision', { preHandler: guard('CANVAS_WRITE') }, async (request) => {
+    const auth = getAuth(request)
+    const { id } = request.params as { id: string }
+    const body = parse(gateDecisionBody, request.body)
+
+    const node = await prisma.node.findUnique({
+      where: { id },
+      select: { id: true, canvasId: true, type: true, params: true, status: true },
+    })
+    if (!node) throw nodeNotFound(id)
+    await requireCanvasWrite(prisma, node.canvasId, auth.user.id)
+
+    if (node.type !== 'GATE') {
+      throw new AppError(400, 'NODE_NOT_GATE', `只有 GATE 节点可以放行/拒绝，当前类型是 ${node.type}`)
+    }
+
+    const params = (node.params ?? {}) as Record<string, unknown>
+    const decidedAt = new Date().toISOString()
+
+    const nextParams = {
+      ...params,
+      approved: body.approved,
+      note: body.note ?? null,
+      // 决策留痕：谁在什么时候做了什么决定
+      decidedBy: auth.user.id,
+      decidedAt,
+    }
+
+    await prisma.node.update({ where: { id }, data: { params: nextParams } })
+
+    return {
+      nodeId: id,
+      approved: body.approved,
+      note: body.note ?? null,
+      decidedAt,
+      /**
+       * 放行后**不自动执行下游**（硬约束 2）。
+       * 下游需要学生自己点运行 —— 自动执行会让"我还没准备好"这件事做不到。
+       */
+      downstreamTriggered: false,
     }
   })
 

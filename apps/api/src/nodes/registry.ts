@@ -21,13 +21,14 @@ const REGISTRY = new Map<string, NodeExecutor>()
  * 已实现（SOURCE、CHUNK）的条目必须从这里删掉：
  * 自检要求 `implemented ∩ planned = ∅`，同类型既"已实现"又"还在计划里"会被判冲突。
  */
-export const PLANNED_PLAN: Partial<Record<NodeType, string>> = {
-
-  QUIZ: 'M3',
-  GRADE: 'M3',
-  REVIEW: 'M3',
-  GATE: 'M5',
-}
+/**
+ * 尚未实现的节点 → 计划里程碑。
+ *
+ * **现在是空的**：17 个 NodeType 全部有执行器。
+ * 留这个结构是因为自检逻辑（缺计划要报问题、计划表里出现 17 之外的类型要报问题）
+ * 仍然要靠它区分"还没做但排了期" 和 "漏了"——把表删掉等于把这两种情况合并。
+ */
+export const PLANNED_PLAN: Partial<Record<NodeType, string>> = {}
 
 export function registerExecutor(executor: NodeExecutor): void {
   if (!isNodeType(executor.type)) {
