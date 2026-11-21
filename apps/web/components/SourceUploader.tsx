@@ -34,6 +34,20 @@ export function SourceUploader({ canvasId, apiBaseUrl, token }: { canvasId: stri
         onChange={async (event) => {
           const file = event.target.files?.[0]
           if (!file) return
+
+          /**
+           * 先查大小再发请求。
+           *
+           * 超过上限时服务端会直接掐掉连接，浏览器只报 `Failed to fetch` ——
+           * 学生看到的是"网络坏了"，实际只是文件太大。这里提前说清楚。
+           */
+          const MAX_BYTES = 400 * 1024 * 1024
+          if (file.size > MAX_BYTES) {
+            setMessage(`上传失败：文件 ${(file.size / 1048576).toFixed(0)}MB，超过 400MB 上限。请拆分或用导出为 PDF 的版本。`)
+            if (inputRef.current) inputRef.current.value = ''
+            return
+          }
+
           setBusy(true)
           setMessage(null)
           try {
@@ -55,7 +69,17 @@ export function SourceUploader({ canvasId, apiBaseUrl, token }: { canvasId: stri
             setMessage(`已上传：${file.name}`)
             router.refresh()
           } catch (error) {
-            setMessage(`上传失败：${error instanceof Error ? error.message : String(error)}`)
+            /**
+             * `Failed to fetch` 几乎没有信息量：可能是连接被断、服务没起、或跨域被拒。
+             * 附上能自己排查的线索，而不是把浏览器的原话原样丢给学生。
+             */
+            const raw = error instanceof Error ? error.message : String(error)
+            setMessage(
+              `上传失败：${raw}` +
+                (raw.includes('Failed to fetch')
+                  ? '（请求没到达服务。检查：文件是否过大、软件是否已完全启动、换个网络环境再试）'
+                  : ''),
+            )
           } finally {
             setBusy(false)
             if (inputRef.current) inputRef.current.value = ''

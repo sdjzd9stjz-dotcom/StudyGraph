@@ -1,6 +1,7 @@
 import type { JSONSchema } from '../../llm/types.ts'
 import { composeSystemPrompt, HARD_RULE_SUMMARY } from '../skills.ts'
 import type { NodeExecutor } from '../contract.ts'
+import { nodeInputMissing } from '../../lib/errors.ts'
 
 /**
  * `distractor` 执行器（M6）：生成**有诊断性**的错误选项。
@@ -71,7 +72,7 @@ export const distractorExecutor: NodeExecutor<DistractorParams> = {
   async run(ctx) {
     const stem = ctx.params?.stem?.trim()
     const answer = ctx.params?.answer?.trim()
-    if (!stem || !answer) throw new Error('distractor 节点缺少 params.stem / params.answer')
+    if (!stem || !answer) throw nodeInputMissing('distractor 节点缺少 params.stem / params.answer')
 
     const count = Math.min(5, Math.max(1, ctx.params.count ?? 3))
 

@@ -414,18 +414,51 @@ function TaskPreferences({
 }) {
   const [busy, setBusy] = useState<string | null>(null)
 
-  // 只有"存了密钥的供应商 + 启用的模型"才能选 —— 选了却没密钥，执行时必然报错
-  const options = providers.flatMap((provider) =>
-    provider.credentials.length === 0
-      ? []
-      : (provider.models ?? [])
-          .filter((model) => model.enabled !== false)
-          .map((model) => ({
-            value: `${provider.credentials[0]!.id}::${model.modelId}`,
-            label: `${provider.name} · ${model.displayName || model.modelId}`,
-            capability: (model.capabilities ?? {}) as Record<string, unknown>,
-            modelId: model.modelId,
-          })),
+  /**
+   * 下拉里列出**所有**模型，包括停用的。
+   *
+   * 之前的实现只列启用的，后果很严重：如果某个供应商的模型全被停用，
+   * `options` 就是空的，而下面把 `<select>` 设成 `disabled={options.length === 0}` ——
+   * 于是下拉整个点不动。用户看到的是"我点了没反应"，而不是"模型被停用了"。
+   * 这个状态是我自己在别处造成的（旧版把点模型名做成了停用开关），
+   * 结果却表现为一个完全无解释的死控件。
+   *
+   * 停用的模型标成「已停用」，选了会提示去启用 —— **可见性优先于可选项过滤**。
+   */
+  const options = providers.flatMap((provider) => {
+    if (provider.credentials.length === 0) return []
+    return (provider.models ?? []).map((model) => {
+      const enabled = model.enabled !== false
+      return {
+        value: `${provider.credentials[0]!.id}::${model.modelId}`,
+        label: `${provider.name} · ${model.displayName || model.modelId}${enabled ? '' : '（已停用）'}`,
+        capability: (model.capabilities ?? {}) as Record<string, unknown>,
+        modelId: model.modelId,
+        warn: enabled ? null : `「${model.displayName || model.modelId}」现在是停用状态，运行会失败。到上面的模型列表点「启用」即可。`,
+        providerId: provider.id,
+      }
+    })
+  })
+
+  /** 存了偏好但模型/凭据已经不存在（删了密钥、拉取的模型被移除）时，仍要显示出来 */
+  const knownValues = new Set(options.map((option) => option.value))
+  for (const pref of preferences) {
+    const value = `${pref.credentialId}::${pref.modelId}`
+    if (knownValues.has(value)) continue
+    knownValues.add(value)
+    options.push({
+      value,
+      label: `${pref.modelId}（不可用：密钥已删或模型已移除）`,
+      capability: {},
+      modelId: pref.modelId,
+      warn: '这个模型已经不可用（密钥删除或模型被移除），建议重新选一个',
+      providerId: '',
+    })
+  }
+
+  const disabledCount = providers.reduce(
+    (sum, provider) => sum + (provider.models ?? []).filter((model) => model.enabled === false).length,
+    0,
   )
 
   const currentValue = (taskType: string) => {
@@ -477,8 +510,15 @@ function TaskPreferences({
 
       {options.length === 0 && (
         <p data-testid="pref-empty-hint" style={{ fontSize: 12, color: '#d97706' }}>
-          这里还选不了，因为上面还没有「已保存密钥 + 已有模型」的供应商。
+          这里还选不了，因为上面还没有「已保存密钥 + 已启用模型」的供应商。
           先在上方填入密钥点保存（会自动拉取模型），再回来这里选。
+          {disabledCount > 0 && `（有 ${disabledCount} 个模型处于停用状态，去上面点「启用」）`}
+        </p>
+      )}
+
+      {options.length > 0 && disabledCount > 0 && (
+        <p data-testid="pref-disabled-hint" style={{ fontSize: 12, color: '#b45309', marginBottom: 8 }}>
+          有 {disabledCount} 个模型是停用状态，不会出现在下面的下拉里；要用它们请到上面的模型列表点「启用」。
         </p>
       )}
 
@@ -509,6 +549,19 @@ function TaskPreferences({
               {missing && (
                 <span data-testid={`pref-warning-${taskType}`} style={{ fontSize: 11, color: '#d97706' }}>
                   缺 {need}
+                </span>
+              )}
+              {/* 把"当前用的是哪个模型"写成文字：下拉框本身太不显眼，
+                  用户选了却以为自己没选上（实际反馈） */}
+              <span
+                data-testid={`pref-current-${taskType}`}
+                style={{ fontSize: 11, color: value ? '#1d4ed8' : '#94a3b8', minWidth: 96, textAlign: 'right' }}
+              >
+                {value ? (selected?.label ?? '未知模型') : '默认路由'}
+              </span>
+              {selected?.warn && (
+                <span data-testid={`pref-orphan-${taskType}`} style={{ fontSize: 11, color: '#dc2626', maxWidth: 190 }}>
+                  ⚠ {selected.warn}
                 </span>
               )}
             </div>

@@ -40,6 +40,8 @@ export interface SgNodeData {
   onGateDecision?: (nodeId: string, approved: boolean) => void
   /** 保存节点参数（题型识别、变式等需要填题目原文） */
   onSaveParams?: (nodeId: string, params: Record<string, unknown>) => void
+  /** 打开这个节点的对话面板（每个节点自己就是一个会话） */
+  onChat?: (nodeId: string) => void
   /** 节点当前参数，用于输入框回填 */
   params?: Record<string, unknown> | null
   /** GATE 当前是否已放行（来自 params.approved） */
@@ -182,6 +184,18 @@ export function SgNode({ id, data }: NodeProps) {
         <span style={{ fontWeight: 700, fontSize: 12 }}>{d.label}</span>
         <span style={{ opacity: 0.85, fontSize: 10 }}>{d.status}</span>
         <span style={{ marginLeft: 'auto', display: 'flex', gap: 4 }}>
+          <button
+            type="button"
+            title="就这个节点的内容提问"
+            data-testid={`chat-node-${id}`}
+            onClick={(event) => {
+              event.stopPropagation()
+              d.onChat?.(id)
+            }}
+            style={iconButton}
+          >
+            💬
+          </button>
           <button
             type="button"
             title="运行这个节点"
@@ -366,10 +380,26 @@ export function SgNode({ id, data }: NodeProps) {
         </div>
       </div>
 
-      {/* 输出内容：常驻 */}
+      {/* 输出内容：常驻。跑过的节点显示成一张"带解释的卡片"，没跑过显示提示 */}
       <div style={{ padding: '7px 9px' }}>
         {d.title && <div style={{ fontWeight: 600, marginBottom: 3 }}>{d.title}</div>}
-        <div data-testid="node-output" style={{ color: d.outputSummary ? '#334155' : '#94a3b8', fontSize: 11, lineHeight: 1.5 }}>
+        <div
+          data-testid="node-output"
+          data-has-content={d.outputSummary ? 'true' : 'false'}
+          style={{
+            color: d.outputSummary ? '#334155' : '#94a3b8',
+            fontSize: 11,
+            lineHeight: 1.6,
+            whiteSpace: 'pre-wrap',
+            // 产物可能很长：给一个可滚动的固定高度，节点之间才排得开、看得成一张图
+            maxHeight: d.outputSummary ? 168 : undefined,
+            overflowY: d.outputSummary ? 'auto' : undefined,
+            background: d.outputSummary ? '#f8fafc' : 'transparent',
+            border: d.outputSummary ? '1px solid #e2e8f0' : 'none',
+            borderRadius: d.outputSummary ? 6 : 0,
+            padding: d.outputSummary ? '6px 8px' : 0,
+          }}
+        >
           {d.outputSummary ?? nodeHint(d.nodeType)}
         </div>
         {d.inputs.some((port) => port.external) && (

@@ -6,6 +6,7 @@ import { CLASSIFIER_VERSION, classifyClaim } from '../../spans/claim-support.ts'
 import type { ClaimVerdict } from '../../spans/claim-support.ts'
 import { composeSystemPrompt, HARD_RULE_SUMMARY } from '../skills.ts'
 import type { NodeExecutor } from '../contract.ts'
+import { nodeInputMissing } from '../../lib/errors.ts'
 
 /**
  * `extract` 执行器（SG-SUP-009 §4.1）。
@@ -64,7 +65,7 @@ export const extractExecutor: NodeExecutor<ExtractParams> = {
 
   async run(ctx) {
     const chunkSet = ctx.inputs.chunkSet as ChunkSet | undefined
-    if (!chunkSet?.chunks?.length) throw new Error('extract 节点缺少上游 chunkSet')
+    if (!chunkSet?.chunks?.length) throw nodeInputMissing('extract 节点缺少上游 chunkSet')
 
     const batchSize = ctx.params.batchSize ?? 15
     const maxClaimsPerChunk = ctx.params.maxClaimsPerChunk ?? 3

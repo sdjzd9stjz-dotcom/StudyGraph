@@ -194,11 +194,14 @@ async function boot() {
   // OCR 语言包（扫描件 PDF 用）：tesseract 默认从 CDN 下，没网的电脑上第一次用就失败。
   // 包里已经带了 chi_sim + eng，这里把路径指过去。
   const ocrLangDir = IS_PACKAGED ? path.join(process.resourcesPath, 'ocr') : path.join(ROOT, 'tmp', 'ocr-langs')
+  // 未预期错误的落盘目录：窗口一关就看不到控制台了，日志要留在数据目录里
+  const logEnv = database.baseDir ? { STUDYGRAPH_LOG_DIR: database.baseDir } : {}
+
   const ocrEnv = fs.existsSync(path.join(ocrLangDir, 'chi_sim.traineddata.gz'))
     ? { STUDYGRAPH_OCR_LANG_DIR: ocrLangDir }
     : {}
 
-  await startApi(apiPort, { ...env, ...authEnv, ...storageEnv, ...byokEnv, ...ocrEnv, DATABASE_URL: database.databaseUrl })
+  await startApi(apiPort, { ...env, ...authEnv, ...storageEnv, ...byokEnv, ...ocrEnv, ...logEnv, DATABASE_URL: database.databaseUrl })
   await startWeb(webPort, apiPort, { ...env, ...authEnv })
   return `http://127.0.0.1:${webPort}/`
 }

@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, copyFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { pdf } from 'pdf-to-img'
 import { createWorker } from 'tesseract.js'
@@ -98,7 +99,14 @@ async function pinPdfWorker(): Promise<void> {
   for (const [apiPath, workerPath] of targets) {
     try {
       const mod = (await import(apiPath)) as { GlobalWorkerOptions?: { workerSrc: string } }
-      if (mod.GlobalWorkerOptions) mod.GlobalWorkerOptions.workerSrc = require.resolve(workerPath)
+      if (!mod.GlobalWorkerOptions) continue
+      /**
+       * 必须是 `file://` URL，不能是 Windows 绝对路径。
+       *
+       * pdfjs 用动态 import 加载 worker，Windows 路径 `D:\...` 会被当成协议名 `d:`，
+       * 报 "Received protocol 'd:'" —— 而且只在 Windows 上炸，让人以为是环境问题。
+       */
+      mod.GlobalWorkerOptions.workerSrc = pathToFileURL(require.resolve(workerPath)).href
     } catch {
       // 某个入口不存在时忽略：至少另一份已经钉住，且 pdfjs 会退回同线程假 worker
     }

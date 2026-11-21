@@ -1,6 +1,7 @@
 import type { JSONSchema } from '../../llm/types.ts'
 import { composeSystemPrompt, HARD_RULE_SUMMARY } from '../skills.ts'
 import type { NodeExecutor } from '../contract.ts'
+import { nodeInputMissing } from '../../lib/errors.ts'
 
 /**
  * `method` 执行器（M5）：解法抽取。
@@ -69,7 +70,7 @@ export const methodExecutor: NodeExecutor<MethodParams> = {
 
   async run(ctx) {
     const text = ctx.params?.text?.trim()
-    if (!text) throw new Error('method 节点缺少 params.text（典型案例原文）')
+    if (!text) throw nodeInputMissing('method 节点缺少 params.text（典型案例原文）')
 
     const analysis = ctx.inputs.analysis as { problemType?: string; concepts?: string[] } | undefined
     const context = analysis

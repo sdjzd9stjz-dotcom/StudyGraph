@@ -2,6 +2,7 @@ import { chunkSetSchema } from '../../../../../packages/contracts/src/index.ts'
 import type { ChunkSet, SourceDoc } from '../../../../../packages/contracts/src/index.ts'
 import type { NodeExecutor } from '../contract.ts'
 import { ZERO_USAGE } from '../contract.ts'
+import { nodeInputMissing } from '../../lib/errors.ts'
 
 interface ChunkParams {
   /** 单个切片的目标字符数；超过就按页切开（M2 一页一片，不做跨页合并） */
@@ -28,7 +29,7 @@ export const chunkExecutor: NodeExecutor<ChunkParams> = {
 
   async run(ctx) {
     const sourceDoc = ctx.inputs.sourceDoc as SourceDoc | undefined
-    if (!sourceDoc?.sourceId) throw new Error('chunk 节点缺少上游 sourceDoc')
+    if (!sourceDoc?.sourceId) throw nodeInputMissing('chunk 节点缺少上游 sourceDoc')
 
     const maxChars = ctx.params.maxChars ?? 800
     if (!Number.isSafeInteger(maxChars) || maxChars < 1) throw new Error('maxChars 必须是正整数')

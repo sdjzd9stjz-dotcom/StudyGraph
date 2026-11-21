@@ -1,6 +1,7 @@
 import type { JSONSchema } from '../../llm/types.ts'
 import { composeSystemPrompt, HARD_RULE_SUMMARY } from '../skills.ts'
 import type { NodeExecutor } from '../contract.ts'
+import { nodeInputMissing } from '../../lib/errors.ts'
 
 /**
  * `variant` 执行器（M6）：沿六个维度生成变式，**保留原题的方法结构**。
@@ -72,7 +73,7 @@ export const variantExecutor: NodeExecutor<VariantParams> = {
 
   async run(ctx) {
     const stem = ctx.params?.stem?.trim()
-    if (!stem) throw new Error('variant 节点缺少 params.stem（原题题干）')
+    if (!stem) throw nodeInputMissing('variant 节点缺少 params.stem（原题题干）')
 
     const axes = (ctx.params.axes?.filter((axis): axis is VariantAxisName => (VARIANT_AXES as readonly string[]).includes(axis)) ?? [...VARIANT_AXES])
     const count = Math.min(12, Math.max(1, ctx.params.count ?? axes.length))

@@ -1,6 +1,7 @@
 import type { JSONSchema } from '../../llm/types.ts'
 import { composeSystemPrompt, HARD_RULE_SUMMARY } from '../skills.ts'
 import type { NodeExecutor } from '../contract.ts'
+import { nodeInputMissing } from '../../lib/errors.ts'
 
 /**
  * `check` 执行器（M6）：出题后三检。
@@ -52,7 +53,7 @@ export const checkExecutor: NodeExecutor<CheckParams> = {
   async run(ctx) {
     const stem = ctx.params?.stem?.trim()
     const answer = ctx.params?.answer?.trim()
-    if (!stem || !answer) throw new Error('check 节点缺少 params.stem / params.answer')
+    if (!stem || !answer) throw nodeInputMissing('check 节点缺少 params.stem / params.answer')
 
     const options = ctx.params.options ?? (ctx.inputs.options as CheckParams['options']) ?? []
 

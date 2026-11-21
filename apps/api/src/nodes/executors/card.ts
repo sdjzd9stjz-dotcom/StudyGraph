@@ -4,6 +4,7 @@ import type { ConceptClaims } from '../../../../../packages/contracts/src/index.
 import type { NodeExecutor } from '../contract.ts'
 import type { PrismaClient } from '../../../../../packages/db/src/index.ts'
 import { ZERO_USAGE } from '../contract.ts'
+import { nodeInputMissing } from '../../lib/errors.ts'
 
 /** Review decisions can change independently of the upstream artifact hash. */
 export async function cardCacheIsCurrent(prisma: PrismaClient, nodeId: string, canvasId: string): Promise<boolean> {
@@ -46,7 +47,7 @@ export const cardExecutor: NodeExecutor = {
 
   async run(ctx) {
     const conceptClaims = ctx.inputs.conceptClaims as ConceptClaims | undefined
-    if (!conceptClaims?.claims) throw new Error('card 节点缺少上游 conceptClaims')
+    if (!conceptClaims?.claims) throw nodeInputMissing('card 节点缺少上游 conceptClaims')
 
     const created: Array<{ conceptId: string; name: string; spanId: string; status: string }> = []
     const skipped: Array<{ name: string; reason: string }> = []

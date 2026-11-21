@@ -1,6 +1,7 @@
 import type { JSONSchema } from '../../llm/types.ts'
 import { composeSystemPrompt, HARD_RULE_SUMMARY } from '../skills.ts'
 import type { NodeExecutor } from '../contract.ts'
+import { nodeInputMissing } from '../../lib/errors.ts'
 
 /**
  * `diagnose` 执行器（M5）：错因归因。
@@ -65,7 +66,7 @@ export const diagnoseExecutor: NodeExecutor<DiagnoseParams> = {
 
   async run(ctx) {
     const answer = ctx.params?.answer?.trim()
-    if (!answer) throw new Error('diagnose 节点缺少 params.answer（学生作答）')
+    if (!answer) throw nodeInputMissing('diagnose 节点缺少 params.answer（学生作答）')
 
     type Step = { cue?: string; why?: string; action?: string }
     const upstreamSteps = (ctx.inputs.steps as Step[] | undefined) ?? (ctx.params.steps as Step[] | undefined)

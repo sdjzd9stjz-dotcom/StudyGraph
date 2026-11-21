@@ -1,6 +1,7 @@
 import type { JSONSchema } from '../../llm/types.ts'
 import { composeSystemPrompt, HARD_RULE_SUMMARY } from '../skills.ts'
 import type { NodeExecutor } from '../contract.ts'
+import { nodeInputMissing } from '../../lib/errors.ts'
 
 /**
  * `solve` 执行器（M5）：带 cue 与 why 的分步解法演示。
@@ -65,7 +66,7 @@ export const solveExecutor: NodeExecutor<SolveParams> = {
 
   async run(ctx) {
     const text = ctx.params?.text?.trim()
-    if (!text) throw new Error('solve 节点缺少 params.text（题目原文）')
+    if (!text) throw nodeInputMissing('solve 节点缺少 params.text（题目原文）')
 
     const method = ctx.inputs.method as { name?: string; steps?: unknown } | undefined
     const context = method?.name ? `请按方法「${method.name}」解这道题：\n\n${text}` : text

@@ -5,7 +5,9 @@ import { NODE_TYPES, isNodeType } from '../../../../packages/contracts/src/index
 import type { NodeType } from '../../../../packages/contracts/src/index.ts'
 import type { PrismaClient } from '../../../../packages/db/src/index.ts'
 import type { LLMGateway } from '../llm/types.ts'
+import { summarizeArtifact } from '../domain/artifact-text.ts'
 import { requireCanvasWrite } from '../lib/access.ts'
+import { AppError } from '../lib/errors.ts'
 import { parse } from '../lib/validate.ts'
 import { getAuth } from '../plugins/auth.ts'
 import type { Guard } from '../plugins/auth.ts'
@@ -57,38 +59,363 @@ const KEYWORD_NODES: Array<{ pattern: RegExp; type: NodeType; title: string }> =
   { pattern: /出题|题目|练习/i, type: 'QUIZ', title: '出题' },
 ]
 
-/** 离线策略：只做确定性、可解释的推断 */
-function offlinePlan(message: string, existing: readonly { type: string }[]): { reply: string; actions: Action[] } {
+/**
+ * 整张图的布局（照 ComfyUI 的读法：从左往右、按支线分层）。
+ *
+ * x 越大越靠下游；y 把不同支线分开，这样落到画布上就是一张能直接看懂的知识地图，
+ * 而不是一堆叠在原点的方块。
+ */
+const GRAPH_NODES: Array<{ type: NodeType; title: string; x: number; y: number }> = [
+  // 主链
+  { type: 'SOURCE', title: '课件', x: 60, y: 240 },
+  { type: 'CHUNK', title: '切片', x: 340, y: 240 },
+  { type: 'EXTRACT', title: '概念抽取', x: 620, y: 240 },
+  { type: 'CARD', title: '知识卡', x: 900, y: 240 },
+  // 知识组织
+  { type: 'PREREQ', title: '先修关系', x: 1180, y: 140 },
+  { type: 'REVIEW', title: '复习调度', x: 1180, y: 300 },
+  { type: 'GATE', title: '人工闸门', x: 1180, y: 460 },
+  // 出题支链
+  { type: 'QUIZ', title: '出题', x: 1180, y: -60 },
+  { type: 'CHECK', title: '质量闸门', x: 1460, y: -60 },
+  { type: 'PAPER', title: '组卷', x: 1740, y: -60 },
+  // 解题支链
+  { type: 'PROBE', title: '题型识别', x: 340, y: 620 },
+  { type: 'METHOD', title: '解法抽取', x: 620, y: 620 },
+  { type: 'SOLVE', title: '分步解法', x: 900, y: 620 },
+  { type: 'DIAGNOSE', title: '错因归因', x: 1180, y: 620 },
+]
+
+const GRAPH_EDGES: Array<{ from: NodeType; to: NodeType }> = [
+  { from: 'SOURCE', to: 'CHUNK' },
+  { from: 'CHUNK', to: 'EXTRACT' },
+  { from: 'EXTRACT', to: 'CARD' },
+  { from: 'CARD', to: 'PREREQ' },
+  { from: 'CARD', to: 'REVIEW' },
+  { from: 'CARD', to: 'GATE' },
+  { from: 'CARD', to: 'QUIZ' },
+  { from: 'QUIZ', to: 'CHECK' },
+  { from: 'CHECK', to: 'PAPER' },
+  { from: 'SOURCE', to: 'PROBE' },
+  { from: 'PROBE', to: 'METHOD' },
+  { from: 'METHOD', to: 'SOLVE' },
+  { from: 'SOLVE', to: 'DIAGNOSE' },
+]
+
+/** 每条支链需要的节点（用于按意图裁剪） */
+const BRANCH_QUIZ: NodeType[] = ['QUIZ', 'CHECK', 'PAPER']
+const BRANCH_SOLVE: NodeType[] = ['PROBE', 'METHOD', 'SOLVE', 'DIAGNOSE']
+const CORE: NodeType[] = ['SOURCE', 'CHUNK', 'EXTRACT', 'CARD', 'PREREQ', 'REVIEW']
+
+/**
+ * 规划整张图。
+ *
+ * 用户明确要求过"不要一次只给一步" —— 所以默认就是**整张图**：
+ * 主链 + 出题 + 解题 + 闸门，一次铺完。只有当他说的是具体某几个节点时，
+ * 才只给主链加那几个。
+ *
+ * 与画布现状比对：已有的类型不重复建，但**连线照样补上** ——
+ * 多轮对话里第二轮只新增一个节点，它和已有节点之间的线也必须连起来。
+ */
+function planGraph(message: string, existing: readonly { type: string }[]): { reply: string; actions: Action[] } {
   const existingTypes = new Set(existing.map((node) => node.type))
-  const asked = KEYWORD_NODES.filter((entry) => entry.pattern.test(message))
+  const asked = KEYWORD_NODES.filter((entry) => entry.pattern.test(message)).map((entry) => entry.type)
 
-  // "整条链"/"全流程"/空画布 → 给标准链
-  const wantsWholeChain = /整条链|全流程|从头|全部|完整|一条链/.test(message) || (message.length < 8 && existing.length === 0)
-  const wanted = wantsWholeChain || asked.length === 0 ? PANEL_CHAIN : asked
+  const wantsFull = /完整|全部|整张|全流程|整条|从头|整图/.test(message) || asked.length === 0
+  const wantsQuiz = wantsFull || /出题|题|练习|组卷|考试|卷子/.test(message)
+  const wantsSolve = wantsFull || /解题|方法|步骤|错因|讲解|例题/.test(message)
 
-  const missing = wanted.filter((entry) => !existingTypes.has(entry.type))
+  /**
+   * 裁剪规则：
+   *   · 全图 → 全部
+   *   · 只点了几个节点 → 主链 + 那几个（图必须能连起来，孤立节点没用）
+   */
+  const wanted = new Set<NodeType>(wantsFull ? CORE : [...CORE, ...asked])
+  if (wantsFull || wantsQuiz) for (const type of BRANCH_QUIZ) wanted.add(type)
+  if (wantsFull || wantsSolve) for (const type of BRANCH_SOLVE) wanted.add(type)
+  // 用户点名了主链之外的节点，就把它加进来
+  for (const type of asked) wanted.add(type)
+
   const actions: Action[] = []
-  let prevKey: string | null = null
+  const added: NodeType[] = []
 
-  // 只补缺的节点：画布上已经有的不重复建
-  for (const entry of missing) {
-    actions.push({ kind: 'create-node', payload: { type: entry.type, title: entry.title, ref: entry.type } })
-    if (prevKey) actions.push({ kind: 'create-edge', payload: { from: prevKey, to: entry.type } })
-    prevKey = entry.type
+  for (const node of GRAPH_NODES) {
+    if (!wanted.has(node.type)) continue
+    if (existingTypes.has(node.type)) continue
+    actions.push({
+      kind: 'create-node',
+      payload: { type: node.type, title: node.title, ref: node.type, pos: { x: node.x, y: node.y } },
+    })
+    added.push(node.type)
   }
 
-  // 要求"严格溯源"时顺带提议绑定 skill
+  // 连线：两端都必须「本来就有」或「这次会建」
+  const available = new Set<NodeType>([...existingTypes, ...added] as NodeType[])
+  for (const edge of GRAPH_EDGES) {
+    if (!wanted.has(edge.from) || !wanted.has(edge.to)) continue
+    if (!available.has(edge.from) || !available.has(edge.to)) continue
+    actions.push({ kind: 'create-edge', payload: { from: edge.from, to: edge.to } })
+  }
+
   if (/溯源|引文|出处|严格/i.test(message)) {
     actions.push({ kind: 'bind-skill', payload: { skillSlug: 'citation-strict', nodeType: 'EXTRACT' } })
   }
 
-  const reply = actions.length === 0
-    ? '画布上已经有这条流程需要的节点了。需要我改动什么，或者直接点节点上的「运行」开始？'
-    : `我建议${missing.length}个节点：${missing.map((entry) => entry.title).join(' → ')}。` +
-      (actions.some((a) => a.kind === 'bind-skill') ? '另外给概念抽取绑定「严格溯源」。' : '') +
-      '确认后它们会以草稿状态放上画布，**不会自动执行**——需要你逐个点运行。'
+  const edgeCount = actions.filter((action) => action.kind === 'create-edge').length
+  const reply = added.length === 0
+    ? `画布上已经有这些节点了${edgeCount > 0 ? `，我会补 ${edgeCount} 条连线` : ''}。` +
+      '要再调整什么直接说；想开始就点节点上的 ▶ —— **我不会替你运行任何节点**。'
+    : `我给你铺一张完整的图：新增 ${added.length} 个节点、${edgeCount} 条连线` +
+      `（${added.map((type) => GRAPH_NODES.find((node) => node.type === type)?.title ?? type).join('、')}）。` +
+      '确认后全部以草稿状态落地，**不会自动执行** —— 每一步都要你自己点 ▶。'
 
   return { reply, actions }
+}
+
+/**
+ * 像不像"提问"而不是"让我建图"。
+ *
+ * 故意保守：带问号，或以疑问词开头/收尾才算。
+ * "把课件做成知识卡"、"再加一条解题支线" 这类祈使句不会被误判成提问。
+ */
+export function looksLikeQuestion(message: string): boolean {
+  const text = message.trim()
+  if (text.length === 0) return false
+  if (/[?？]/.test(text)) return true
+  return /^(为什么|为啥|怎么|如何|什么|哪些|哪个|是不是|能否|可不可以|有没有|解释|讲讲|说说|总结|梳理|看看)/.test(text)
+}
+
+/** 每个节点最多取这么多字进上下文：再多模型也读不完，还会挤掉别的节点 */
+const EXCERPT_PER_NODE = 1400
+/** 全部节点加起来的上限 */
+const EXCERPT_TOTAL = 14_000
+
+interface NodeBrief {
+  readonly id: string
+  readonly type: string
+  readonly title: string | null
+  readonly status: string
+}
+
+/**
+ * 就节点里的内容回答问题。
+ *
+ * 它读的是**每个节点最近一次运行的产物**（Artifact.structured），
+ * 也就是你在界面上看到的那份东西 —— 不是模型凭印象编。
+ *
+ * 没有模型密钥时退化成"结构化回答"：告诉画布上有什么、到哪一步了、
+ * 哪些节点还没跑。这类问题不需要模型也能答，且不会花钱。
+ */
+async function answerAboutNodes(
+  prisma: PrismaClient,
+  canvasId: string,
+  nodes: readonly NodeBrief[],
+  question: string,
+  llm: LLMGateway,
+  user: { id: string },
+): Promise<{ reply: string; source: 'model' | 'offline' }> {
+  if (nodes.length === 0) {
+    return {
+      reply: '画布上还没有节点，所以没有内容可查。先上传课件或让我铺一张图，跑出结果之后再问我。',
+      source: 'offline',
+    }
+  }
+
+  // 每个节点取最近一次产物
+  const artifacts = await prisma.artifact.findMany({
+    where: { nodeId: { in: nodes.map((node) => node.id) } },
+    orderBy: { createdAt: 'desc' },
+    select: { nodeId: true, kind: true, structured: true, createdAt: true },
+  })
+  const latest = new Map<string, { kind: string; structured: unknown }>()
+  for (const artifact of artifacts) {
+    if (latest.has(artifact.nodeId)) continue
+    latest.set(artifact.nodeId, { kind: artifact.kind, structured: artifact.structured })
+  }
+
+  const ran = nodes.filter((node) => latest.has(node.id))
+  const unrun = nodes.filter((node) => !latest.has(node.id))
+
+  // 一个产物都没有：不需要模型，直接说清现状
+  if (ran.length === 0) {
+    return {
+      reply:
+        `画布上有 ${nodes.length} 个节点，但**都还没跑过**，没有内容可查。\n` +
+        `节点：${nodes.map((node) => `${node.title ?? node.type}（${node.status}）`).join('、')}\n\n` +
+        '先点节点上的 ▶ 跑出结果，再问我里面的内容。',
+      source: 'offline',
+    }
+  }
+
+  let budget = EXCERPT_TOTAL
+  const sections: string[] = []
+  for (const node of ran) {
+    const artifact = latest.get(node.id)!
+    const raw = JSON.stringify(artifact.structured ?? null)
+    const excerpt = raw.length > EXCERPT_PER_NODE ? `${raw.slice(0, EXCERPT_PER_NODE)}…（已截断）` : raw
+    if (budget - excerpt.length < 0) break
+    budget -= excerpt.length
+    sections.push(`### 节点「${node.title ?? node.type}」（类型 ${node.type}，产物 ${artifact.kind}）\n${excerpt}`)
+  }
+
+  try {
+    const result = await llm.complete({
+      taskType: 'method',
+      messages: [
+        {
+          role: 'system',
+          content:
+            '你在回答用户关于他自己画布的问题。下面是各节点最近一次运行的产物内容。\n' +
+            '规则：\n' +
+            '1. 只依据下面给出的内容回答，不要补充这些内容里没有的知识\n' +
+            '2. 回答时点名是哪个节点的内容（例如「知识卡节点里」）\n' +
+            '3. 内容里没有答案就直接说"画布里没有这个信息"，并指出哪个节点应该会有\n' +
+            '4. 不要建议执行任何节点，也不要编造引文\n\n' +
+            (unrun.length > 0
+              ? `还没跑过的节点：${unrun.map((node) => node.title ?? node.type).join('、')}（它们没有内容可查）\n\n`
+              : '') +
+            sections.join('\n\n'),
+        },
+        { role: 'user', content: question },
+      ],
+      user: user as never,
+    })
+
+    await prisma.usageRecord.create({
+      data: {
+        userId: user.id,
+        canvasId,
+        surface: 'CHAT_COMPLETIONS',
+        provider: result.provider,
+        model: result.modelVersion,
+        tokensIn: result.usage.tokensIn,
+        tokensOut: result.usage.tokensOut,
+        cachedTokens: result.usage.cachedTokens,
+      },
+    })
+
+    const text = (result.data as { reply?: string } | undefined)?.reply
+    return {
+      reply: typeof text === 'string' && text.trim().length > 0 ? text : '模型没有返回内容，换个问法再试一次。',
+      source: 'model',
+    }
+  } catch (error) {
+    // 没配密钥 / 厂商不通：退化成结构化回答，别把"没密钥"报成一个吓人的错误
+    const reason = error instanceof Error ? error.message : String(error)
+    return {
+      reply:
+        `现在还不能就内容回答（${reason}）。\n\n` +
+        `不过画布现状是：${ran.length} 个节点有产物、${unrun.length} 个还没跑。\n` +
+        `有内容的：${ran.map((node) => node.title ?? node.type).join('、')}\n` +
+        (unrun.length > 0 ? `没跑的：${unrun.map((node) => node.title ?? node.type).join('、')}\n` : '') +
+        '\n配好模型密钥（「模型供应商」页面）之后，我就能直接读这些内容回答你。',
+      source: 'offline',
+    }
+  }
+}
+
+/**
+ * 单节点对话：每个节点自己就是一个会话。
+ *
+ * 与画布级提问的区别：这里**只给这一个节点的产物**当上下文，
+ * 所以问"这段推导为什么成立"会得到贴着这份内容的回答，而不是泛泛而过。
+ *
+ * 没跑过的节点没有内容可谈 —— 直接说清楚，不要凭空聊。
+ */
+function registerNodeChat(app: FastifyInstance, deps: AssistantRouteDeps): void {
+  const { prisma, guard, llm } = deps
+
+  app.post('/v1/nodes/:id/chat', { preHandler: guard('CANVAS_WRITE') }, async (request, reply) => {
+    const auth = getAuth(request)
+    const { id } = request.params as { id: string }
+    const body = parse(
+      z.object({
+        message: z.string().trim().min(1).max(2000),
+        history: z
+          .array(z.object({ role: z.enum(['user', 'assistant']), text: z.string().max(4000) }))
+          .max(20)
+          .optional(),
+      }),
+      request.body,
+    )
+
+    const node = await prisma.node.findUnique({
+      where: { id },
+      select: { id: true, canvasId: true, type: true, title: true },
+    })
+    if (!node) throw new AppError(404, 'NODE_NOT_FOUND', '节点不存在', { nodeId: id })
+    await requireCanvasWrite(prisma, node.canvasId, auth.user.id)
+
+    const artifact = await prisma.artifact.findFirst({
+      where: { nodeId: id },
+      orderBy: { createdAt: 'desc' },
+      select: { kind: true, structured: true },
+    })
+
+    const card = artifact ? summarizeArtifact(artifact.kind, artifact.structured) : ''
+    const label = node.title ?? node.type
+
+    if (!artifact) {
+      return reply.status(200).send({
+        reply: `「${label}」这个节点还没跑过，没有内容可以讨论。先点节点上的 ▶ 跑一次，我就能就它的结果和你聊。`,
+        output: null,
+        source: 'offline',
+      })
+    }
+
+    try {
+      const result = await llm.complete({
+        taskType: 'method',
+        messages: [
+          {
+            role: 'system',
+            content:
+              `你在和用户讨论他画布上「${label}」这个节点的内容。下面就是这个节点最近一次运行的产出：\n\n` +
+              `${card.slice(0, 12_000)}\n\n` +
+              '规则：\n' +
+              '1. 只依据上面的内容回答，不要补充内容里没有的知识\n' +
+              '2. 解释要具体到内容里的条目，别讲空话\n' +
+              '3. 内容里没有答案就说"这个节点的产出里没有"，并说明需要哪个节点提供\n' +
+              '4. 不要建议执行节点，不要编造引文',
+          },
+          ...(body.history ?? []).map((turn) => ({ role: turn.role, content: turn.text })),
+          { role: 'user', content: body.message },
+        ],
+        user: auth.user,
+      })
+
+      await prisma.usageRecord.create({
+        data: {
+          userId: auth.user.id,
+          canvasId: node.canvasId,
+          surface: 'CHAT_COMPLETIONS',
+          provider: result.provider,
+          model: result.modelVersion,
+          tokensIn: result.usage.tokensIn,
+          tokensOut: result.usage.tokensOut,
+          cachedTokens: result.usage.cachedTokens,
+        },
+      })
+
+      const text = (result.data as { reply?: string } | undefined)?.reply
+      return reply.status(200).send({
+        reply: typeof text === 'string' && text.trim().length > 0 ? text : '模型没有返回内容，换个问法再试一次。',
+        output: card,
+        source: 'model',
+      })
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      return reply.status(200).send({
+        reply:
+          `现在还不能就内容回答（${reason}）。\n\n` +
+          '这个节点的产出是：\n' +
+          card.slice(0, 1200) +
+          '\n\n配好模型密钥后，我可以据此解释、追问、指出矛盾。',
+        output: card,
+        source: 'offline',
+      })
+    }
+  })
 }
 
 export interface AssistantRouteDeps {
@@ -99,6 +426,8 @@ export interface AssistantRouteDeps {
 
 export function registerAssistantRoutes(app: FastifyInstance, deps: AssistantRouteDeps): void {
   const { prisma, guard, llm } = deps
+
+  registerNodeChat(app, deps)
 
   /**
    * 对话。返回的是**建议**，不落画布。
@@ -119,7 +448,24 @@ export function registerAssistantRoutes(app: FastifyInstance, deps: AssistantRou
       select: { id: true, slug: true, name: true },
     })
 
-    const plan = offlinePlan(body.message, nodes)
+    /**
+     * 提问模式：问节点里的内容，而不是让你改建图。
+     *
+     * 判据是"像不像一个问题"。像问题就**不建节点**，直接拿产物内容回答 ——
+     * 否则用户问"这个概念是什么意思"，会收到一堆新建节点的建议，答非所问。
+     */
+    if (looksLikeQuestion(body.message)) {
+      const answer = await answerAboutNodes(prisma, canvasId, nodes, body.message, llm, auth.user)
+      return reply.status(200).send({
+        reply: answer.reply,
+        actions: [],
+        source: answer.source,
+        kind: 'answer',
+        canvas: { nodeCount: nodes.length },
+      })
+    }
+
+    const plan = planGraph(body.message, nodes)
 
     // 离线规划已经把意图识别清楚了，就不必再花一次模型调用。
     // 只有它什么也没认出来（actions 为空且用户说了不少话）时才去问模型。
@@ -213,11 +559,31 @@ export function registerAssistantRoutes(app: FastifyInstance, deps: AssistantRou
     const boundSkills: string[] = []
     let x = 40
 
+    /**
+     * 画布上已有的节点也要能当连线端点。
+     *
+     * 多轮对话里第二轮通常只新增一两个节点，其余都"本来就有"；
+     * 只认本次创建的节点，那些线会被静默丢掉，图就断了。
+     */
+    const existingNodes = await prisma.node.findMany({
+      where: { canvasId },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true, type: true },
+    })
+    const refToId = new Map<string, string>()
+    for (const node of existingNodes) {
+      if (!refToId.has(node.type)) refToId.set(node.type, node.id)
+    }
+
     // 从左到右铺开，避免新节点全叠在原点
     for (const action of body.actions) {
       if (action.kind === 'create-node') {
         const type = action.payload.type
         if (typeof type !== 'string' || !isNodeType(type)) continue
+        // 规划器给了坐标就用它（整张图按支线分层）；没给就顺序铺开
+        const pos = action.payload.pos as { x?: unknown; y?: unknown } | undefined
+        const posX = typeof pos?.x === 'number' && Number.isFinite(pos.x) ? pos.x : x
+        const posY = typeof pos?.y === 'number' && Number.isFinite(pos.y) ? pos.y : 80
         const node = await prisma.node.create({
           data: {
             canvasId,
@@ -225,12 +591,14 @@ export function registerAssistantRoutes(app: FastifyInstance, deps: AssistantRou
             title: typeof action.payload.title === 'string' ? action.payload.title : null,
             params: {},
             status: 'DRAFT',
-            posX: x,
-            posY: 80,
+            posX,
+            posY,
           },
           select: { id: true, type: true, title: true },
         })
-        x += 300
+        if (pos === undefined) x += 300
+        // 新节点也要能被后续的连线引用到
+        if (!refToId.has(node.type)) refToId.set(node.type, node.id)
         created.push({ ref: String(action.payload.ref ?? type), id: node.id, type: node.type, title: node.title ?? node.type })
       } else if (action.kind === 'create-edge') {
         edges.push({ from: String(action.payload.from), to: String(action.payload.to) })
@@ -253,8 +621,9 @@ export function registerAssistantRoutes(app: FastifyInstance, deps: AssistantRou
       }
     }
 
-    // 连线：两端都用 ref 找
-    const byRef = new Map(created.map((node) => [node.ref, node.id]))
+    // 连线：两端都用 ref 找。ref 先按类型命中「本来就有 / 本次新建」的节点
+    const byRef = new Map(refToId)
+    for (const node of created) byRef.set(node.ref, node.id)
     let edgeCount = 0
     for (const edge of edges) {
       const from = byRef.get(edge.from)

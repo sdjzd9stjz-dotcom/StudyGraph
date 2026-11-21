@@ -55,6 +55,12 @@ export interface CanvasNode {
   staleReason?: string | null
   /** GATE 节点靠 params.approved / params.note 显示闸门状态 */
   params?: Record<string, unknown> | null
+  /**
+   * 最近一次运行产物的可读文本（由服务端确定性生成）。
+   * null = 还没跑过。
+   */
+  outputText?: string | null
+  outputKind?: string | null
 }
 
 export interface CanvasEdge {

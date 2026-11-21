@@ -13,8 +13,8 @@ export interface SourceRouteDeps {
   readonly objectStore: ObjectStore
 }
 
-/** 课件上限：60 页 PPTX 通常几 MB，100MB 足够，再大多半是误传 */
-const MAX_SOURCE_BYTES = 100 * 1024 * 1024
+/** 课件上限：整本教材的 PDF 实测能到 160MB，100MB 会直接拒掉（真实遇到过）。400MB 留足余量 */
+const MAX_SOURCE_BYTES = 400 * 1024 * 1024
 // .ppt 是 Office 97–2003 的二进制格式，走单独的解析器（storage/ppt.ts）
 const ALLOWED_EXT = /\.(pptx|ppt|pdf)$/i
 

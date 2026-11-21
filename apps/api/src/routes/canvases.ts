@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 
 import type { PrismaClient } from '../../../../packages/db/src/index.ts'
+import { summarizeArtifact } from '../domain/artifact-text.ts'
 import { findCanvasForUser, requireCanvasOwner } from '../lib/access.ts'
 import { parse } from '../lib/validate.ts'
 import { getAuth } from '../plugins/auth.ts'
@@ -65,12 +66,37 @@ export function registerCanvasRoutes(app: FastifyInstance, deps: CanvasRouteDeps
       },
     })
 
+    /**
+     * 每个节点最近一次运行的产物 → 一段可读的文字。
+     *
+     * 画布要像"学习地图"而不是一堆只有标题的方块，就必须把产物内容显示出来。
+     * 摘要由 `summarizeArtifact` 确定性生成：模型产了什么就显示什么，不再调一次模型。
+     */
+    const artifacts = await prisma.artifact.findMany({
+      where: { node: { canvasId: id } },
+      orderBy: { createdAt: 'desc' },
+      select: { nodeId: true, kind: true, structured: true },
+    })
+    const latest = new Map<string, { kind: string; structured: unknown }>()
+    for (const artifact of artifacts) {
+      if (latest.has(artifact.nodeId)) continue
+      latest.set(artifact.nodeId, { kind: artifact.kind, structured: artifact.structured })
+    }
+
     return {
       id: canvas.id,
       title: canvas.title,
       ownerId: canvas.ownerId,
       createdAt: canvas.createdAt,
-      nodes: canvas.nodes,
+      nodes: canvas.nodes.map((node) => {
+        const artifact = latest.get(node.id)
+        return {
+          ...node,
+          // null = 还没跑过，界面据此显示"未运行"而不是一段空文本
+          outputText: artifact ? summarizeArtifact(artifact.kind, artifact.structured) : null,
+          outputKind: artifact?.kind ?? null,
+        }
+      }),
       edges: canvas.edges,
     }
   })

@@ -4,6 +4,7 @@ import { ZodError } from 'zod'
 
 import type { PrismaClient } from '../../../packages/db/src/index.ts'
 import type { Env } from './env.ts'
+import { logServerError } from './lib/error-log.ts'
 import { AppError, invalidJson, validationFailed } from './lib/errors.ts'
 import { createGuard } from './plugins/auth.ts'
 import { createApiKeyResolver, createTargetResolver } from './llm/credentials.ts'
@@ -93,8 +94,22 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     }
 
     request.log.error({ err: error }, 'unhandled error')
+
+    /**
+     * 500 也要把真实原因带出来。
+     *
+     * 只说"服务器内部错误"等于什么都没说：学生无法自查，我也拿不到现场。
+     * 本地桌面应用没有"泄露内部信息给第三方"的顾虑，明细比含糊有用得多。
+     * 同时追加到 api-errors.log，窗口关了也能事后查。
+     */
+    const detail = error instanceof Error ? error.message : String(error)
+    logServerError(error, { method: request.method, url: request.url, code: (error as { code?: string }).code })
     return reply.status(500).send({
-      error: { code: 'INTERNAL_ERROR', message: '服务器内部错误' },
+      error: {
+        code: 'INTERNAL_ERROR',
+        message: '服务器内部错误',
+        detail: detail.slice(0, 400),
+      },
     })
   })
 
@@ -128,7 +143,15 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
         ? requested
         : 'authorization, content-type',
     )
-    reply.header('access-control-allow-methods', 'GET, POST, PATCH, DELETE, OPTIONS')
+    /**
+     * PUT 必须在列表里。
+     *
+     * 保存"各任务用哪个模型"走的是 `PUT /v1/preferences/:taskType`；
+     * 方法不被允许时，浏览器**预检通过但真正请求被拦下**，
+     * 前端只会看到一次失败的 fetch —— 表现就是"选完又变回默认路由"，
+     * 而且在服务端日志里只看得到 OPTIONS，看不到 PUT（实际遇到过）。
+     */
+    reply.header('access-control-allow-methods', 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS')
     return payload
   })
   app.options('/*', async (_request, reply) => reply.status(204).send())

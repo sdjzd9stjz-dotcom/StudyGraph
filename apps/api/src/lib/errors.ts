@@ -19,6 +19,10 @@ export const ERROR_CODES = [
   'NODE_NOT_FOUND',
   'NODE_TYPE_INVALID',
   'NODE_PARAMS_INVALID',
+  /** 节点缺少必要输入（参数没填 / 上游没连）—— 用户可以自己修 */
+  'NODE_INPUT_MISSING',
+  /** 执行器内部失败（非用户输入问题） */
+  'NODE_RUN_FAILED',
   /** 对非 GATE 节点调用放行/拒绝接口 */
   'NODE_NOT_GATE',
   'NODE_NOT_IN_CANVAS',
@@ -128,6 +132,16 @@ export const nodeTypeInvalid = (type: unknown, allowed: readonly string[]) =>
 
 export const nodeParamsInvalid = (reason: string) =>
   new AppError(400, 'NODE_PARAMS_INVALID', `params 非法：${reason}`)
+
+/**
+ * 节点缺少必要的输入（参数没填、上游没连）。
+ *
+ * 用 422 而不是 500：这是**用户可以自己修好**的问题，界面要把原因原样显示出来。
+ * 之前执行器用普通 Error 抛这些，路由统一按"服务器内部错误"处理 ——
+ * 学生只看到 500，完全不知道只是没填题干（实际遇到过）。
+ */
+export const nodeInputMissing = (message: string) =>
+  new AppError(422, 'NODE_INPUT_MISSING', message)
 
 export const nodeNotInCanvas = (canvasId: string, nodeIds: readonly string[]) =>
   new AppError(400, 'NODE_NOT_IN_CANVAS', '节点不存在或不属于该画布', { canvasId, nodeIds })

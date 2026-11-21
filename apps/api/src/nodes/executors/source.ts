@@ -3,7 +3,7 @@ import { basename } from 'node:path'
 
 import { sourceDocSchema } from '../../../../../packages/contracts/src/index.ts'
 import type { SourceDoc } from '../../../../../packages/contracts/src/index.ts'
-import { sourceHasNoTextLayer, sourceTextLayerUnusable } from '../../lib/errors.ts'
+import { sourceHasNoTextLayer, sourceTextLayerUnusable, nodeInputMissing } from '../../lib/errors.ts'
 import { originalKey, pageTextKey, writePageTexts } from '../../storage/page-text.ts'
 import { extractSource, sha256Of } from '../../storage/extract-text.ts'
 import { assessTextLayer } from '../../storage/text-layer.ts'
@@ -52,7 +52,7 @@ export const sourceExecutor: NodeExecutor<SourceParams> = {
 
   async run(ctx) {
     const localPath = ctx.params.localPath
-    if (!localPath) throw new Error('source 节点缺少 params.localPath')
+    if (!localPath) throw nodeInputMissing('source 节点缺少 params.localPath')
 
     const filename = ctx.params.filename ?? basename(localPath)
     // 只有用户明确标了"这是扫描件"才允许 OCR（见 extractSource 的 ExtractOptions）

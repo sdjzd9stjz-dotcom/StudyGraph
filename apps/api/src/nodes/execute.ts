@@ -308,20 +308,32 @@ export async function executeNode(
       staleDownstream: downstream,
     }
   } catch (error) {
+    const message = error instanceof Error ? error.message.slice(0, 500) : String(error)
     await deps.prisma.run.update({
       where: { id: run.id },
       data: {
         status: 'FAILED',
         endedAt: new Date(),
-        errorCode: error instanceof AppError ? error.code : 'INTERNAL_ERROR',
-        errorMessage: error instanceof Error ? error.message.slice(0, 500) : String(error),
+        errorCode: error instanceof AppError ? error.code : 'NODE_RUN_FAILED',
+        errorMessage: message,
       },
     })
     await deps.prisma.node.update({
       where: { id: node.id },
-      data: { status: 'ERROR', errorMessage: error instanceof Error ? error.message.slice(0, 500) : String(error) },
+      data: { status: 'ERROR', errorMessage: message },
     })
-    throw error
+
+    /**
+     * 执行器抛的普通 Error 也要带上原因返回。
+     *
+     * 之前原样往外抛，全局错误处理器把它当未知错误 → `500 服务器内部错误`，
+     * 学生看不到"其实是没填题干"（实际遇到过，且完全无从下手）。
+     * 这里包一层：状态码仍是 500（确实是执行失败，不是输入格式问题），
+     * 但 message 用真实原因。用户可以自己修的输入问题由执行器抛 422，
+     * 不走这条路径。
+     */
+    if (error instanceof AppError) throw error
+    throw new AppError(500, 'NODE_RUN_FAILED', message, { nodeId: node.id, nodeType: node.type })
   }
 }
 

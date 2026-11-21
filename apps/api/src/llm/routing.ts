@@ -29,8 +29,15 @@ export interface ModelRoute {
  */
 const SMALL_MODEL = process.env.STUDYGRAPH_SMALL_MODEL ?? 'gpt-4o-mini'
 const FRONTIER_MODEL = process.env.STUDYGRAPH_FRONTIER_MODEL ?? 'claude-sonnet-4-5'
-const DEEPSEEK_CHAT = process.env.STUDYGRAPH_DEEPSEEK_MODEL ?? 'deepseek-chat'
-const DEEPSEEK_REASONER = process.env.STUDYGRAPH_DEEPSEEK_REASONER ?? 'deepseek-reasoner'
+/**
+ * DeepSeek 的模型名以官方 `/models` 返回为准：现在是 `deepseek-flash` 与 `deepseek-v4-pro`。
+ *
+ * 之前默认值写的是 `deepseek-chat` / `deepseek-reasoner` —— 这两个名字已经不存在了，
+ * 于是默认路由下每一个调模型的任务都会失败（而且报错来自厂商，看起来像"服务器错误"）。
+ * 换模型只需要改这两个环境变量，不用动代码。
+ */
+const DEEPSEEK_CHAT = process.env.STUDYGRAPH_DEEPSEEK_MODEL ?? 'deepseek-flash'
+const DEEPSEEK_REASONER = process.env.STUDYGRAPH_DEEPSEEK_REASONER ?? 'deepseek-v4-pro'
 
 export const TASK_ROUTING: Record<TaskType, ModelRoute> = {
   // 机械、量大、便宜的任务

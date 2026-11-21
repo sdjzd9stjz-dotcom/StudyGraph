@@ -23,6 +23,7 @@ import { ContextMenu } from './ContextMenu'
 import type { MenuContext } from './ContextMenu'
 import { SgNode } from './SgNode'
 import type { SgNodeData } from './SgNode'
+import { NodeChat } from './NodeChat'
 import { NodeSearch } from './NodeSearch'
 import { Sidebar } from './Sidebar'
 import type { SkillView } from './Sidebar'
@@ -38,6 +39,8 @@ export interface WorkbenchNode {
   posY: number
   /** 只有 GATE 用到（approved / note），其余类型忽略 */
   params?: Record<string, unknown> | null
+  /** 最近一次运行产物的可读文本（服务端生成）；null = 还没跑过 */
+  outputText?: string | null
 }
 
 export interface WorkbenchEdge {
@@ -67,7 +70,8 @@ function toFlowNode(node: WorkbenchNode, skillsByNode: Map<string, string[]>): F
     status: node.status,
     title: node.title,
     skills: skillsByNode.get(node.id) ?? [],
-    outputSummary: null,
+    // 产物的可读文本：画布看起来要像"知识地图"，节点上得有内容而不只是类型名
+    outputSummary: node.outputText ?? null,
     inputs: ports.inputs.map((port) => ({ name: port.name, type: port.type, external: port.external === true })),
     outputs: ports.outputs.map((port) => ({ name: port.name, type: port.type, external: port.external === true })),
     // 参数要在节点上可编辑：题型识别、变式这些节点处理的是具体某道题，
@@ -133,6 +137,8 @@ function Inner({
   )
   const [groups, setGroups] = useState<WorkbenchGroup[]>(initialGroups)
   const [menu, setMenu] = useState<MenuContext | null>(null)
+  /** 当前打开对话的节点（每个节点自己就是一个会话） */
+  const [chatTarget, setChatTarget] = useState<{ id: string; title: string; type: string } | null>(null)
   /**
    * 节点搜索浮层。两种来源：
    *   · 双击空白 → 列出全部类型
@@ -533,6 +539,7 @@ function Inner({
             onOpenPrompt: openPrompt,
             onGateDecision: decideGateNode,
             onSaveParams: saveNodeParams,
+            onChat: (nodeId: string) => setChatTarget({ id: nodeId, title: String(node.data.title ?? node.data.label ?? node.data.nodeType), type: String(node.data.nodeType) }),
             connectHighlight,
             portState,
           },
@@ -613,6 +620,16 @@ function Inner({
         />
 
         <div style={{ flex: 1, position: 'relative' }} ref={wrapper}>
+          {chatTarget && (
+            <NodeChat
+              nodeId={chatTarget.id}
+              nodeTitle={chatTarget.title}
+              nodeType={chatTarget.type}
+              apiBaseUrl={apiBaseUrl}
+              token={token}
+              onClose={() => setChatTarget(null)}
+            />
+          )}
           <ReactFlow
             nodes={nodesWithHandlers}
             edges={edges}

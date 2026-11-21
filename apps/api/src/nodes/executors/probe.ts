@@ -1,6 +1,7 @@
 import type { JSONSchema } from '../../llm/types.ts'
 import { composeSystemPrompt, HARD_RULE_SUMMARY } from '../skills.ts'
 import type { NodeExecutor } from '../contract.ts'
+import { nodeInputMissing } from '../../lib/errors.ts'
 
 /**
  * `probe` 执行器（M5）：题型与考点识别。
@@ -47,7 +48,7 @@ export const probeExecutor: NodeExecutor<ProbeParams> = {
 
   async run(ctx) {
     const text = ctx.params?.text?.trim()
-    if (!text) throw new Error('probe 节点缺少 params.text（题目原文）')
+    if (!text) throw nodeInputMissing('probe 节点缺少 params.text（题目原文）')
 
     const result = await ctx.llm.complete({
       taskType: 'probe',
