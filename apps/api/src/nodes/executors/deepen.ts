@@ -124,7 +124,11 @@ export const deepenExecutor: NodeExecutor = {
       .map((point) => ({ title: point.title.trim(), insight: point.insight.trim(), evidence: point.evidence.trim() }))
 
     if (points.length === 0) {
-      throw new Error('模型没有给出可用的核心观点（points 为空或字段缺失）')
+      // 把模型实际返回的片段带进错误：否则用户只看到"points 为空"，
+      // 既不知道是模型跑偏还是我们的 schema 写错了（真实排查时卡在这里）
+      throw new Error(
+        `模型没有给出可用的核心观点（points 为空或字段缺失）：${JSON.stringify(data ?? null).slice(0, 300)}`,
+      )
     }
 
     return {

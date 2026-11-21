@@ -41,7 +41,7 @@ export async function cardCacheIsCurrent(prisma: PrismaClient, nodeId: string, c
 export const cardExecutor: NodeExecutor = {
   type: 'CARD',
   artifactKind: 'CONCEPT_CARD',
-  promptVersion: 'extractive-card-v3',
+  promptVersion: 'extractive-card-v4',
   inputs: { type: 'object', properties: { conceptClaims: { type: 'object' } }, required: ['conceptClaims'] },
   outputs: { type: 'object', properties: { cards: { type: 'object' } }, required: ['cards'] },
 
@@ -68,7 +68,8 @@ export const cardExecutor: NodeExecutor = {
       throw new Error(`上游概念里没有「${conceptName}」—— 它可能已被上游重新抽取掉了，请重新拆分`)
     }
 
-    const created: Array<{ conceptId: string; name: string; spanId: string; status: string }> = []
+    /** 卡片内容必须带上定义与引文：只存名字的话，节点卡片上是一片空白，下游（深入理解/讲义）也读不到东西 */
+    const created: Array<{ conceptId: string; name: string; definition: string; quote: string; spanId: string; status: string }> = []
     const skipped: Array<{ name: string; reason: string }> = []
 
     const pages = await readPageTexts(ctx.objectStore, ctx.canvasId, conceptClaims.sourceId)
@@ -140,7 +141,14 @@ export const cardExecutor: NodeExecutor = {
       } else if (outcome.kind === 'CONFLICT') {
         skipped.push({ name: claim.name, reason: '同名概念已有不同证据' })
       } else {
-        created.push({ conceptId: outcome.concept.id, name: claim.name, spanId: span.id, status: outcome.concept.status })
+        created.push({
+          conceptId: outcome.concept.id,
+          name: claim.name,
+          definition: outcome.concept.definition ?? claim.definition,
+          quote: claim.quote,
+          spanId: span.id,
+          status: outcome.concept.status,
+        })
       }
     }
 
