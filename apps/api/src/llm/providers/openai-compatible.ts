@@ -1,4 +1,14 @@
-import type { CachePrefix, JSONSchema, Message, TokenUsage } from '../types.ts'
+import type {
+  AgentMessage,
+  AgentRequest,
+  AgentResult,
+  CachePrefix,
+  JSONSchema,
+  Message,
+  TokenUsage,
+  ToolCall,
+  ToolSpec,
+} from '../types.ts'
 import { assertUsageAndModel } from './validate.ts'
 
 /**
@@ -279,6 +289,136 @@ export function createOpenAICompatibleProvider(config: OpenAICompatibleConfig) {
       })
 
       return { data, usage, modelVersion }
+    }
+  }
+}
+
+/**
+ * 原生工具调用（function calling）。
+ *
+ * 与 `call` 分开写而不是塞进同一个函数：普通调用要 `response_format` 强制 JSON，
+ * agent 调用要 `tools` —— 两者的重试策略、成功判据都不一样
+ * （agent 的一次成功可能是"一个字没说，只调了个工具"）。
+ *
+ * DeepSeek 实测：`tool_choice: 'auto'` 可用；强制指定某个工具会被
+ * "Thinking mode does not support this tool_choice" 拒绝。
+ * 所以这里固定 `auto`，靠提示词让模型自己动手。
+ */
+export interface AgentProviderCall {
+  readonly model: string
+  readonly messages: readonly AgentMessage[]
+  readonly tools: readonly ToolSpec[]
+  readonly maxTokens?: number
+}
+
+export function createOpenAICompatibleAgent(config: OpenAICompatibleConfig) {
+  const doFetch = config.fetchImpl ?? fetch
+
+  const toWire = (message: AgentMessage): Record<string, unknown> => {
+    if (message.role === 'tool') {
+      return { role: 'tool', tool_call_id: message.toolCallId, content: message.content }
+    }
+    if (message.role === 'assistant') {
+      return {
+        role: 'assistant',
+        content: message.content.length > 0 ? message.content : null,
+        ...(message.toolCalls?.length
+          ? {
+              tool_calls: message.toolCalls.map((call) => ({
+                id: call.id,
+                type: 'function',
+                function: { name: call.name, arguments: call.arguments },
+              })),
+            }
+          : {}),
+      }
+    }
+    return { role: message.role, content: message.content }
+  }
+
+  return async function chat(input: AgentProviderCall): Promise<AgentResult> {
+    let budget = Math.min(Math.max(input.maxTokens ?? DEFAULT_MAX_TOKENS, 512), HARD_MAX_TOKENS)
+    let retriedForLength = false
+
+    for (;;) {
+      const body = {
+        model: input.model,
+        messages: input.messages.map(toWire),
+        max_tokens: budget,
+        tools: input.tools.map((tool) => ({
+          type: 'function',
+          function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+        })),
+        // DeepSeek 的 thinking 模式只接受 auto：强制指定工具会被 400 拒绝
+        tool_choice: 'auto',
+      }
+
+      const response = await doFetch(`${config.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${config.apiKey}` },
+        body: JSON.stringify(body),
+      })
+
+      if (!response.ok) {
+        const text = await response.text()
+        throw new Error(`${config.provider} ${response.status}: ${text.slice(0, 400)}`)
+      }
+
+      const payload = (await response.json()) as {
+        model?: unknown
+        choices?: Array<{
+          message?: {
+            content?: string | null
+            reasoning_content?: string
+            tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }>
+          }
+          finish_reason?: string
+        }>
+        usage?: unknown
+      }
+
+      const choice = payload.choices?.[0]
+      const content = choice?.message?.content ?? ''
+      const finishReason = choice?.finish_reason
+      const toolCalls: ToolCall[] = (choice?.message?.tool_calls ?? [])
+        .filter((call) => typeof call.function?.name === 'string')
+        .map((call, index) => ({
+          id: call.id ?? `call_${index}`,
+          name: call.function!.name!,
+          arguments: call.function?.arguments ?? '{}',
+        }))
+
+      /**
+       * 额度耗尽的重试：与普通调用同一个坑 —— 思考 token 也算输出。
+       * 但判据不同：这里"没有 tool_calls 也没有文字"才算空转。
+       */
+      const emptyTurn = content.trim().length === 0 && toolCalls.length === 0
+      if ((emptyTurn || finishReason === 'length') && !retriedForLength && budget < HARD_MAX_TOKENS) {
+        retriedForLength = true
+        budget = Math.min(budget * 2, HARD_MAX_TOKENS)
+        continue
+      }
+
+      if (emptyTurn) {
+        throw new Error(
+          `${config.provider} 没有返回内容，也没有调用任何工具` +
+            (finishReason === 'length' ? `（max_tokens=${budget} 已用完）` : `（finish_reason=${finishReason ?? 'unknown'}）`),
+        )
+      }
+
+      const { modelVersion, usage } = assertUsageAndModel(config.provider, payload, (raw) => {
+        if (config.provider === 'deepseek') {
+          return {
+            tokensIn: raw.prompt_tokens,
+            tokensOut: raw.completion_tokens,
+            cachedTokens: raw.prompt_cache_hit_tokens,
+          }
+        }
+        const details = raw.prompt_tokens_details as { cached_tokens?: unknown } | undefined
+        return { tokensIn: raw.prompt_tokens, tokensOut: raw.completion_tokens, cachedTokens: details?.cached_tokens }
+      })
+
+      return { content, toolCalls, usage, modelVersion, provider: config.provider }
     }
   }
 }

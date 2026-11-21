@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node --watch src/server.ts",
     "start": "node src/server.ts",
-    "test:unit": "node test/unit/dag.test.ts && node test/unit/auth.test.ts && node test/unit/spans.test.ts && node test/unit/registry.test.ts",
+    "test:unit": "node test/unit/dag.test.ts && node test/unit/auth.test.ts && node test/unit/spans.test.ts && node test/unit/registry.test.ts && node test/unit/assistant-agent.test.ts",
     "test:integration": "node test/integration/api.test.ts"
   },
   "dependencies": {

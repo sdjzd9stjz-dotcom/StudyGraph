@@ -87,7 +87,10 @@ export function summarizeArtifact(kind: string, structured: unknown): string {
     }
 
     case 'CHUNKS': {
-      const chunks = asArray(data.chunks ?? data.chunkSet)
+      // 实际形状是 `{ chunkSet: { chunks: [...] } }`（执行器按 outputs 契约包了一层）。
+      // 之前写成 `data.chunks ?? data.chunkSet`，拿到的是对象不是数组 → 永远显示 0 段。
+      const chunkSet = (data.chunkSet ?? {}) as Record<string, unknown>
+      const chunks = asArray(chunkSet.chunks ?? data.chunks)
       lines.push(`✂️ 切成 ${chunks.length} 段`)
       for (const chunk of chunks.slice(0, 5)) {
         const text = str((chunk as Record<string, unknown>)?.text)
@@ -107,8 +110,18 @@ export function summarizeArtifact(kind: string, structured: unknown): string {
     }
 
     case 'CONCEPT_CARD': {
-      const cards = asArray(data.cards)
-      lines.push(`🗂 ${cards.length} 张知识卡`)
+      // 同样是 `{ cards: { cards: [...], verified, pendingReview, ... } }`。
+      // 读错一层，界面上就是「0 张知识卡」—— 用户会以为抽取白跑了。
+      const payload = (data.cards ?? {}) as Record<string, unknown>
+      const cards = asArray(payload.cards ?? data.cards)
+      const verified = num(payload.verified)
+      const pendingReview = num(payload.pendingReview)
+      lines.push(
+        `🗂 ${cards.length} 张知识卡` +
+          (verified !== null || pendingReview !== null
+            ? `（已核对 ${verified ?? 0} · 待复核 ${pendingReview ?? 0}）`
+            : ''),
+      )
       for (const card of cards.slice(0, 8)) {
         const record = card as Record<string, unknown>
         lines.push(`• ${clip(str(record.name), 40)}：${clip(str(record.definition), 80)}`)
@@ -118,7 +131,8 @@ export function summarizeArtifact(kind: string, structured: unknown): string {
 
     case 'PREREQ_PROPOSAL': {
       lines.push(`🔗 提议 ${num(data.proposed) ?? 0} 条先修关系`)
-      for (const pair of asArray(data.pairs).slice(0, 8)) {
+      // 执行器写的是 `edges`；`pairs` 是模型原始输出，已落库前被过滤掉了
+      for (const pair of asArray(data.edges ?? data.pairs).slice(0, 8)) {
         const record = pair as Record<string, unknown>
         lines.push(`• ${clip(str(record.from), 24)} → ${clip(str(record.to), 24)}`)
       }

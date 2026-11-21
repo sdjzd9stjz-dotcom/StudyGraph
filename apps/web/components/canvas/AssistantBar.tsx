@@ -2,24 +2,23 @@
 
 import { useEffect, useRef, useState } from 'react'
 
-export interface AssistantAction {
-  kind: string
-  payload: Record<string, unknown>
+export interface CanvasChange {
+  kind: 'create-node' | 'update-node' | 'delete-node' | 'create-edge' | 'delete-edge'
+  id: string
+  label: string
 }
 
 export interface AssistantReply {
   reply: string
-  actions: AssistantAction[]
+  changes: CanvasChange[]
   source: string
-  executed?: boolean
 }
 
 interface Turn {
   id: string
   role: 'user' | 'assistant'
   text: string
-  actions?: AssistantAction[]
-  applied?: boolean
+  changes?: CanvasChange[]
   source?: string
 }
 
@@ -108,44 +107,18 @@ export function AssistantBar({
         ])
         return
       }
+      const changes = Array.isArray(data.changes) ? data.changes : []
       setThread((prev) => [
         ...prev,
-        { id: `a-${Date.now()}`, role: 'assistant', text: data.reply, actions: data.actions, source: data.source },
+        { id: `a-${Date.now()}`, role: 'assistant', text: data.reply, changes, source: data.source },
       ])
+      // 模型已经直接改过画布了：刷新一次，让用户看到节点/连线真的变了
+      if (changes.length > 0) onApplied()
     } catch (error) {
       setThread((prev) => [
         ...prev,
         { id: `a-${Date.now()}`, role: 'assistant', text: `出错了：${error instanceof Error ? error.message : String(error)}` },
       ])
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function apply(id: string, actions: AssistantAction[]) {
-    setBusy(true)
-    try {
-      const response = await fetch(`${apiBaseUrl}/v1/canvases/${canvasId}/assistant/apply`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-        body: JSON.stringify({ actions }),
-      })
-      if (!response.ok) {
-        setThread((prev) => [
-          ...prev,
-          { id: `a-${Date.now()}`, role: 'assistant', text: `应用失败：HTTP ${response.status}` },
-        ])
-        return
-      }
-      const result = (await response.json()) as { nodes: number; edges: number }
-      setThread((prev) =>
-        prev.map((turn) =>
-          turn.id === id
-            ? { ...turn, applied: true, text: `${turn.text}\n\n✓ 已落地 ${result.nodes} 个节点、${result.edges} 条连线（都是草稿，需要你逐个点 ▶）` }
-            : turn,
-        ),
-      )
-      onApplied()
     } finally {
       setBusy(false)
     }
@@ -160,9 +133,9 @@ export function AssistantBar({
         >
           {thread.length === 0 && (
             <div style={{ fontSize: 12, color: '#94a3b8', lineHeight: 1.7 }}>
-              说一句要做的事，我一次把整张图铺好 —— 但**不会替你运行**。
+              直接说要做什么，我用工具改画布（建节点、连线、改提示词）—— 但**不会替你运行节点**。
               <br />
-              例如：「把课件变成知识卡并出题」「再加一条解题支线」「我要完整的图」
+              例如：「把课件做成知识卡并出题」「把抽取节点的提示词改得更严格」「这个画布现在到哪一步了？」
             </div>
           )}
 
@@ -182,29 +155,15 @@ export function AssistantBar({
             >
               <div style={{ fontSize: 10, color: '#94a3b8', marginBottom: 3 }}>
                 {turn.role === 'user' ? '你' : 'AI'}
-                {turn.source === 'model' ? ' · 模型规划' : turn.role === 'assistant' && turn.actions ? ' · 规则规划' : ''}
+                {turn.source === 'model' ? ' · 你的模型' : ''}
               </div>
               <div style={{ color: '#334155', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>{turn.text}</div>
 
-              {turn.actions && turn.actions.length > 0 && !turn.applied && (
-                <button
-                  type="button"
-                  data-testid={`apply-actions-${turn.id}`}
-                  disabled={busy}
-                  onClick={() => void apply(turn.id, turn.actions!)}
-                  style={{
-                    marginTop: 8,
-                    fontSize: 12,
-                    border: 'none',
-                    color: '#fff',
-                    background: busy ? '#93c5fd' : '#2563eb',
-                    borderRadius: 6,
-                    padding: '4px 12px',
-                    cursor: busy ? 'wait' : 'pointer',
-                  }}
-                >
-                  应用到画布（{turn.actions.length} 步）
-                </button>
+              {turn.changes && turn.changes.length > 0 && (
+                <div data-testid={`assistant-changes-${turn.id}`} style={{ marginTop: 6, fontSize: 11, color: '#059669' }}>
+                  ✓ 画布已改动 {turn.changes.length} 处：
+                  {turn.changes.map((change) => change.label).join('、')}
+                </div>
               )}
             </div>
           ))}

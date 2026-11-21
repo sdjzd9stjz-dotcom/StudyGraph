@@ -50,6 +50,50 @@ export interface CachePrefix {
   readonly text: string
 }
 
+/**
+ * 工具调用（agent）。
+ *
+ * 底部对话栏不是"让模型写一段话再解析"，而是把画布操作当成工具交给模型，
+ * 模型自己决定调哪一个、按什么顺序调。**工具本身由服务端实现**，
+ * 模型只能通过这些工具碰画布 —— 没有文件、没有网络、不能执行节点。
+ *
+ * DeepSeek 的 thinking 模式只支持 `tool_choice: auto`（强制指定工具会被 400 拒绝），
+ * 所以这里不提供强制选项：靠 system prompt 说清楚"该动手就动手"。
+ */
+export interface ToolSpec {
+  readonly name: string
+  readonly description: string
+  readonly parameters: JSONSchema
+}
+
+export interface ToolCall {
+  readonly id: string
+  readonly name: string
+  /** 模型给的 JSON 字符串，可能不合法；由执行方解析并拒绝 */
+  readonly arguments: string
+}
+
+export type AgentMessage =
+  | { readonly role: 'system' | 'user'; readonly content: string }
+  | { readonly role: 'assistant'; readonly content: string; readonly toolCalls?: readonly ToolCall[] }
+  | { readonly role: 'tool'; readonly toolCallId: string; readonly content: string }
+
+export interface AgentRequest {
+  readonly taskType: TaskType
+  readonly messages: readonly AgentMessage[]
+  readonly tools: readonly ToolSpec[]
+  readonly user: UserCtx
+  readonly maxTokens?: number
+}
+
+export interface AgentResult {
+  readonly content: string
+  readonly toolCalls: readonly ToolCall[]
+  readonly usage: TokenUsage
+  readonly modelVersion: string
+  readonly provider: import('./routing.ts').ProviderId
+}
+
 export interface LLMCompleteRequest {
   readonly taskType: TaskType
   readonly messages: readonly Message[]
@@ -79,4 +123,6 @@ export interface LLMCompleteResult {
 export interface LLMGateway {
   routeFor(task: TaskType): import('./routing.ts').ModelRoute
   complete(req: LLMCompleteRequest): Promise<LLMCompleteResult & { provider: import('./routing.ts').ProviderId }>
+  /** 带工具的一轮对话（agent 循环的每一步） */
+  chatWithTools(req: AgentRequest): Promise<AgentResult>
 }

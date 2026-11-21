@@ -3,7 +3,7 @@ import type { ApiKeyResolver, TargetResolver } from './credentials.ts'
 import { normalizeCredential } from './credentials.ts'
 import { createAnthropicProvider } from './providers/anthropic.ts'
 import { createDeepSeekProvider } from './providers/deepseek.ts'
-import { createOpenAICompatibleProvider } from './providers/openai-compatible.ts'
+import { createOpenAICompatibleAgent, createOpenAICompatibleProvider } from './providers/openai-compatible.ts'
 import { createOpenAIProvider } from './providers/openai.ts'
 import { TASK_ROUTING } from './routing.ts'
 import type { ModelRoute } from './routing.ts'
@@ -95,6 +95,53 @@ export function createGateway(deps: GatewayDeps): LLMGateway {
         return { ...result, provider: providerLabel }
       } catch (error) {
         // 已经带 errorCode 的（响应结构非法等）原样上抛，不叠加成 502 厂商错误
+        if (error instanceof AppError) throw error
+        throw llmProviderError(providerLabel, error instanceof Error ? error.message : String(error))
+      }
+    },
+
+    /**
+     * 带工具的一轮对话。
+     *
+     * 只支持 OpenAI 兼容协议（DeepSeek 与自建中转都属于这一类）。
+     * Anthropic 的工具协议形态不同，没有实现就不假装支持 ——
+     * 直接报 LLM_TOOLS_UNSUPPORTED，让上层把"这个模型不能当 agent"说清楚，
+     * 而不是悄悄退化成关键词匹配。
+     */
+    async chatWithTools(request) {
+      const route = routing[request.taskType]
+      const resolved = normalizeCredential(await deps.resolveApiKey(route.provider, request.user))
+      if (!resolved) throw llmCredentialMissing(route.provider)
+
+      const target = deps.resolveTarget
+        ? await deps.resolveTarget(request.taskType, request.user, route)
+        : null
+      if (deps.resolveTarget && !target) throw llmCredentialMissing(route.provider)
+
+      const model = target?.model ?? route.model
+      const providerLabel = target?.providerSlug ?? route.provider
+      if (target?.protocol === 'ANTHROPIC') {
+        throw new AppError(501, 'LLM_TOOLS_UNSUPPORTED', `模型 ${providerLabel} 使用 Anthropic 协议，暂不支持工具调用`)
+      }
+
+      const agent = createOpenAICompatibleAgent({
+        provider: 'openai',
+        apiKey: target?.apiKey ?? resolved.apiKey,
+        baseUrl:
+          target?.baseUrl ??
+          (route.provider === 'deepseek' ? 'https://api.deepseek.com' : 'https://api.openai.com/v1'),
+        fetchImpl: deps.fetchImpl,
+      })
+
+      try {
+        const result = await agent({
+          model,
+          messages: request.messages,
+          tools: request.tools,
+          maxTokens: request.maxTokens,
+        })
+        return { ...result, provider: providerLabel }
+      } catch (error) {
         if (error instanceof AppError) throw error
         throw llmProviderError(providerLabel, error instanceof Error ? error.message : String(error))
       }
