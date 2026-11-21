@@ -28,6 +28,11 @@ import type { Guard } from '../plugins/auth.ts'
 
 const bodySchema = z.object({
   message: z.string().trim().min(1).max(2000),
+  /** 最近几轮对话：模型要知道"再"指的是什么 */
+  history: z
+    .array(z.object({ role: z.enum(['user', 'assistant']), text: z.string().max(4000) }))
+    .max(20)
+    .optional(),
 })
 
 /** 标准知识链：新手最常要的东西，离线也能建 */
@@ -418,6 +423,177 @@ function registerNodeChat(app: FastifyInstance, deps: AssistantRouteDeps): void 
   })
 }
 
+/**
+ * 让用户的模型来规划画布。
+ *
+ * 它拿到的能力就是"能建哪些节点、现在画布上有什么"，输出节点与连线 ——
+ * 也就是说模型真的在用画布，而不是只写一段话。
+ * 但**不能执行**：产出只是建议，落地后是 DRAFT。
+ *
+ * 返回 null 表示"这次没规划出可用的东西"（没有凭据、模型报错、输出为空），
+ * 由调用方退回规则规划。
+ */
+export interface ModelPlanShape {
+  readonly nodes?: ReadonlyArray<{ type?: unknown; title?: unknown }>
+  readonly edges?: ReadonlyArray<{ from?: unknown; to?: unknown }>
+}
+
+/**
+ * 把模型返回的规划转成可执行的动作列表。
+ *
+ * 三道校验，每道都对应一种会让画布变脏的模型输出：
+ *   1. 类型必须是 17 个之一 —— 模型会编出不存在的节点名
+ *   2. 已有的类型不重复建 —— 否则多轮对话每次都把整张图重铺一遍
+ *   3. 连线两端必须存在、且不能自连 —— 否则产生断头线，画布上看不见但会污染图
+ *
+ * 抽成纯函数是为了能测：这段逻辑出错的表现是"模型说了但画布没变"，
+ * 在界面上和"模型没被调用"完全一样，很难分辨。
+ */
+export function actionsFromModelPlan(plan: ModelPlanShape | undefined, existingTypes: Iterable<string>): Action[] {
+  const existing = new Set(existingTypes)
+  const actions: Action[] = []
+  const created: NodeType[] = []
+  let index = 0
+
+  for (const node of plan?.nodes ?? []) {
+    const type = node.type
+    if (typeof type !== 'string' || !isNodeType(type)) continue
+    if (existing.has(type)) continue
+    existing.add(type)
+    created.push(type)
+
+    // 已知类型沿用思维导图布局；其它组合按列顺排，避免全叠在原点
+    const preset = GRAPH_NODES.find((entry) => entry.type === type)
+    const title = typeof node.title === 'string' && node.title.trim().length > 0 ? node.title.trim() : preset?.title ?? type
+    actions.push({
+      kind: 'create-node',
+      payload: {
+        type,
+        title,
+        ref: type,
+        pos: preset ? { x: preset.x, y: preset.y } : { x: 60 + index * 280, y: 900 },
+      },
+    })
+    index += 1
+  }
+
+  const available = new Set<string>([...existing, ...created])
+  for (const edge of plan?.edges ?? []) {
+    const from = edge.from
+    const to = edge.to
+    if (typeof from !== 'string' || typeof to !== 'string') continue
+    if (!available.has(from) || !available.has(to) || from === to) continue
+    actions.push({ kind: 'create-edge', payload: { from, to } })
+  }
+
+  return actions
+}
+
+async function planWithModel(
+  prisma: PrismaClient,
+  llm: LLMGateway,
+  input: {
+    canvasId: string
+    nodes: readonly NodeBrief[]
+    message: string
+    history: readonly { role: 'user' | 'assistant'; text: string }[]
+    user: { id: string }
+  },
+): Promise<{ reply: string; actions: Action[] } | null> {
+  const existing = new Set(input.nodes.map((node) => node.type))
+  const canvasState =
+    input.nodes.length === 0
+      ? '（空画布）'
+      : input.nodes.map((node) => `${node.title ?? node.type}(${node.type}, ${node.status})`).join('、')
+
+  try {
+    const result = await llm.complete({
+      taskType: 'method',
+      messages: [
+        {
+          role: 'system',
+          content:
+            '你是 StudyGraph 的学习工作流助手，可以通过"摆放节点和连线"来搭建用户的画布。\n\n' +
+            `当前画布：${canvasState}\n` +
+            `可用节点类型：${NODE_TYPES.join(' / ')}\n\n` +
+            '节点含义：\n' +
+            '- SOURCE 课件（上传的文件）→ CHUNK 切片 → EXTRACT 概念抽取 → CARD 知识卡\n' +
+            '- CARD → PREREQ 先修关系 / REVIEW 复习调度 / GATE 人工闸门 / QUIZ 出题 → CHECK 三检 → PAPER 组卷\n' +
+            '- SOURCE → PROBE 题型识别 → METHOD 解法抽取 → SOLVE 分步解法 → DIAGNOSE 错因归因\n\n' +
+            '规则：\n' +
+            '1. **不要重复创建画布上已有的节点类型**（上面列出的就是已有的）\n' +
+            '2. 连线只能连到"已有的或你要创建的"节点，方向是从上游到下游\n' +
+            '3. 只给必要的东西：用户要什么就给什么，不要为了热闹铺满\n' +
+            '4. 绝不建议或声称执行了任何节点 —— 你只负责摆放，运行由用户点 ▶\n' +
+            '5. reply 用一两句话说明你摆了什么',
+        },
+        ...input.history.slice(-6).map((turn) => ({ role: turn.role, content: turn.text })),
+        { role: 'user', content: input.message },
+      ],
+      jsonSchema: {
+        type: 'object',
+        properties: {
+          reply: { type: 'string' },
+          nodes: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                type: { type: 'string', description: '必须是上面列出的节点类型之一' },
+                title: { type: 'string' },
+              },
+              required: ['type'],
+              additionalProperties: false,
+            },
+          },
+          edges: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { from: { type: 'string' }, to: { type: 'string' } },
+              required: ['from', 'to'],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ['reply', 'nodes', 'edges'],
+        additionalProperties: false,
+      },
+      user: input.user as never,
+    })
+
+    const data = result.data as
+      | { reply?: string; nodes?: Array<{ type?: string; title?: string }>; edges?: Array<{ from?: string; to?: string }> }
+      | undefined
+
+    const actions = actionsFromModelPlan(data, existing)
+
+    await prisma.usageRecord.create({
+      data: {
+        userId: input.user.id,
+        canvasId: input.canvasId,
+        surface: 'CHAT_COMPLETIONS',
+        provider: result.provider,
+        model: result.modelVersion,
+        tokensIn: result.usage.tokensIn,
+        tokensOut: result.usage.tokensOut,
+        cachedTokens: result.usage.cachedTokens,
+      },
+    })
+
+    if (actions.length === 0) return null
+
+    const replyText = typeof data?.reply === 'string' && data.reply.trim() ? data.reply.trim() : '已经按你的要求调整了画布。'
+    return {
+      reply: `${replyText}\n\n（落地后都是草稿，需要你逐个点 ▶ —— 我不会替你运行任何节点）`,
+      actions,
+    }
+  } catch {
+    // 没凭据 / 模型不支持 JSON / 厂商报错：交给规则规划兜底，别让对话栏变成报错栏
+    return null
+  }
+}
+
 export interface AssistantRouteDeps {
   readonly prisma: PrismaClient
   readonly guard: Guard
@@ -467,74 +643,31 @@ export function registerAssistantRoutes(app: FastifyInstance, deps: AssistantRou
 
     const plan = planGraph(body.message, nodes)
 
-    // 离线规划已经把意图识别清楚了，就不必再花一次模型调用。
-    // 只有它什么也没认出来（actions 为空且用户说了不少话）时才去问模型。
-    const needsModel = plan.actions.length === 0 && body.message.length > 12
-    if (!needsModel) {
-      return reply.status(200).send({ ...plan, source: 'offline', canvas: { nodeCount: nodes.length } })
-    }
-
-    let modelActions: Action[] = []
-    let modelReply = plan.reply
-    try {
-      const result = await llm.complete({
-        taskType: 'method',
-        messages: [
-          {
-            role: 'system',
-            content: `你是学习工作流助手。当前画布有这些节点：${
-              nodes.map((node) => `${node.title ?? node.type}(${node.type},${node.status})`).join('、') || '空'
-            }。
-可用节点类型：${NODE_TYPES.join(' / ')}。
-用一句话回复，并给出要新建的节点类型列表。不要建议自动执行任何节点。`,
-          },
-          { role: 'user', content: body.message },
-        ],
-        jsonSchema: {
-          type: 'object',
-          properties: {
-            reply: { type: 'string' },
-            nodeTypes: { type: 'array', items: { type: 'string' } },
-          },
-          required: ['reply', 'nodeTypes'],
-          additionalProperties: false,
-        },
-        user: auth.user,
-      })
-
-      const data = result.data as { reply?: string; nodeTypes?: string[] }
-      modelReply = data.reply ?? plan.reply
-      let prevKey: string | null = null
-      for (const type of data.nodeTypes ?? []) {
-        if (!isNodeType(type)) continue
-        modelActions.push({ kind: 'create-node', payload: { type, title: type, ref: type } })
-        if (prevKey) modelActions.push({ kind: 'create-edge', payload: { from: prevKey, to: type } })
-        prevKey = type
-      }
-
-      await prisma.usageRecord.create({
-        data: {
-          userId: auth.user.id,
-          canvasId,
-          surface: 'CHAT_COMPLETIONS',
-          provider: result.provider,
-          model: result.modelVersion,
-          tokensIn: result.usage.tokensIn,
-          tokensOut: result.usage.tokensOut,
-          cachedTokens: result.usage.cachedTokens,
-        },
-      })
-    } catch {
-      // 模型不可用不是错误：离线规划已经给过答复了
-    }
-
-    return reply.status(200).send({
-      reply: modelReply,
-      actions: modelActions,
-      source: modelActions.length > 0 ? 'model' : 'offline',
-      canvas: { nodeCount: nodes.length },
-      skills: skills.map((skill) => ({ slug: skill.slug, name: skill.name })),
+    /**
+     * 先让**用户的模型**规划，失败才退回规则。
+     *
+     * 之前是反的：`plan.actions.length === 0` 才去问模型，而规则规划永远能给出
+     * 一整张图 —— 于是模型从来没被调用过，用户看到的"AI"其实只是关键词匹配。
+     * 现在模型是主路径，规则只在没有凭据/调用失败时兜底。
+     */
+    const modelActions = await planWithModel(prisma, llm, {
+      canvasId,
+      nodes,
+      message: body.message,
+      history: body.history ?? [],
+      user: auth.user,
     })
+
+    if (modelActions) {
+      return reply.status(200).send({
+        reply: modelActions.reply,
+        actions: modelActions.actions,
+        source: 'model',
+        canvas: { nodeCount: nodes.length },
+      })
+    }
+
+    return reply.status(200).send({ ...plan, source: 'offline', canvas: { nodeCount: nodes.length } })
   })
 
   /**

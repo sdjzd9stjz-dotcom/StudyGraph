@@ -40,17 +40,32 @@ export type ApiKeyResolver = (
 
 export function createApiKeyResolver(deps: CredentialResolverDeps): ApiKeyResolver {
   return async function resolveApiKey(provider, user) {
-    const credential = await deps.prisma.providerCredential.findFirst({
-      where: { userId: user.id, provider, isActive: true },
-      orderBy: { createdAt: 'desc' },
+    /**
+     * 读的是 `UserCredential`，**不是** `ProviderCredential`。
+     *
+     * 库里有两张凭据表：`ProviderCredential` 是最早的占位设计（`provider` 存字符串），
+     * 界面的 BYOK 写入 `UserCredential`（外键到 Provider 表，带 baseUrlOverride）。
+     * 这里曾经查旧表 —— 那张表永远是空的，于是用户明明保存了密钥，
+     * 运行节点却报"没有可用的 deepseek 凭据"（实际遇到过）。
+     * 旧表已无写入方，保留只为不破坏历史迁移。
+     */
+    const providerRow = await deps.prisma.provider.findUnique({
+      where: { slug: provider },
+      select: { id: true },
     })
+    const credential = providerRow
+      ? await deps.prisma.userCredential.findFirst({
+          where: { userId: user.id, providerId: providerRow.id, isActive: true },
+          orderBy: { createdAt: 'desc' },
+        })
+      : null
 
     if (credential) {
       if (!deps.masterKey) {
         // 有密文但没有主密钥：配置错误必须报出来
-        throw new Error('存在 ProviderCredential，但 BYOK_ENCRYPTION_KEY 未配置，无法解密')
+        throw new Error('存在已保存的密钥，但 BYOK_ENCRYPTION_KEY 未配置，无法解密')
       }
-      return { apiKey: decryptSecret(credential.keyCiphertext, deps.masterKey), source: 'byok' }
+      return { apiKey: decryptSecret(credential.ciphertext, deps.masterKey), source: 'byok' }
     }
 
     const fromEnv =

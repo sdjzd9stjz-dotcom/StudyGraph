@@ -174,15 +174,22 @@ test('E：cachePrefixKey 必须影响出站请求体（E09）', async () => {
 
 test('E：BYOK 两个用户取到不同密钥，且第二个回退到 env', async () => {
   const masterKey = Buffer.alloc(32, 9).toString('base64')
-  const userACredential = {
-    keyCiphertext: encryptSecret('sk-user-a', masterKey),
-    isActive: true,
-  }
 
+  /**
+   * 凭据现在存在 `UserCredential`（界面写入的那张表），
+   * 按 `Provider.slug` 找 provider，再按 providerId + userId 找凭据。
+   * 用旧表 `ProviderCredential` 的话，用户明明保存了密钥也会报"没有可用凭据"。
+   */
   const prisma = {
-    providerCredential: {
+    provider: {
+      findUnique: async ({ where }: { where: { slug: string } }) =>
+        where.slug === 'openai' ? { id: 'prov_openai' } : null,
+    },
+    userCredential: {
       findFirst: async ({ where }: { where: { userId: string } }) =>
-        where.userId === 'user-a' ? userACredential : null,
+        where.userId === 'user-a'
+          ? { ciphertext: encryptSecret('sk-user-a', masterKey), isActive: true }
+          : null,
     },
   }
 
@@ -202,9 +209,8 @@ test('E：BYOK 两个用户取到不同密钥，且第二个回退到 env', asyn
 
 test('E：有密文但没有主密钥 → 报错，不悄悄回退 env', async () => {
   const prisma = {
-    providerCredential: {
-      findFirst: async () => ({ keyCiphertext: '{"v":1}', isActive: true }),
-    },
+    provider: { findUnique: async () => ({ id: 'prov_openai' }) },
+    userCredential: { findFirst: async () => ({ ciphertext: '{"v":1}', isActive: true }) },
   }
   const resolve = createApiKeyResolver({
     prisma: prisma as never,

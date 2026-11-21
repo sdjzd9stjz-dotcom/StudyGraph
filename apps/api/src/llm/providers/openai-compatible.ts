@@ -46,8 +46,15 @@ export function createOpenAICompatibleProvider(config: OpenAICompatibleConfig) {
       ...input.messages.map((message) => ({ role: message.role as string, content: message.content })),
     ]
 
-    // DeepSeek 的 json_object 模式要求 prompt 里显式出现 "json" 字样
-    if (input.jsonSchema && jsonMode === 'json_object') {
+    /**
+     * 结构化输出靠两条腿：`response_format` + 明确的语言指令。
+     *
+     * 语言指令无论如何都加：有的厂商/模型会拒掉 `response_format`
+     * （DeepSeek 现在的 flash / v4-pro 就返回
+     * "This response_format type is unavailable now"），
+     * 那时只能靠指令让模型自己输出 JSON。见下面的降级重试。
+     */
+    if (input.jsonSchema) {
       messages.push({
         role: 'system',
         content: '只输出一个 JSON 对象（json），不要输出任何解释、不要用 Markdown 代码块。',
@@ -75,14 +82,35 @@ export function createOpenAICompatibleProvider(config: OpenAICompatibleConfig) {
       body.prompt_cache_key = input.cachePrefix.key
     }
 
-    const response = await doFetch(`${config.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${config.apiKey}`,
-      },
-      body: JSON.stringify(body),
-    })
+    const post = (payload: Record<string, unknown>) =>
+      doFetch(`${config.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${config.apiKey}`,
+        },
+        body: JSON.stringify(payload),
+      })
+
+    let response = await post(body)
+
+    /**
+     * `response_format` 被拒时去掉它重试一次。
+     *
+     * 有的厂商会明确说 "This response_format type is unavailable now"
+     * （DeepSeek 的当前模型就是这样），有的直接 400。这属于**同一个模型
+     * 换了服务端版本**，不是配置错误 —— 降级到"靠提示词要 JSON"仍然可用，
+     * 直接报错等于把一个本来能用的模型判死。
+     * 只重试一次：重试还不行就是真不行，不要瞒着用户反复烧额度。
+     */
+    if (!response.ok && body.response_format) {
+      const firstText = await response.clone().text().catch(() => '')
+      if (/response_format|json_schema|json_object|unavailable/i.test(firstText)) {
+        const { response_format: _dropped, ...withoutFormat } = body
+        void _dropped
+        response = await post(withoutFormat)
+      }
+    }
 
     if (!response.ok) {
       const text = await response.text()
