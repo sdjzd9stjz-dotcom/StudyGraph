@@ -3,6 +3,7 @@ import type { UserCtx } from '../llm/user.ts'
 import type { PrismaClient } from '../../../../packages/db/src/index.ts'
 import type { SpanResolver } from '../spans/resolver.ts'
 import type { ObjectStore } from '../storage/object-store.ts'
+import type { BoundSkill } from './skills.ts'
 
 /**
  * 节点执行器契约（规格原文，字段名不许改）。
@@ -24,6 +25,8 @@ export interface NodeExecutorRunCtx<P = unknown> {
   readonly canvasId: string
   readonly nodeId: string
   readonly objectStore: ObjectStore
+  /** F2：显式绑定到该节点的 skill（已按 slug 排序、已过滤 enabled=false） */
+  readonly skills: readonly BoundSkill[]
 }
 
 export interface NodeExecutor<P = unknown> {

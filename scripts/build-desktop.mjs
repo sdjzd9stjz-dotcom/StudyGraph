@@ -68,12 +68,25 @@ rmSync(electronExe, { force: true })
 // Electron 需要 resources/default_app.asar 之外的 app 目录；改名后的 exe 仍然读取 resources/app
 console.log('Electron 已复制 →', appDir)
 
-// 桌面主进程
+// 桌面主进程（pg.cjs 是内置数据库的生命周期模块，必须一起带上）
 copyFileSync(path.join(root, 'apps', 'desktop', 'main.cjs'), path.join(resources, 'app', 'main.cjs'))
+copyFileSync(path.join(root, 'apps', 'desktop', 'pg.cjs'), path.join(resources, 'app', 'pg.cjs'))
 writeFileSync(
   path.join(resources, 'app', 'package.json'),
   `${JSON.stringify({ name: 'studygraph', version: '0.0.0', main: 'main.cjs' }, null, 2)}\n`,
 )
+
+// ── 2.5 内置 PostgreSQL 运行时 ─────────────────────────────────────────────
+step('复制内置 PostgreSQL')
+const pgRuntime = path.join(root, 'vendor', 'pg16')
+if (!existsSync(path.join(pgRuntime, 'bin', 'pg_ctl.exe'))) {
+  console.error('❌ 缺少 vendor/pg16。请先运行：node scripts/prepare-pg-runtime.mjs')
+  process.exit(1)
+}
+// 放在 resources/pgsql：与 app-build 平级，pg.cjs 里按 process.resourcesPath/pgsql 找
+cpSync(pgRuntime, path.join(resources, 'pgsql'), { recursive: true })
+const pgManifest = JSON.parse(readFileSync(path.join(pgRuntime, 'PG-BUNDLE.json'), 'utf8'))
+console.log(`PostgreSQL ${pgManifest.postgres} + pgvector 已打包`)
 
 // ── 3. API 产物 ────────────────────────────────────────────────────────────
 step('复制 API 产物')
@@ -84,14 +97,23 @@ cpSync(path.join(root, 'packages', 'db', 'prisma'), path.join(appBuild, 'package
 // ── 4. Web 产物 ────────────────────────────────────────────────────────────
 step('复制 Web 产物')
 const standalone = path.join(root, 'apps', 'web', '.next', 'standalone')
-cpSync(standalone, path.join(appBuild, 'apps', 'web', '.next', 'standalone'), { recursive: true })
-// standalone 不含 static 与 public，必须单独复制，否则页面无样式
-cpSync(path.join(root, 'apps', 'web', '.next', 'static'), path.join(appBuild, 'apps', 'web', '.next', 'static'), {
-  recursive: true,
-})
+const standaloneOut = path.join(appBuild, 'apps', 'web', '.next', 'standalone')
+cpSync(standalone, standaloneOut, { recursive: true })
+
+// standalone 不含 static 与 public，必须单独复制。
+//
+// 位置很关键：Next 的 standalone server.js 是**从 cwd 下的 .next/static 提供静态资源**，
+// 而 main.cjs 把 cwd 设成 server.js 所在目录，即
+//   app-build/apps/web/.next/standalone/apps/web
+// 所以 static 必须落到 **standalone 内部** 的同级位置。
+// 早先复制到 app-build/apps/web/.next/static（少了一层 standalone）的后果是：
+// HTML 能出来，但所有 JS 与 CSS 都 404 —— 页面看起来"渲染了"，
+// 实际客户端永不水合，按钮的点击事件根本没绑上，点「新建画布」毫无反应。
+const webAppInStandalone = path.join(standaloneOut, 'apps', 'web')
+cpSync(path.join(root, 'apps', 'web', '.next', 'static'), path.join(webAppInStandalone, '.next', 'static'), { recursive: true })
 const publicDir = path.join(root, 'apps', 'web', 'public')
 if (existsSync(publicDir)) {
-  cpSync(publicDir, path.join(appBuild, 'apps', 'web', 'public'), { recursive: true })
+  cpSync(publicDir, path.join(webAppInStandalone, 'public'), { recursive: true })
 }
 
 // ── 5. API 运行时依赖（只装生产依赖，不带 devDependencies）────────────────

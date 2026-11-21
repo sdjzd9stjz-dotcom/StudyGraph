@@ -89,3 +89,269 @@ export async function fetchCanvasList(): Promise<Array<{ id: string; title: stri
   const payload = (await response.json()) as { canvases: Array<{ id: string; title: string; createdAt: string }> }
   return payload.canvases
 }
+
+export interface ProviderModelView {
+  id: string
+  modelId: string
+  displayName: string
+  contextWindow: number
+  capabilities: Record<string, unknown>
+  enabled?: boolean
+}
+
+export interface ProviderCredentialView {
+  id: string
+  label: string
+  last4: string
+  status: string
+  baseUrlOverride: string | null
+  createdAt: string
+}
+
+export interface ProviderView {
+  id: string
+  slug: string
+  name: string
+  protocol: 'OPENAI' | 'ANTHROPIC' | 'GEMINI'
+  baseUrl: string
+  docsUrl: string | null
+  keyRequired: boolean
+  isCustom: boolean
+  models: ProviderModelView[]
+  credentials: ProviderCredentialView[]
+}
+
+export interface ProviderPrefView {
+  taskType: string
+  credentialId: string
+  modelId: string
+}
+
+export interface ProvidersPayload {
+  encryptionReady: boolean
+  providers: ProviderView[]
+  preferences: ProviderPrefView[]
+  requiredCapabilities: Record<string, string | null>
+}
+
+export async function fetchProviders(): Promise<ProvidersPayload> {
+  const response = await fetch(`${API_BASE_URL}/v1/providers`, {
+    headers: { authorization: `Bearer ${serverToken()}` },
+    cache: 'no-store',
+  })
+  if (!response.ok) return { encryptionReady: false, providers: [], preferences: [], requiredCapabilities: {} }
+  return (await response.json()) as ProvidersPayload
+}
+
+export interface DueItem {
+  id: string
+  name: string
+  definition: string
+  canvasId: string
+  canvasTitle: string
+  dueAt: string
+  lastReviewedAt: string | null
+  isNew: boolean
+  reps: number
+  lapses: number
+  mastery: number
+}
+
+export interface DuePayload {
+  now: string
+  count: number
+  items: DueItem[]
+}
+
+export async function fetchDue(limit = 30): Promise<DuePayload> {
+  const response = await fetch(`${API_BASE_URL}/v1/reviews/due?limit=${limit}`, {
+    headers: { authorization: `Bearer ${serverToken()}` },
+    cache: 'no-store',
+  })
+  if (!response.ok) return { now: new Date().toISOString(), count: 0, items: [] }
+  return (await response.json()) as DuePayload
+}
+
+export interface ReviewStats {
+  dueCount: number
+  newCount: number
+  reviewedToday: number
+}
+
+export async function fetchReviewStats(): Promise<ReviewStats> {
+  const response = await fetch(`${API_BASE_URL}/v1/reviews/stats`, {
+    headers: { authorization: `Bearer ${serverToken()}` },
+    cache: 'no-store',
+  })
+  if (!response.ok) return { dueCount: 0, newCount: 0, reviewedToday: 0 }
+  return (await response.json()) as ReviewStats
+}
+
+export interface KnowledgeNode {
+  id: string
+  name: string
+  definition: string
+  status: string
+  mastery: number
+  dueAt: string
+  lastReviewedAt: string | null
+  reps: number
+  lapses: number
+}
+
+export interface KnowledgeEdge {
+  id: string
+  fromConceptId: string
+  toConceptId: string
+  status: string
+  rationale: string | null
+}
+
+export interface KnowledgeGraph {
+  nodes: KnowledgeNode[]
+  edges: KnowledgeEdge[]
+  stats: {
+    conceptCount: number
+    edgeCount: number
+    proposedEdges: number
+    byMastery: { new: number; weak: number; okay: number; strong: number }
+  }
+}
+
+export async function fetchKnowledgeGraph(canvasId: string): Promise<KnowledgeGraph | null> {
+  const response = await fetch(`${API_BASE_URL}/v1/canvases/${canvasId}/graph?view=knowledge`, {
+    headers: { authorization: `Bearer ${serverToken()}` },
+    cache: 'no-store',
+  })
+  if (!response.ok) return null
+  return (await response.json()) as KnowledgeGraph
+}
+
+export interface GroupView {
+  id: string
+  title: string
+  posX: number
+  posY: number
+  color: string
+  memberIds: string[]
+  usedBy: string[]
+}
+
+export async function fetchGroups(canvasId: string): Promise<GroupView[]> {
+  const response = await fetch(`${API_BASE_URL}/v1/canvases/${canvasId}/groups`, {
+    headers: { authorization: `Bearer ${serverToken()}` },
+    cache: 'no-store',
+  })
+  if (!response.ok) return []
+  const payload = (await response.json()) as { groups: GroupView[] }
+  return payload.groups
+}
+
+export interface SkillOption {
+  id: string
+  slug: string
+  name: string
+  description: string
+  version: number
+}
+
+/** 画布页要一次性拿到：全部技能 + 每个节点已绑定的技能名 */
+export async function fetchCanvasSkills(canvasId: string): Promise<{
+  skills: SkillOption[]
+  nodeSkills: Record<string, string[]>
+}> {
+  const [skillsResponse, canvasResponse] = await Promise.all([
+    fetch(`${API_BASE_URL}/v1/skills`, { headers: { authorization: `Bearer ${serverToken()}` }, cache: 'no-store' }),
+    fetch(`${API_BASE_URL}/v1/canvases/${canvasId}`, { headers: { authorization: `Bearer ${serverToken()}` }, cache: 'no-store' }),
+  ])
+
+  if (!skillsResponse.ok || !canvasResponse.ok) return { skills: [], nodeSkills: {} }
+
+  const skillsPayload = (await skillsResponse.json()) as { skills: SkillOption[] }
+  const canvasPayload = (await canvasResponse.json()) as { nodes: Array<{ id: string }> }
+
+  // 每个节点的绑定要单独查；节点数量在几十的量级，串行也不会慢
+  const pairs = await Promise.all(
+    canvasPayload.nodes.map(async (node) => {
+      const response = await fetch(`${API_BASE_URL}/v1/nodes/${node.id}/skills`, {
+        headers: { authorization: `Bearer ${serverToken()}` },
+        cache: 'no-store',
+      })
+      if (!response.ok) return [node.id, [] as string[]] as const
+      const payload = (await response.json()) as { skills: Array<{ name: string }> }
+      return [node.id, payload.skills.map((skill) => skill.name)] as const
+    }),
+  )
+
+  return { skills: skillsPayload.skills, nodeSkills: Object.fromEntries(pairs) }
+}
+
+export interface ErrorTagStat {
+  code: string
+  count: number
+  label: string
+  category: string
+}
+
+export interface ErrorStats {
+  range: string
+  attempts: number
+  wrongAttempts: number
+  taggedAttempts: number
+  untaggedWrong: number
+  distribution: ErrorTagStat[]
+  byCategory: Array<{ category: string; count: number }>
+}
+
+export async function fetchErrorTags(range = '30d'): Promise<ErrorStats> {
+  const response = await fetch(`${API_BASE_URL}/v1/analytics/error-tags?range=${range}`, {
+    headers: { authorization: `Bearer ${serverToken()}` },
+    cache: 'no-store',
+  })
+  if (!response.ok) {
+    return { range, attempts: 0, wrongAttempts: 0, taggedAttempts: 0, untaggedWrong: 0, distribution: [], byCategory: [] }
+  }
+  return (await response.json()) as ErrorStats
+}
+
+export interface ErrorCatalogEntry {
+  code: string
+  label: string
+  category: string
+  description: string | null
+}
+
+export async function fetchErrorCatalog(): Promise<ErrorCatalogEntry[]> {
+  const response = await fetch(`${API_BASE_URL}/v1/analytics/error-tags/catalog`, {
+    headers: { authorization: `Bearer ${serverToken()}` },
+    cache: 'no-store',
+  })
+  if (!response.ok) return []
+  const payload = (await response.json()) as { tags: ErrorCatalogEntry[] }
+  return payload.tags
+}
+
+export interface ProblemSummary {
+  id: string
+  type: string
+  stem: string
+  options: unknown
+  answer: unknown
+  judgeRule: string
+  difficulty: number
+  bloom: string
+  status: string
+  checkResult: unknown
+  attempts: number
+  concepts: Array<{ id: string; name: string }>
+}
+
+export async function fetchProblems(canvasId: string): Promise<ProblemSummary[]> {
+  const response = await fetch(`${API_BASE_URL}/v1/problems?canvasId=${canvasId}`, {
+    headers: { authorization: `Bearer ${serverToken()}` },
+    cache: 'no-store',
+  })
+  if (!response.ok) return []
+  const payload = (await response.json()) as { problems: ProblemSummary[] }
+  return payload.problems
+}

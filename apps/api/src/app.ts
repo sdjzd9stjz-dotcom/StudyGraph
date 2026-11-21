@@ -6,18 +6,30 @@ import type { PrismaClient } from '../../../packages/db/src/index.ts'
 import type { Env } from './env.ts'
 import { AppError, invalidJson, validationFailed } from './lib/errors.ts'
 import { createGuard } from './plugins/auth.ts'
-import { createApiKeyResolver } from './llm/credentials.ts'
+import { createApiKeyResolver, createTargetResolver } from './llm/credentials.ts'
 import { createGateway } from './llm/gateway.ts'
 import { registerBuiltinExecutors } from './nodes/executors/index.ts'
 import { assertRegistryReady } from './nodes/registry.ts'
 import { selfCheck } from './nodes/registry.ts'
+import { registerAssistantRoutes } from './routes/assistant.ts'
 import { registerCanvasRoutes } from './routes/canvases.ts'
+import { registerAnalyticsRoutes } from './routes/analytics.ts'
+import { registerAttemptRoutes } from './routes/attempts.ts'
+import { registerCompatRoutes } from './routes/compat.ts'
 import { registerConceptRoutes } from './routes/concepts.ts'
+import { registerDraftRoutes } from './routes/drafts.ts'
 import { registerEdgeRoutes } from './routes/edges.ts'
 import { registerGraphRoutes } from './routes/graph.ts'
+import { registerGroupRoutes } from './routes/groups.ts'
 import { registerNodeRoutes } from './routes/nodes.ts'
 import { registerRunRoutes } from './routes/run.ts'
+import { registerRunEventRoutes } from './routes/runs.ts'
+import { registerProblemRoutes } from './routes/problems.ts'
+import { registerProviderRoutes } from './routes/providers.ts'
 import { registerReviewRoutes } from './routes/review.ts'
+import { registerFsrsReviewRoutes } from './routes/reviews.ts'
+import { registerSourceRoutes } from './routes/sources.ts'
+import { registerSkillRoutes } from './routes/skills.ts'
 import { registerSystemRoutes } from './routes/system.ts'
 import { createObjectStore } from './storage/object-store.ts'
 
@@ -143,6 +155,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     accessKeyId: env.S3_ACCESS_KEY_ID,
     secretAccessKey: env.S3_SECRET_ACCESS_KEY,
     forcePathStyle: true,
+    localRoot: env.STUDYGRAPH_OBJECT_DIR,
   })
 
   // BYOK：按 userId 查 ProviderCredential → 解密；没有则回退 env；都没有 → null
@@ -156,19 +169,33 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     },
   })
 
+  const resolveTarget = createTargetResolver({ prisma, masterKey: env.BYOK_ENCRYPTION_KEY, env: { OPENAI_API_KEY: env.OPENAI_API_KEY, ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY, DEEPSEEK_API_KEY: env.DEEPSEEK_API_KEY } })
   const llm = createGateway({
     resolveApiKey,
+    resolveTarget,
     logger: { debug: (obj, msg) => app.log.debug(obj, msg) },
   })
 
   registerCanvasRoutes(app, { prisma, guard, objectStore })
   registerNodeRoutes(app, { prisma, guard })
   registerEdgeRoutes(app, { prisma, guard })
+  registerDraftRoutes(app, { prisma, guard, llm })
   registerGraphRoutes(app, { prisma, guard })
+  registerGroupRoutes(app, { prisma, guard })
+  registerAssistantRoutes(app, { prisma, guard, llm })
   registerRunRoutes(app, { prisma, guard, objectStore, llm })
+  registerRunEventRoutes(app, { prisma, guard })
   registerSystemRoutes(app, { guard, resolveApiKey })
+  registerSkillRoutes(app, { prisma, guard })
+  registerCompatRoutes(app, { prisma, guard, resolveTarget, masterKey: env.BYOK_ENCRYPTION_KEY })
+  registerAnalyticsRoutes(app, { prisma, guard })
+  registerAttemptRoutes(app, { prisma, guard })
   registerReviewRoutes(app, { prisma, guard })
+  registerFsrsReviewRoutes(app, { prisma, guard })
   registerConceptRoutes(app, { prisma, guard, objectStore })
+  registerSourceRoutes(app, { prisma, guard, objectStore })
+  registerProviderRoutes(app, { prisma, guard, masterKey: env.BYOK_ENCRYPTION_KEY })
+  registerProblemRoutes(app, { prisma, guard })
 
   return app
 }

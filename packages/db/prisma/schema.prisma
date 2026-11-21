@@ -316,6 +316,14 @@ model User {
   attempts         Attempt[]
   methodApps       MethodApplication[]
   providerKeys     ProviderCredential[]
+  /// 多供应商（规格 4 张表）
+  customProviders  Provider[]          @relation("CustomProviders")
+  userCredentials  UserCredential[]
+  modelPrefs       UserModelPref[]
+  reviewLogs       ReviewLog[]
+  skills           Skill[]             @relation("UserSkills")
+  drafts           GraphDraft[]        @relation("UserDrafts")
+  nodeGroups       NodeGroup[]         @relation("NodeGroupOwner")
   usage            UsageRecord[]
   webhookEndpoints WebhookEndpoint[]
 }
@@ -386,6 +394,8 @@ model Canvas {
   doc          CanvasDoc?
   layouts      CanvasViewLayout[]
   webhooks     WebhookEndpoint[]
+  drafts       GraphDraft[]
+  nodeGroups   NodeGroup[]
 
   @@index([ownerId])
   @@index([visibility, isTemplate])
@@ -460,6 +470,9 @@ model Node {
   runs      Run[]
   artifacts Artifact[]
   sources   Source[]
+  skills    NodeSkill[]
+  groupMembers NodeGroupMember[]
+  groupLinks   NodeGroupLink[]
 
   @@index([canvasId, type])
   @@index([canvasId, status])
@@ -647,12 +660,13 @@ model Concept {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  citations ConceptCitation[]
-  reviews   ConceptReview[]
-  edgesOut  ConceptEdge[]     @relation("ConceptEdgeFrom")
-  edgesIn   ConceptEdge[]     @relation("ConceptEdgeTo")
-  methods   MethodConcept[]
-  problems  ProblemConcept[]
+  citations  ConceptCitation[]
+  reviews    ConceptReview[]
+  reviewLogs ReviewLog[]
+  edgesOut   ConceptEdge[]     @relation("ConceptEdgeFrom")
+  edgesIn    ConceptEdge[]     @relation("ConceptEdgeTo")
+  methods    MethodConcept[]
+  problems   ProblemConcept[]
 
   @@unique([canvasId, name])
   @@index([canvasId, dueAt])
@@ -763,6 +777,9 @@ model Method {
   conditions Json
   /// ③ 步骤链 —— SolutionStep[]，每步必有 cue / why / conceptIds
   steps Json
+  /// ⑤ 最容易出错的地方（规格 method 节点的 falterAt）
+  falterAt String?
+
   /// ④ 结果自检手段
   checks Json
 
@@ -1103,4 +1120,271 @@ model ProviderCredential {
 
   @@unique([userId, provider, label])
   @@index([userId])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 多供应商与 BYOK（SG-SUP-M2 · 规格「多供应商与 BYOK」）
+//
+// 供应商是**数据**不是代码：预置目录由运维维护，学生只读；自定义 OpenAI 兼容端点
+// 由学生自己建。写死两三家覆盖不了校园网关、企业代理、本地 Ollama。
+// ═══════════════════════════════════════════════════════════════════════════
+
+enum ProviderProtocol {
+  OPENAI
+  ANTHROPIC
+  GEMINI
+}
+
+enum CredentialStatus {
+  UNVERIFIED
+  VALID
+  INVALID
+  RATE_LIMITED
+}
+
+/// 系统预置厂商目录（运维维护，学生只读）
+model Provider {
+  id          String           @id @default(cuid())
+  slug        String           @unique // openai | deepseek | moonshot | custom-xxx
+  name        String
+  protocol    ProviderProtocol
+  baseUrl     String
+  docsUrl     String? // 「去哪里拿 key」
+  byokEnabled Boolean          @default(true)
+  sortOrder   Int              @default(0)
+  /// 学生自己建的端点（可编辑/删除）；预置项为 false
+  isCustom    Boolean          @default(false)
+  ownerId     String? // 自定义供应商的创建者；预置项为空
+  owner       User?            @relation("CustomProviders", fields: [ownerId], references: [id], onDelete: Cascade)
+  keyRequired Boolean          @default(true) // Ollama 这类本地端点可以不要 key
+  createdAt   DateTime         @default(now())
+
+  models      ProviderModel[]
+  credentials UserCredential[]
+
+  @@index([ownerId])
+}
+
+model ProviderModel {
+  id            String   @id @default(cuid())
+  providerId    String
+  provider      Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  modelId       String // 请求时用的 model 名
+  displayName   String
+  contextWindow Int      @default(0)
+  maxOutput     Int?
+  /// { jsonObject: boolean, vision: boolean, reasoning: boolean, toolUse: boolean }
+  capabilities  Json     @default("{}")
+  /// 每百万 token；厂商不给价就留空，不要瞎填
+  inputPrice    Decimal? @db.Decimal(12, 6)
+  outputPrice   Decimal? @db.Decimal(12, 6)
+  enabled       Boolean  @default(true)
+
+  @@unique([providerId, modelId])
+  @@index([providerId])
+}
+
+/// 用户自己的凭据。**只进不出**
+model UserCredential {
+  id              String           @id @default(cuid())
+  userId          String
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  providerId      String
+  provider        Provider         @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  label           String           @default("default") // 用户自起名："我的 DeepSeek"
+  /// AES-256-GCM 密文（JSON：{ v, iv, tag, ciphertext }）
+  ciphertext      String
+  keyVersion      Int              @default(1) // 主密钥轮换时双版本并存
+  last4           String // 仅用于展示：sk-…a1b2
+  status          CredentialStatus @default(UNVERIFIED)
+  lastCheckedAt   DateTime?
+  lastError       String?
+  /// 自定义 OpenAI 兼容端点用；为空则用 Provider.baseUrl
+  baseUrlOverride String?
+  isActive        Boolean          @default(true)
+  createdAt       DateTime         @default(now())
+
+  modelPrefs UserModelPref[]
+
+  @@unique([userId, providerId, label])
+  @@index([userId])
+}
+
+/// 按任务类型的模型偏好（可选，不配则走默认路由）
+model UserModelPref {
+  id           String         @id @default(cuid())
+  userId       String
+  user         User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  taskType     String // chunk | extract | judge | quiz | check | variant | probe | method | solve
+  credentialId String
+  credential   UserCredential @relation(fields: [credentialId], references: [id], onDelete: Cascade)
+  modelId      String
+
+  @@unique([userId, taskType])
+  @@index([userId])
+}
+
+/// 每次复习的记账（M3 · FSRS 调度）。
+///
+/// 为什么单独一张表而不是只更新 Concept：FSRS 的参数拟合要用历史
+/// （哪次评分、当时的间隔与可提取性），而 Concept 上只留最新状态。
+/// 另外「今日到期」的统计也依赖这张表判断"今天已经复习过几次"。
+model ReviewLog {
+  id        String  @id @default(cuid())
+  conceptId String
+  concept   Concept @relation(fields: [conceptId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  grade ReviewGrade
+
+  /// 复习前的状态，用于拟合与回放
+  stateBefore     FsrsCardState @default(NEW)
+  stabilityBefore Float?
+  difficultyBefore Float?
+  elapsedDays     Float         @default(0)
+
+  stateAfter      FsrsCardState
+  stabilityAfter  Float
+  difficultyAfter Float
+  /// 排程给出的下次间隔（天）
+  scheduledDays   Float
+  dueAt           DateTime
+
+  createdAt DateTime @default(now())
+
+  @@index([conceptId, createdAt])
+  @@index([userId, createdAt])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// M4.5 · 新能力（F2 Skill / G1 草案）
+// ═══════════════════════════════════════════════════════════════════════════
+
+enum SkillScope {
+  BUILTIN
+  USER
+}
+
+enum DraftStatus {
+  PROPOSED
+  ACCEPTED
+  DISCARDED
+}
+
+/// F2 · 可加载的指令包。
+///
+/// 定位是「一段说明」，不是学习模块：在节点执行时作为额外上下文注入 system 前缀。
+/// **必须显式绑定到节点**（NodeSkill），不做全局自动加载 —— 全局加载会让
+/// 「为什么这次结果和上次不一样」变成无法回答的问题。
+model Skill {
+  id           String     @id @default(cuid())
+  slug         String     @unique
+  name         String
+  description  String
+  /// 注入 system 的正文
+  instructions String
+  /// 可选的辅助材料 [{ name, kind, content }]
+  assets       Json?
+  scope        SkillScope
+  /// scope=USER 时必填；读取必须带这个条件做隔离
+  ownerId      String?
+  owner        User?      @relation("UserSkills", fields: [ownerId], references: [id], onDelete: Cascade)
+  enabled      Boolean    @default(true)
+  /// 每次改动正文/开关都 +1；**进指纹**
+  version      Int        @default(1)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  nodes NodeSkill[]
+
+  @@index([scope, enabled])
+  @@index([ownerId])
+}
+
+/// 节点 ↔ skill 绑定。复合主键天然防重复绑定。
+model NodeSkill {
+  nodeId  String
+  node    Node   @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  skillId String
+  skill   Skill  @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@id([nodeId, skillId])
+  @@index([skillId])
+}
+
+/// G1 · 对话式编排的草案。与真实画布严格分离。
+///
+/// `proposal` 是**建议**不是事实：草案不落画布、不执行、不耗任务 token
+/// （生成草案那一次模型调用除外，且计入 UsageRecord）。
+model GraphDraft {
+  id        String      @id @default(cuid())
+  canvasId  String
+  canvas    Canvas      @relation(fields: [canvasId], references: [id], onDelete: Cascade)
+  ownerId   String
+  owner     User        @relation("UserDrafts", fields: [ownerId], references: [id], onDelete: Cascade)
+  /// 学生的原话
+  request   String
+  /// { nodes: [...], edges: [...] }
+  proposal  Json
+  status    DraftStatus @default(PROPOSED)
+  createdAt DateTime    @default(now())
+
+  @@index([canvasId, status])
+  @@index([ownerId])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 画布分组（用户 2026-11-21 要求）：把一部分节点打包成一个上下文单元
+//
+// 为什么不做成新节点类型：规格写死「共 17 个节点类型，不要多做」。
+// 分组是**画布层的视图组织 + 依赖聚合**，不是执行器，所以用独立表而不是塞进 NodeType。
+// 一个分组可被别的节点当作上下文引用（见 NodeGroupLink）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+model NodeGroup {
+  id       String @id @default(cuid())
+  canvasId String
+  canvas   Canvas @relation(fields: [canvasId], references: [id], onDelete: Cascade)
+
+  title  String
+  /// 折叠后在画布上的位置
+  posX   Float @default(0)
+  posY   Float @default(0)
+  color  String @default("#6366f1")
+  /// 打包后的上下文摘要：展开时用于给下游节点做输入
+  summary Json?
+
+  ownerId   String
+  owner     User   @relation("NodeGroupOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  members NodeGroupMember[]
+  links   NodeGroupLink[]
+
+  @@index([canvasId])
+}
+
+model NodeGroupMember {
+  groupId String
+  group   NodeGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  nodeId  String
+  node    Node      @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  @@id([groupId, nodeId])
+  @@index([nodeId])
+}
+
+/// 哪个节点把这个分组当作上下文
+model NodeGroupLink {
+  id      String @id @default(cuid())
+  groupId String
+  group   NodeGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  nodeId  String
+  node    Node      @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([groupId, nodeId])
+  @@index([nodeId])
 }

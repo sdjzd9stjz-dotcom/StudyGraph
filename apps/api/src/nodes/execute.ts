@@ -9,6 +9,7 @@ import type { ObjectStore } from '../storage/object-store.ts'
 import { collectDownstream } from '../domain/graph/dag.ts'
 import type { EdgeLike } from '../domain/graph/dag.ts'
 import { getExecutor } from './registry.ts'
+import { loadNodeSkills, skillFingerprintPayload } from './skills.ts'
 import { cardCacheIsCurrent } from './executors/card.ts'
 
 /**
@@ -56,22 +57,60 @@ async function collectInputs(
     where: { canvasId, toNodeId: nodeId, kind: 'DERIVED_FROM' },
     select: { fromNodeId: true, toPort: true },
   })
-  if (edges.length === 0) return { inputs: {}, hashes: [] }
+
+  /**
+   * 分组上下文：这个节点引用了哪些组，组里有哪些成员。
+   *
+   * 用户要求「把一部分节点打包成一个节点，用来做其它节点的上下文」。
+   * 打包时必须真的影响执行结果，否则它只是画布上的一个虚线框、没有任何作用。
+   *
+   * 成员的产物**按 fromNodeId 顺序**合并，保证同一组成员得到同样的输入
+   * （否则指纹会随查询顺序抖动，缓存永远命中不了）。
+   */
+  const groupLinks = await prisma.nodeGroupLink.findMany({
+    where: { nodeId, group: { canvasId } },
+    orderBy: { groupId: 'asc' },
+    select: { groupId: true, group: { select: { members: { select: { nodeId: true }, orderBy: { nodeId: 'asc' } } } } },
+  })
+
+  const upstreamNodeIds = [
+    ...edges.map((edge) => edge.fromNodeId),
+    ...groupLinks.flatMap((link) => link.group.members.map((member) => member.nodeId)),
+  ]
+
+  if (upstreamNodeIds.length === 0) return { inputs: {}, hashes: [] }
+
+  const portByNode = new Map(edges.map((edge) => [edge.fromNodeId, edge.toPort]))
 
   const artifacts: UpstreamArtifact[] = []
-  for (const edge of edges) {
+  for (const upstreamId of upstreamNodeIds) {
+    if (upstreamId === nodeId) continue // 组里不该包含自己，防御一下
     const artifact = await prisma.artifact.findFirst({
-      where: { nodeId: edge.fromNodeId },
+      where: { nodeId: upstreamId },
       orderBy: { createdAt: 'desc' },
       select: { hash: true, structured: true },
     })
-    if (artifact) artifacts.push({ hash: artifact.hash, structured: artifact.structured, port: edge.toPort })
+    if (artifact) {
+      artifacts.push({
+        hash: artifact.hash,
+        structured: artifact.structured,
+        port: portByNode.get(upstreamId) ?? 'context',
+      })
+    }
   }
 
   const inputs: Record<string, unknown> = {}
   for (const artifact of artifacts) {
     const structured = artifact.structured as Record<string, unknown> | null
     if (structured && typeof structured === 'object') Object.assign(inputs, structured)
+  }
+
+  // 分组来源单独列出来：执行器要区分"这是直接上游"还是"这是打包来的上下文"
+  if (groupLinks.length > 0) {
+    inputs.groupContext = groupLinks.map((link) => ({
+      groupId: link.groupId,
+      memberIds: link.group.members.map((member) => member.nodeId),
+    }))
   }
 
   return { inputs, hashes: artifacts.map((artifact) => artifact.hash) }
@@ -98,13 +137,21 @@ export async function executeNode(
     ? await executor.prepareFingerprintParams(node.params)
     : (node.params ?? {})
 
+  // F2：显式绑定到本节点的 skill（已过滤 enabled=false、按 slug 排序）
+  const skills = await loadNodeSkills(deps.prisma, node.id, deps.user.id)
+  const skillPayload = skillFingerprintPayload(skills)
+
   const route = node.type === 'EXTRACT' ? deps.llm.routeFor('extract') : null
   const modelUsed = route ? `${route.provider}/${route.model}` : null
   // An alias alone cannot prove which provider snapshot will answer the next request.
   const expectedVersion = route?.expectedVersion ?? route?.model ?? 'rule-based-v1'
   const fingerprintFor = (version: string) => computeFingerprint({
     upstreamArtifactHashes: hashes,
-    params: route ? { params: fingerprintParams, modelUsed } : fingerprintParams,
+    // skill 的 slug+version 进指纹：绑了新 skill 或改了正文都必须让缓存失效。
+    // 只放 slug+version 而不是全文 —— 正文改了 version 就会 +1，没必要把正文也塞进来。
+    params: route
+      ? { params: fingerprintParams, modelUsed, skills: skillPayload }
+      : { params: fingerprintParams, skills: skillPayload },
     modelVersion: version,
     promptVersion: executor.promptVersion,
   })
@@ -173,6 +220,7 @@ export async function executeNode(
       },
       user: deps.user,
       prisma: deps.prisma,
+      skills,
       canvasId: node.canvasId,
       nodeId: node.id,
       objectStore: deps.objectStore,

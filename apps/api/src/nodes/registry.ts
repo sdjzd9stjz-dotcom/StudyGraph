@@ -22,19 +22,11 @@ const REGISTRY = new Map<string, NodeExecutor>()
  * 自检要求 `implemented ∩ planned = ∅`，同类型既"已实现"又"还在计划里"会被判冲突。
  */
 export const PLANNED_PLAN: Partial<Record<NodeType, string>> = {
-  PREREQ: 'M3',
+
   QUIZ: 'M3',
   GRADE: 'M3',
   REVIEW: 'M3',
   GATE: 'M5',
-  PROBE: 'M5',
-  METHOD: 'M5',
-  SOLVE: 'M5',
-  DIAGNOSE: 'M5',
-  VARIANT: 'M6',
-  DISTRACTOR: 'M6',
-  CHECK: 'M6',
-  PAPER: 'M6',
 }
 
 export function registerExecutor(executor: NodeExecutor): void {

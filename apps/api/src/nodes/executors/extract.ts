@@ -4,6 +4,7 @@ import { conceptClaimsSchema } from '../../../../../packages/contracts/src/index
 import type { ChunkSet, ConceptClaims } from '../../../../../packages/contracts/src/index.ts'
 import { CLASSIFIER_VERSION, classifyClaim } from '../../spans/claim-support.ts'
 import type { ClaimVerdict } from '../../spans/claim-support.ts'
+import { composeSystemPrompt, HARD_RULE_SUMMARY } from '../skills.ts'
 import type { NodeExecutor } from '../contract.ts'
 
 /**
@@ -97,7 +98,8 @@ export const extractExecutor: NodeExecutor<ExtractParams> = {
       const result = await ctx.llm.complete({
         taskType: 'extract',
         messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
+          // F2：硬约束 → skill（按 slug 排序）→ 节点 prompt，顺序固定且进前缀缓存
+          { role: 'system', content: composeSystemPrompt(HARD_RULE_SUMMARY, ctx.skills, SYSTEM_PROMPT) },
           { role: 'user', content: userContent },
         ],
         jsonSchema: {

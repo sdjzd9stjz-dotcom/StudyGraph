@@ -1,6 +1,10 @@
 import type { TaskType } from './types.ts'
 
-export type ProviderId = 'openai' | 'anthropic' | 'deepseek'
+/**
+ * 厂商标识。**是开放的字符串**：多供应商之后，供应商来自数据表（含学生自建的
+ * custom-xxx），不可能再穷举成字面量联合类型。预置值：openai | deepseek | anthropic | …
+ */
+export type ProviderId = string
 
 export interface ModelRoute {
   readonly provider: ProviderId

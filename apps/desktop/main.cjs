@@ -13,9 +13,10 @@
 //   · 端口不能写死：学生机器上可能已经有别的东西占着 3000/3001。
 const { app, BrowserWindow, dialog, shell } = require('electron')
 const { spawn } = require('node:child_process')
-const net = require('node:net')
+const crypto = require('node:crypto')
 const path = require('node:path')
 const fs = require('node:fs')
+const { resolveDatabase, freePort } = require('./pg.cjs')
 
 const ROOT = path.resolve(__dirname, '..', '..')
 const IS_PACKAGED = app.isPackaged
@@ -23,18 +24,9 @@ const children = []
 
 const log = (...args) => console.log('[studygraph-desktop]', ...args)
 
-/** 让系统分配一个空闲端口再释放，避免"探测后被抢占"的竞态 */
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer()
-    server.unref()
-    server.on('error', reject)
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address()
-      server.close(() => resolve(port))
-    })
-  })
-}
+/** 内置库的句柄；退出时要同步停掉，否则残留 postmaster.pid */
+let database = null
+let shuttingDown = false
 
 async function waitForHttp(url, { timeoutMs = 90000, intervalMs = 400 } = {}) {
   const started = Date.now()
@@ -150,16 +142,57 @@ async function startWeb(port, apiPort, env) {
   log(`Web 就绪 :${port}`)
 }
 
+/**
+ * BYOK 主密钥（AES-256-GCM 的 32 字节）。
+ *
+ * 学生机器上不可能有人去配 `BYOK_ENCRYPTION_KEY` 环境变量，所以首次启动自动生成并落盘（0600）。
+ * 主密钥丢了 = 已存的厂商密钥全部解不开，因此它和数据目录同生共死：
+ * 卸载保留数据时它也保留，删数据时一起删。
+ */
+function ensureByokKey(baseDir) {
+  if (!baseDir) return null
+  const keyFile = path.join(baseDir, 'byok-key.json')
+  try {
+    const saved = JSON.parse(fs.readFileSync(keyFile, 'utf8'))
+    if (typeof saved.key === 'string' && Buffer.from(saved.key, 'base64').length === 32) return saved.key
+  } catch {
+    // 不存在或损坏：重新生成（损坏时旧密文已无法解开，只能重新录入）
+  }
+  const key = crypto.randomBytes(32).toString('base64')
+  fs.writeFileSync(keyFile, `${JSON.stringify({ key }, null, 2)}\n`, { mode: 0o600 })
+  log('已生成 BYOK 主密钥：', keyFile)
+  return key
+}
+
 async function boot() {
   const env = readEnvFile()
-  if (!env.DATABASE_URL) {
-    throw new Error('缺少 DATABASE_URL。桌面版将内置数据库，当前开发阶段请先在仓库根 .env 配置。')
-  }
+
+  // 内置 PostgreSQL：安装目录里带一份官方 PG16 + pgvector，数据落在用户数据目录。
+  // .env 里显式给了 DATABASE_URL 就用外部库（开发期连 Docker PG 时走这条）。
+  database = await resolveDatabase({
+    env,
+    bundleDir: IS_PACKAGED ? path.join(process.resourcesPath, 'pgsql') : path.join(ROOT, 'vendor', 'pg16'),
+    migrationsDir: resourcePath('packages', 'db', 'prisma', 'migrations'),
+    log,
+  })
+  log(`数据库模式：${database.mode}`)
+
   const apiPort = await freePort()
   const webPort = await freePort()
   log(`启动：api=${apiPort} web=${webPort} packaged=${IS_PACKAGED}`)
-  await startApi(apiPort, env)
-  await startWeb(webPort, apiPort, env)
+  // 本机身份：内置库里的用户与 PAT 由 pg.cjs 首次启动时自建。
+  // Web 端服务端渲染与客户端请求都用它，明文只走进程环境变量，不写进任何构建产物。
+  const authEnv = database.localToken ? { STUDYGRAPH_DEV_PAT: database.localToken } : {}
+
+  // 课件存放在本机（桌面版没有 S3）：<数据目录>/objects
+  const storageEnv = database.baseDir ? { STUDYGRAPH_OBJECT_DIR: path.join(database.baseDir, 'objects') } : {}
+
+  // BYOK 主密钥：没配就自动生成，否则用户在界面上录厂商密钥会被拒（那是设计如此，见 providers.ts）
+  const byokKey = env.BYOK_ENCRYPTION_KEY ?? ensureByokKey(database.baseDir)
+  const byokEnv = byokKey ? { BYOK_ENCRYPTION_KEY: byokKey } : {}
+
+  await startApi(apiPort, { ...env, ...authEnv, ...storageEnv, ...byokEnv, DATABASE_URL: database.databaseUrl })
+  await startWeb(webPort, apiPort, { ...env, ...authEnv })
   return `http://127.0.0.1:${webPort}/`
 }
 
@@ -175,11 +208,17 @@ function createWindow(url) {
     shell.openExternal(target)
     return { action: 'deny' }
   })
-  window.loadURL(url)
-
   // 冒烟钩子：设置 STUDYGRAPH_SHOT=<文件路径> 时，页面加载完成后截图并退出。
   // 用途是给"桌面壳真的能渲染界面"留下可复现的证据，而不是靠人眼看窗口。
+  // STUDYGRAPH_SHOT_ROUTE 可指定具体路由（如 /settings），**只导航一次**：
+  // 先跳首页再跳目标页会让两个 did-finish-load 监听互相抢，截到
+  // chrome-error://chromewebdata 这种半截状态（已实测）。
   const shotPath = process.env.STUDYGRAPH_SHOT
+  // 路由可以写成 `settings` 或 `/settings`：Git Bash 会把以 / 开头的环境变量值
+  // 当作路径转换掉（实测变成 C:/.../PortableGit/settings），所以两种写法都要认，且要归一化。
+  const rawRoute = (process.env.STUDYGRAPH_SHOT_ROUTE ?? '').replace(/^.*\/PortableGit\//, '/').replace(/^\/?/, '/')
+  const targetUrl = shotPath && rawRoute !== '/' ? new URL(rawRoute, url).toString() : url
+
   if (shotPath) {
     window.webContents.once('did-finish-load', async () => {
       // 等首屏数据（概念卡由客户端 fetch 填充）落定
@@ -198,10 +237,25 @@ function createWindow(url) {
     })
   }
 
+  window.loadURL(targetUrl)
   return window
 }
 
 app.on('window-all-closed', () => app.quit())
+
+// 单实例锁：第二个实例若照常启动，会把第一个实例正在用的数据库停掉再按新端口起，
+// 正在读写的那份数据就落在半截状态里。抢不到锁就把已有窗口叫到前面，自己退出。
+const gotLock = app.requestSingleInstanceLock()
+if (!gotLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    const [window] = BrowserWindow.getAllWindows()
+    if (!window) return
+    if (window.isMinimized()) window.restore()
+    window.focus()
+  })
+}
 
 app.whenReady().then(async () => {
   try {
@@ -214,8 +268,29 @@ app.whenReady().then(async () => {
   }
 })
 
-for (const signal of ['SIGINT', 'SIGTERM', 'before-quit']) {
+function killChildren() {
+  for (const { child } of children) if (!child.killed) child.kill()
+}
+
+for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
-    for (const { child } of children) if (!child.killed) child.kill()
+    killChildren()
+    if (database) database.stop().catch(() => {})
   })
 }
+
+// 退出顺序：先收 API/Web（它们还连着库），再停 postgres。
+// 用 preventDefault 等停库真的完成 —— 直接 quit 会让 postgres 变孤儿进程，
+// 下次启动时残留的 postmaster.pid 会把"启动失败"甩给用户。
+app.on('before-quit', (event) => {
+  if (shuttingDown || !database) return
+  shuttingDown = true
+  event.preventDefault()
+  killChildren()
+  Promise.resolve(database.stop())
+    .catch((error) => log('停止内置库失败：', error instanceof Error ? error.message : String(error)))
+    .finally(() => {
+      database = null
+      app.quit()
+    })
+})

@@ -10,6 +10,12 @@ const schema = z.object({
   API_PORT: z.coerce.number().int().positive().max(65535).default(3001),
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
 
+  /**
+   * 桌面版的本地对象存储根目录（不配 S3 时生效）。
+   * 学生机器上没有 Docker、也没有对象存储服务，课件得落在本机。
+   */
+  STUDYGRAPH_OBJECT_DIR: z.string().optional(),
+
   S3_ENDPOINT: z.string().url().optional(),
   S3_BUCKET: z.string().optional(),
   S3_REGION: z.string().optional(),

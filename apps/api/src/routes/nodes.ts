@@ -132,4 +132,22 @@ export function registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDeps): v
       runCreated: false,
     }
   })
+
+  /**
+   * 删除节点。
+   *
+   * 级联删除的边界由数据库外键决定：连线、产物、运行记录、绑定都随节点一起走，
+   * 但**分组不会被删** —— 组只是「这几个节点一起看」，成员没了组可能还有别的成员。
+   */
+  app.delete('/v1/nodes/:id', { preHandler: guard('CANVAS_WRITE') }, async (request, reply) => {
+    const auth = getAuth(request)
+    const { id } = request.params as { id: string }
+
+    const node = await prisma.node.findUnique({ where: { id }, select: { canvasId: true } })
+    if (!node) throw nodeNotFound(id)
+    await requireCanvasWrite(prisma, node.canvasId, auth.user.id)
+
+    await prisma.node.delete({ where: { id } })
+    return reply.status(204).send()
+  })
 }
