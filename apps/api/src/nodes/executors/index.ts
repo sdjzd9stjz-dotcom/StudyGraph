@@ -16,6 +16,8 @@ import { gateExecutor } from './gate.ts'
 import { gradeExecutor } from './grade.ts'
 import { quizExecutor } from './quiz.ts'
 import { reviewExecutor } from './review.ts'
+import { deepenExecutor } from './deepen.ts'
+import { lectureExecutor } from './lecture.ts'
 
 /**
  * 内置执行器注册。**这里是"实现了哪些节点"的唯一清单**——
@@ -42,6 +44,8 @@ export function registerBuiltinExecutors(): void {
     distractorExecutor,
     checkExecutor,
     paperExecutor,
+    deepenExecutor,
+    lectureExecutor,
   ]) {
     if (!hasExecutor(executor.type)) registerExecutor(executor)
   }
@@ -57,4 +61,6 @@ export {
   gradeExecutor,
   reviewExecutor,
   gateExecutor,
+  deepenExecutor,
+  lectureExecutor,
 }

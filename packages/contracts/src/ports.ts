@@ -28,13 +28,26 @@ export const PORT_TYPES = [
   'GradeResult',
   'ReviewPlan',
   'PaperSpec',
+  /** 深入理解：核心观点（可回指知识卡与题目） */
+  'DeepInsight',
+  /** 讲义：多节点问答归纳出的成稿 */
+  'LectureDoc',
 ] as const
 
 export type PortType = (typeof PORT_TYPES)[number]
 
 export interface PortSpec {
   readonly name: string
+  /** 主类型。`accepts` 存在时，它只是"默认显示"的那一个，判定以 accepts 为准。 */
   readonly type: PortType
+  /**
+   * 这个入口还能接受哪些上游类型（联合入口）。
+   *
+   * 「深入理解」只该吃知识卡和题目，「导出讲义」要把整张图都收进来 ——
+   * 它们不可能各配七八个同名端口，所以允许一个端口收多种类型。
+   * 不填时等价于 `[type]`，旧端口的行为完全不变。
+   */
+  readonly accepts?: readonly PortType[]
   /**
    * 入口端口：数据来自画布外部（粘贴题目 / 上传作答），不由连线供给。
    * 向这类端口连线必须 400（EDGE_PORT_EXTERNAL），UI 上渲染成"上传/粘贴槽"而不是连接点。
@@ -48,7 +61,7 @@ export interface NodePorts {
 }
 
 /**
- * 17 个节点的端口声明。
+ * 各节点的端口声明。
  * `source` 没有输入端口：文件来自 params / 上传，不来自上游节点。
  */
 export const NODE_PORTS: Readonly<Record<NodeType, NodePorts>> = {
@@ -89,6 +102,45 @@ export const NODE_PORTS: Readonly<Record<NodeType, NodePorts>> = {
   DISTRACTOR: { inputs: [{ name: 'in', type: 'ProblemSet' }], outputs: [{ name: 'out', type: 'ProblemSet' }] },
   CHECK: { inputs: [{ name: 'in', type: 'ProblemSet' }], outputs: [{ name: 'out', type: 'VerifiedProblems' }] },
   PAPER: { inputs: [{ name: 'in', type: 'VerifiedProblems' }], outputs: [{ name: 'out', type: 'PaperSpec' }] },
+
+  /**
+   * 深入理解：**只**接受知识卡与题目，没有别的入口。
+   * 这不是提示词约束 —— 端口判定在 UI 与服务端双重执行，连不上就是连不上。
+   */
+  DEEPEN: {
+    inputs: [{ name: 'in', type: 'ConceptCardSet', accepts: ['ConceptCardSet', 'ProblemSet'] }],
+    outputs: [{ name: 'out', type: 'DeepInsight' }],
+  },
+  /**
+   * 导出讲义：把画布上任意节点的产出与对话收进来归纳成一份讲义。
+   * 接受所有「节点产出」类型（不含外部输入端口的那种）。
+   */
+  LECTURE: {
+    inputs: [
+      {
+        name: 'context',
+        type: 'ConceptCardSet',
+        accepts: [
+          'SourceDoc',
+          'ChunkSet',
+          'ConceptClaims',
+          'ConceptCardSet',
+          'GraphPatch',
+          'ProblemSet',
+          'VerifiedProblems',
+          'ProbeProfile',
+          'MethodCard',
+          'SolutionTrace',
+          'Diagnosis',
+          'GradeResult',
+          'ReviewPlan',
+          'PaperSpec',
+          'DeepInsight',
+        ],
+      },
+    ],
+    outputs: [{ name: 'out', type: 'LectureDoc' }],
+  },
 }
 
 /** 服务端 400 的 errorCode。与 docs/milestone-1.md §1 的校验顺序一一对应。 */
@@ -165,16 +217,19 @@ export function validateConnection(input: ConnectionInput): ConnectionCheck {
     }
   }
 
-  if (from.type !== to.type) {
+  // 联合入口：`accepts` 里任一类型都算匹配；没写 accepts 就是严格同名（旧行为）
+  const accepted = to.accepts ?? [to.type]
+  if (!accepted.includes(from.type)) {
     return {
       ok: false,
       code: 'EDGE_PORT_TYPE_MISMATCH',
-      message: `端口类型不匹配：${input.fromType}.${from.name}(${from.type}) → ${input.toType}.${to.name}(${to.type})`,
+      message: `端口类型不匹配：${input.fromType}.${from.name}(${from.type}) → ${input.toType}.${to.name}(${accepted.join(' | ')})`,
       details: {
         fromPort: from.name,
         fromPortType: from.type,
         toPort: to.name,
         toPortType: to.type,
+        accepted,
       },
     }
   }

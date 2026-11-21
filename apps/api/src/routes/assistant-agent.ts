@@ -2,6 +2,7 @@ import { NODE_TYPES, defaultPortName, isNodeType, validateConnection } from '../
 import type { NodeType } from '../../../../packages/contracts/src/index.ts'
 import type { PrismaClient } from '../../../../packages/db/src/index.ts'
 import { summarizeArtifact } from '../domain/artifact-text.ts'
+import { splitCardsForConcepts } from '../domain/split-cards.ts'
 import type { AgentMessage, LLMGateway, ToolSpec } from '../llm/types.ts'
 
 /**
@@ -30,6 +31,17 @@ export const CANVAS_TOOLS: readonly ToolSpec[] = [
     name: 'list_canvas',
     description: '查看当前画布的全部节点与连线（含节点 id、类型、标题、状态）。改动前后都可以调用。',
     parameters: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'split_cards',
+    description:
+      '把一个概念抽取节点里的概念**按知识点拆成多个知识卡节点**（一个概念一个节点），并自动连好 EXTRACT → CARD。用户要"知识卡"时优先用它，而不是建一个塞满所有卡的单节点。',
+    parameters: {
+      type: 'object',
+      properties: { extractNodeId: { type: 'string', description: '概念抽取节点的 id' } },
+      required: ['extractNodeId'],
+      additionalProperties: false,
+    },
   },
   {
     name: 'read_node_output',
@@ -189,6 +201,38 @@ export async function executeCanvasTool(
         })),
         edges: edges.map((edge) => ({ id: edge.id, from: edge.fromNodeId, to: edge.toNodeId })),
       })
+    }
+
+    case 'split_cards': {
+      const extractNodeId = stringArg(args, 'extractNodeId')
+      if (!extractNodeId) return fail('缺少 extractNodeId')
+      const extract = await deps.prisma.node.findFirst({
+        where: { id: extractNodeId, canvasId: deps.canvasId, type: 'EXTRACT' },
+        select: { id: true },
+      })
+      if (!extract) return fail('这个节点不是当前画布上的概念抽取节点')
+
+      const outcome = await splitCardsForConcepts(deps.prisma, {
+        canvasId: deps.canvasId,
+        extractNodeId,
+      })
+      return {
+        result: {
+          ok: true,
+          created: outcome.created.length,
+          skipped: outcome.skipped.length,
+          concepts: outcome.created.map((node) => node.conceptName),
+        },
+        ...(outcome.created.length > 0
+          ? {
+              change: {
+                kind: 'create-node' as const,
+                id: `split-${extractNodeId}-${Date.now()}`,
+                label: `按概念拆出 ${outcome.created.length} 张知识卡`,
+              },
+            }
+          : {}),
+      }
     }
 
     case 'read_node_output': {
@@ -421,6 +465,8 @@ const SYSTEM_RULES = [
   '2. 用户问画布内容时，先用 read_node_output 读对应节点的产出，再依据读到的内容回答；读不到就说"这个节点的产出里没有"，不要编。',
   '3. 只有用户明确要求删除时才调用 delete_node / delete_edge。',
   '4. 不要重复创建用户已经有的节点类型，除非用户明确要求。',
+  '4a. 用户要"知识卡"时，如果画布上已有概念抽取节点且跑过，用 split_cards 按概念拆成一概念一节点；不要建一个塞满所有卡的单节点。',
+  '4b. DEEPEN（深入理解）只接受知识卡与题目的连线；LECTURE（导出讲义）接受任意节点产出，用来汇总成讲义。',
   '5. **永远不要执行节点**（不要假装运行）——运行只能由用户点节点上的 ▶。',
   '6. 不许编造 id：只用 list_canvas / 上面状态里给出的 id。工具报错就照错误信息修正，不要重试同样的参数。',
   '7. 回复用中文，简短、具体。',

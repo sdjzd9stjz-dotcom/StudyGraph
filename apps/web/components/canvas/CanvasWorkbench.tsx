@@ -12,11 +12,13 @@ import {
   useReactFlow,
 } from '@xyflow/react'
 import type { Connection, Edge as FlowEdge, Node as FlowNode } from '@xyflow/react'
+import { useRouter } from 'next/navigation'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { NODE_PORTS, validateConnection } from '../../../../packages/contracts/src/client'
 import type { NodeType } from '../../../../packages/contracts/src/client'
 import { ADVANCED_NODES, PRIMARY_NODES, nodeLabel, nodeColor } from '../../lib/canvas-meta'
+import { renderLectureHtml } from '../../lib/lecture-html'
 import { decideGate } from '../../lib/api'
 import { AssistantBar } from './AssistantBar'
 import { ContextMenu } from './ContextMenu'
@@ -127,9 +129,40 @@ function Inner({
   useEffect(() => {
     const incoming = initialNodes.map((node) => toFlowNode(node, skillsByNode))
     setNodes((current) => {
+      const byId = new Map(incoming.map((node) => [node.id, node]))
+
+      // 已存在的节点：只同步服务端字段（状态、产出摘要、标题、参数），保留本地位置与选中态。
+      // 以前这里只追加不更新 —— 运行完节点后卡片上还是旧摘要，必须手动刷新页面（真实踩过）。
+      const merged = current.map((node) => {
+        const fresh = byId.get(node.id)
+        if (!fresh) return node
+        const data = node.data as SgNodeData
+        const updated = fresh.data as SgNodeData
+        const same =
+          data.status === updated.status &&
+          data.outputSummary === updated.outputSummary &&
+          data.title === updated.title &&
+          data.skills === updated.skills
+        return same
+          ? node
+          : {
+              ...node,
+              data: {
+                ...node.data,
+                status: updated.status,
+                outputSummary: updated.outputSummary,
+                title: updated.title,
+                skills: updated.skills,
+                inputs: updated.inputs,
+                outputs: updated.outputs,
+              },
+            }
+      })
+
       const known = new Set(current.map((node) => node.id))
       const added = incoming.filter((node) => !known.has(node.id))
-      return added.length === 0 ? current : [...current, ...added]
+      const changed = added.length > 0 || merged.some((node, index) => node !== current[index])
+      return changed ? [...merged, ...added] : current
     })
   }, [initialNodes, skillsByNode, setNodes])
   const [edges, setEdges, onEdgesChange] = useEdgesState<FlowEdge>(
@@ -177,6 +210,7 @@ function Inner({
   const { screenToFlowPosition, getViewport } = useReactFlow()
 
   const headers = { 'content-type': 'application/json', authorization: `Bearer ${token}` }
+  const router = useRouter()
 
   /**
    * 双击空白 → 节点搜索。
@@ -282,6 +316,8 @@ function Inner({
         } else {
           notify(`执行${body?.status === 'SUCCEEDED' ? '成功' : `：${body?.status}`}`)
           setNodes((current) => current.map((node) => (node.id === nodeId ? { ...node, data: { ...node.data, status: body?.status ?? 'READY' } } : node)))
+          // 产物变了，卡片上那段摘要也要跟着变 —— 否则学生要手动刷新才看得到运行结果
+          router.refresh()
         }
       } finally {
         setNodes((current) => current.map((node) => (node.id === nodeId ? { ...node, data: { ...node.data, running: false } } : node)))
@@ -321,6 +357,47 @@ function Inner({
       notify('参数已保存，需要点 ▶ 重新运行才生效')
     },
     [apiBaseUrl, headers, notify, setNodes],
+  )
+
+  /**
+   * 导出讲义 PDF。
+   *
+   * 正文从服务端取（`GET /v1/nodes/:id/lecture`）—— 画布上那段 `outputSummary`
+   * 只是给人看的摘要，拿去打印会把讲义变成一张目录。
+   * 真正的打印由桌面主进程完成（Chromium 的 printToPDF），浏览器里没有这座桥，
+   * 所以这里明确告诉用户"只在桌面版可用"，而不是静默失败。
+   */
+  const exportLecture = useCallback(
+    async (nodeId: string) => {
+      const response = await fetch(`${apiBaseUrl}/v1/nodes/${nodeId}/lecture`, {
+        headers: { authorization: `Bearer ${token}` },
+      })
+      const data = (await response.json().catch(() => null)) as
+        | { title?: string; markdown?: string; error?: { message?: string } }
+        | null
+      if (!response.ok) {
+        notify(data?.error?.message ?? `还没有讲义（HTTP ${response.status}），先运行这个节点`)
+        return
+      }
+
+      const html = renderLectureHtml(String(data?.title ?? '课程讲义'), String(data?.markdown ?? ''))
+      const bridge = (window as unknown as {
+        studygraph?: { savePdf?: (html: string, name: string) => Promise<{ ok: boolean; filePath?: string; canceled?: boolean; error?: string }> }
+      }).studygraph
+
+      if (!bridge?.savePdf) {
+        notify('导出 PDF 需要桌面版客户端（浏览器预览里没有打印桥）')
+        return
+      }
+
+      const result = await bridge.savePdf(html, String(data?.title ?? '课程讲义'))
+      if (!result.ok) {
+        if (!result.canceled) notify(`导出失败：${result.error ?? '未知错误'}`)
+        return
+      }
+      notify(`已导出：${result.filePath}`)
+    },
+    [apiBaseUrl, notify, token],
   )
 
   /**
@@ -540,12 +617,13 @@ function Inner({
             onGateDecision: decideGateNode,
             onSaveParams: saveNodeParams,
             onChat: (nodeId: string) => setChatTarget({ id: nodeId, title: String(node.data.title ?? node.data.label ?? node.data.nodeType), type: String(node.data.nodeType) }),
+            onExport: exportLecture,
             connectHighlight,
             portState,
           },
         }
       }),
-    [nodes, runNode, deleteNode, openPrompt, decideGateNode, saveNodeParams, connectDraft],
+    [nodes, runNode, deleteNode, openPrompt, decideGateNode, saveNodeParams, exportLecture, connectDraft],
   )
 
   // ── 连线 ────────────────────────────────────────────────────────────────

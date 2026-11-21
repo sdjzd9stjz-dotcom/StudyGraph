@@ -75,6 +75,22 @@ function registerNodeChat(app: FastifyInstance, deps: AssistantRouteDeps): void 
     if (!node) throw new AppError(404, 'NODE_NOT_FOUND', '节点不存在', { nodeId: id })
     await requireCanvasWrite(prisma, node.canvasId, auth.user.id)
 
+    /**
+     * 对话落库（用户 2026-11-21 要求：连线 = 上游对话总结作为下游上下文）。
+     *
+     * 先把用户这句写进去：模型失败时这段对话也还在，不会因为一次 401 就丢。
+     * 历史一律从库里取，不再信任客户端回传的 history —— 客户端有、服务端没有的话，
+     * 同一条对话在"节点里"和"下游提示词里"会长得不一样。
+     */
+    await prisma.nodeMessage.create({ data: { nodeId: id, role: 'user', content: body.message } })
+    const recent = await prisma.nodeMessage.findMany({
+      where: { nodeId: id },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+      select: { role: true, content: true },
+    })
+    const history = recent.reverse()
+
     const artifact = await prisma.artifact.findFirst({
       where: { nodeId: id },
       orderBy: { createdAt: 'desc' },
@@ -85,8 +101,10 @@ function registerNodeChat(app: FastifyInstance, deps: AssistantRouteDeps): void 
     const label = node.title ?? node.type
 
     if (!artifact) {
+      const replyText = `「${label}」这个节点还没跑过，没有内容可以讨论。先点节点上的 ▶ 跑一次，我就能就它的结果和你聊。`
+      await prisma.nodeMessage.create({ data: { nodeId: id, role: 'assistant', content: replyText } })
       return reply.status(200).send({
-        reply: `「${label}」这个节点还没跑过，没有内容可以讨论。先点节点上的 ▶ 跑一次，我就能就它的结果和你聊。`,
+        reply: replyText,
         output: null,
         source: 'offline',
       })
@@ -107,8 +125,7 @@ function registerNodeChat(app: FastifyInstance, deps: AssistantRouteDeps): void 
               '3. 内容里没有答案就说"这个节点的产出里没有"，并说明需要哪个节点提供\n' +
               '4. 不要建议执行节点，不要编造引文',
           },
-          ...(body.history ?? []).map((turn) => ({ role: turn.role, content: turn.text })),
-          { role: 'user', content: body.message },
+          ...history.map((turn) => ({ role: turn.role as 'user' | 'assistant', content: turn.content })),
         ],
         user: auth.user,
       })
@@ -127,19 +144,23 @@ function registerNodeChat(app: FastifyInstance, deps: AssistantRouteDeps): void 
       })
 
       const text = (result.data as { reply?: string } | undefined)?.reply
+      const replyText = typeof text === 'string' && text.trim().length > 0 ? text : '模型没有返回内容，换个问法再试一次。'
+      await prisma.nodeMessage.create({ data: { nodeId: id, role: 'assistant', content: replyText } })
       return reply.status(200).send({
-        reply: typeof text === 'string' && text.trim().length > 0 ? text : '模型没有返回内容，换个问法再试一次。',
+        reply: replyText,
         output: card,
         source: 'model',
       })
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error)
+      const replyText =
+        `现在还不能就内容回答（${reason}）。\n\n` +
+        '这个节点的产出是：\n' +
+        card.slice(0, 1200) +
+        '\n\n配好模型密钥后，我可以据此解释、追问、指出矛盾。'
+      await prisma.nodeMessage.create({ data: { nodeId: id, role: 'assistant', content: replyText } })
       return reply.status(200).send({
-        reply:
-          `现在还不能就内容回答（${reason}）。\n\n` +
-          '这个节点的产出是：\n' +
-          card.slice(0, 1200) +
-          '\n\n配好模型密钥后，我可以据此解释、追问、指出矛盾。',
+        reply: replyText,
         output: card,
         source: 'offline',
       })
@@ -151,6 +172,26 @@ export function registerAssistantRoutes(app: FastifyInstance, deps: AssistantRou
   const { prisma, guard, llm } = deps
 
   registerNodeChat(app, deps)
+
+  /**
+   * 读节点对话。刷新页面、换机器之后，节点里的会话还在 ——
+   * 它同时是下游节点的上下文来源，只存在浏览器里就不算"对话"。
+   */
+  app.get('/v1/nodes/:id/messages', { preHandler: guard('CANVAS_READ') }, async (request) => {
+    const auth = getAuth(request)
+    const { id } = request.params as { id: string }
+    const node = await prisma.node.findUnique({ where: { id }, select: { canvasId: true } })
+    if (!node) throw new AppError(404, 'NODE_NOT_FOUND', '节点不存在', { nodeId: id })
+    await requireCanvasWrite(prisma, node.canvasId, auth.user.id)
+
+    const messages = await prisma.nodeMessage.findMany({
+      where: { nodeId: id },
+      orderBy: { createdAt: 'asc' },
+      take: 100,
+      select: { id: true, role: true, content: true, createdAt: true },
+    })
+    return { messages }
+  })
 
   /**
    * 对话：模型拿工具直接操作画布。

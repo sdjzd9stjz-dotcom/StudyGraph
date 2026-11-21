@@ -255,6 +255,32 @@ export function summarizeArtifact(kind: string, structured: unknown): string {
       break
     }
 
+    case 'DEEP_INSIGHT': {
+      const points = asArray(data.points)
+      lines.push(`💡 核心观点 ${points.length} 条`)
+      for (const point of points.slice(0, 8)) {
+        const record = point as Record<string, unknown>
+        lines.push(`• ${clip(str(record.title) || str(record.insight), 40)}${str(record.insight) && str(record.title) ? `：${clip(str(record.insight), 70)}` : ''}`)
+        if (str(record.evidence)) lines.push(`   依据：${clip(str(record.evidence), 70)}`)
+      }
+      if (str(data.summary)) lines.push(clip(str(data.summary), 110))
+      break
+    }
+
+    case 'LECTURE_DOC': {
+      const outline = asArray(data.outline)
+      const markdown = str(data.markdown)
+      lines.push(`📘 讲义：${clip(str(data.title) || '未命名', 40)}`)
+      lines.push(`约 ${markdown.length} 字 · ${outline.length} 个章节`)
+      outline.slice(0, 8).forEach((heading, index) => {
+        lines.push(`${index + 1}. ${clip(str(heading), 70)}`)
+      })
+      if (outline.length === 0 && markdown.length > 0) {
+        lines.push(clip(markdown, 110))
+      }
+      break
+    }
+
     default: {
       lines.push(...genericLines(data).slice(0, MAX_LINES))
     }

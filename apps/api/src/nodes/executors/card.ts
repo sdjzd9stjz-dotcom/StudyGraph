@@ -49,12 +49,31 @@ export const cardExecutor: NodeExecutor = {
     const conceptClaims = ctx.inputs.conceptClaims as ConceptClaims | undefined
     if (!conceptClaims?.claims) throw nodeInputMissing('card 节点缺少上游 conceptClaims')
 
+    /**
+     * 一个节点只做一张卡（用户 2026-11-21 要求：知识卡按知识点拆成多个节点）。
+     *
+     * `params.conceptName` 由「按概念拆分」生成：每个 CARD 节点绑定一个概念，
+     * 点击运行时只产出自己那一张。不填时保持旧行为（全部 claims 都建卡），
+     * 这样以前画的画布不会因为升级而改变含义。
+     */
+    const conceptName =
+      typeof (ctx.params as { conceptName?: unknown } | null)?.conceptName === 'string'
+        ? ((ctx.params as { conceptName?: string }).conceptName ?? '').trim()
+        : ''
+    const claims = conceptName.length > 0
+      ? conceptClaims.claims.filter((claim) => claim.name === conceptName)
+      : conceptClaims.claims
+
+    if (conceptName.length > 0 && claims.length === 0) {
+      throw new Error(`上游概念里没有「${conceptName}」—— 它可能已被上游重新抽取掉了，请重新拆分`)
+    }
+
     const created: Array<{ conceptId: string; name: string; spanId: string; status: string }> = []
     const skipped: Array<{ name: string; reason: string }> = []
 
     const pages = await readPageTexts(ctx.objectStore, ctx.canvasId, conceptClaims.sourceId)
     if (!pages) throw new Error('无法读取引用原文')
-    for (const claim of conceptClaims.claims) {
+    for (const claim of claims) {
       // 只跳过 UNVERIFIED；PENDING_REVIEW 也建卡（引文可查，只是定义待人复核）
       if (claim.status === 'UNVERIFIED' || claim.spanIds.length === 0) {
         skipped.push({ name: claim.name, reason: `UNVERIFIED(${(claim.reasons ?? []).join(',') || '无原因'})` })

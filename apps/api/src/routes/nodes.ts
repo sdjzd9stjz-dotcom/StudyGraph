@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { NODE_TYPES, isNodeType } from '../../../../packages/contracts/src/index.ts'
 import type { PrismaClient } from '../../../../packages/db/src/index.ts'
 import { collectDownstream } from '../domain/graph/dag.ts'
+import { splitCardsForConcepts } from '../domain/split-cards.ts'
 import type { EdgeLike } from '../domain/graph/dag.ts'
 import { requireCanvasWrite } from '../lib/access.ts'
 import { AppError } from '../lib/errors.ts'
@@ -83,6 +84,56 @@ export function registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDeps): v
     })
 
     return reply.status(201).send(node)
+  })
+
+  /**
+   * 按概念拆分知识卡：一个概念 = 一个 CARD 节点。
+   *
+   * 用户 2026-11-21 要求「知识卡请按知识点分到多个节点中而非单一节点」。
+   * 拆出来的节点都是 DRAFT、都带 `params.conceptName`，运行时只产出自己那一张。
+   * 已经拆过的概念不会重复建（按 conceptName 判重）。
+   */
+  /**
+   * 取讲义原文（导出 PDF 用）。
+   *
+   * 前端拿到的 `outputSummary` 是给人看的摘要，不是正文；
+   * PDF 必须用完整 markdown，所以单独给一个只读接口。
+   */
+  app.get('/v1/nodes/:id/lecture', { preHandler: guard('CANVAS_READ') }, async (request) => {
+    const auth = getAuth(request)
+    const { id } = request.params as { id: string }
+    const node = await prisma.node.findUnique({
+      where: { id },
+      select: { canvasId: true, type: true, title: true },
+    })
+    if (!node) throw nodeNotFound(id)
+    await requireCanvasWrite(prisma, node.canvasId, auth.user.id)
+
+    const artifact = await prisma.artifact.findFirst({
+      where: { nodeId: id },
+      orderBy: { createdAt: 'desc' },
+      select: { kind: true, structured: true },
+    })
+    if (!artifact || artifact.kind !== 'LECTURE_DOC') {
+      throw new AppError(404, 'NODE_NOT_FOUND', '这个节点还没有讲义（先运行一次导出讲义）', { nodeId: id })
+    }
+    const data = artifact.structured as { title?: unknown; markdown?: unknown; outline?: unknown } | null
+    return {
+      title: typeof data?.title === 'string' ? data.title : (node.title ?? '课程讲义'),
+      markdown: typeof data?.markdown === 'string' ? data.markdown : '',
+      outline: Array.isArray(data?.outline) ? data.outline : [],
+    }
+  })
+
+  app.post('/v1/nodes/:id/split-cards', { preHandler: guard('CANVAS_WRITE') }, async (request, reply) => {
+    const auth = getAuth(request)
+    const { id } = request.params as { id: string }
+    const node = await prisma.node.findUnique({ where: { id }, select: { canvasId: true } })
+    if (!node) throw nodeNotFound(id)
+    await requireCanvasWrite(prisma, node.canvasId, auth.user.id)
+
+    const outcome = await splitCardsForConcepts(prisma, { canvasId: node.canvasId, extractNodeId: id })
+    return reply.status(201).send(outcome)
   })
 
   app.patch('/v1/nodes/:id', { preHandler: guard('CANVAS_WRITE') }, async (request) => {

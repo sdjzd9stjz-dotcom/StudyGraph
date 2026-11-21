@@ -42,6 +42,8 @@ export interface SgNodeData {
   onSaveParams?: (nodeId: string, params: Record<string, unknown>) => void
   /** 打开这个节点的对话面板（每个节点自己就是一个会话） */
   onChat?: (nodeId: string) => void
+  /** LECTURE 专用：导出讲义 PDF（桌面版走主进程打印） */
+  onExport?: (nodeId: string) => void
   /** 节点当前参数，用于输入框回填 */
   params?: Record<string, unknown> | null
   /** GATE 当前是否已放行（来自 params.approved） */
@@ -268,6 +270,41 @@ export function SgNode({ id, data }: NodeProps) {
               拒绝
             </button>
           </span>
+        </div>
+      )}
+
+      {/*
+        导出讲义的打印入口。
+        放在标题栏下方而不是悬停面板里：导出是这类节点的**主要动作**，
+        藏起来等于没有；而且中文按钮在 18×18 的图标位里放不下。
+      */}
+      {d.nodeType === 'LECTURE' && (
+        <div
+          data-testid={`lecture-bar-${id}`}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            padding: '6px 9px',
+            background: '#f0fdfa',
+            borderBottom: '1px solid #ccfbf1',
+            fontSize: 11,
+          }}
+        >
+          <span style={{ color: '#0f766e', fontWeight: 600 }}>
+            {d.outputSummary?.startsWith('📘') ? '讲义已生成' : '运行后生成讲义'}
+          </span>
+          <button
+            type="button"
+            data-testid={`export-lecture-${id}`}
+            onClick={(event) => {
+              event.stopPropagation()
+              d.onExport?.(id)
+            }}
+            style={{ ...gateButton('#0f766e'), marginLeft: 'auto' }}
+          >
+            导出 PDF
+          </button>
         </div>
       )}
 

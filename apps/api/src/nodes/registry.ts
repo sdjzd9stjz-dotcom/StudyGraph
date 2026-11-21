@@ -9,7 +9,7 @@ import { registerBuiltinExecutors } from './executors/index.ts'
 /**
  * 执行器注册表 + 启动自检（SG-SUP-004 §3.3）。
  *
- * 自检的意义不是"17 个都实现了"，而是**不允许半实现悄悄上线**：
+ * 自检的意义不是"类型都实现了"，而是**不允许半实现悄悄上线**：
  * 已实现的有哪些、没实现的有哪些、调用没实现的会得到什么，三者必须同时可见。
  * 所以未实现的类型不是"缺失"，而是显式 `501 EXECUTOR_NOT_IMPLEMENTED`。
  */
@@ -24,15 +24,15 @@ const REGISTRY = new Map<string, NodeExecutor>()
 /**
  * 尚未实现的节点 → 计划里程碑。
  *
- * **现在是空的**：17 个 NodeType 全部有执行器。
- * 留这个结构是因为自检逻辑（缺计划要报问题、计划表里出现 17 之外的类型要报问题）
+ * **现在是空的**：全部 NodeType 都有执行器。
+ * 留这个结构是因为自检逻辑（缺计划要报问题、计划表里出现 NODE_TYPES 之外的类型要报问题）
  * 仍然要靠它区分"还没做但排了期" 和 "漏了"——把表删掉等于把这两种情况合并。
  */
 export const PLANNED_PLAN: Partial<Record<NodeType, string>> = {}
 
 export function registerExecutor(executor: NodeExecutor): void {
   if (!isNodeType(executor.type)) {
-    throw new Error(`registerExecutor: ${executor.type} 不在 17 个 NodeType 之内`)
+    throw new Error(`registerExecutor: ${executor.type} 不在 NodeType 列表之内`)
   }
   if (REGISTRY.has(executor.type)) {
     throw new Error(`registerExecutor: ${executor.type} 重复注册`)
@@ -47,7 +47,7 @@ export function implementedTypes(): NodeType[] {
 export interface SelfCheckReport {
   readonly implemented: NodeType[]
   readonly planned: NodeType[]
-  /** 已实现 ∪ 计划 的并集大小，必须等于 17 */
+  /** 已实现 ∪ 计划 的并集大小，必须等于 NODE_TYPES.length */
   readonly unionSize: number
   readonly ok: boolean
   readonly problems: string[]
@@ -56,7 +56,7 @@ export interface SelfCheckReport {
 }
 
 /**
- * 自检必须拿「已实现 ∪ 计划」与 `NODE_TYPES` 的 17 个值做**双向差集**，
+ * 自检必须拿「已实现 ∪ 计划」与 `NODE_TYPES` 的全部值做**双向差集**，
  * 而不是检查自己内部一致（SG-SUP-005 缺陷 C / SG-SUP-006 §2）。
  *
  * 三类问题分别检查：

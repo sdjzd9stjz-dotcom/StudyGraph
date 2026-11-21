@@ -71,6 +71,8 @@ console.log('Electron 已复制 →', appDir)
 // 桌面主进程（pg.cjs 是内置数据库的生命周期模块，必须一起带上）
 copyFileSync(path.join(root, 'apps', 'desktop', 'main.cjs'), path.join(resources, 'app', 'main.cjs'))
 copyFileSync(path.join(root, 'apps', 'desktop', 'pg.cjs'), path.join(resources, 'app', 'pg.cjs'))
+// preload：讲义 PDF 的唯一桥，漏复制会让打印按钮静默失效
+copyFileSync(path.join(root, 'apps', 'desktop', 'preload.cjs'), path.join(resources, 'app', 'preload.cjs'))
 writeFileSync(
   path.join(resources, 'app', 'package.json'),
   `${JSON.stringify({ name: 'studygraph', version: '0.0.0', main: 'main.cjs' }, null, 2)}\n`,

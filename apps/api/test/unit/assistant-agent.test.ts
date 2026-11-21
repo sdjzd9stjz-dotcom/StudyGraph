@@ -156,6 +156,7 @@ test('工具清单只包含画布操作，没有执行节点 / 文件 / 网络',
   const names = CANVAS_TOOLS.map((tool) => tool.name)
   assert.deepEqual(names, [
     'list_canvas',
+    'split_cards',
     'read_node_output',
     'create_node',
     'update_node',

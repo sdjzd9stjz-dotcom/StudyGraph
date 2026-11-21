@@ -62,6 +62,11 @@ enum NodeType {
   DISTRACTOR
   CHECK
   PAPER
+  // ── 第四批 · 知识网络（2）
+  /// 深入理解：只吃知识卡与题目，输出核心观点
+  DEEPEN
+  /// 导出讲义：把多个节点的产出与对话归纳成一份讲义
+  LECTURE
 }
 
 /// 节点三态 + 执行中 + 草稿。
@@ -114,6 +119,10 @@ enum ArtifactKind {
   GATE_DECISION
   OUTLINE_SKELETON
   DRAFT_SKELETON
+  /// 深入理解：核心观点及其出处
+  DEEP_INSIGHT
+  /// 导出讲义：可导出 PDF 的成稿
+  LECTURE_DOC
 }
 
 /// 概念之间的关系不进 Edge，进独立关系表。
@@ -477,11 +486,32 @@ model Node {
   skills    NodeSkill[]
   groupMembers NodeGroupMember[]
   groupLinks   NodeGroupLink[]
+  /// 节点自己的对话（每个节点就是一个会话）。连线时它的摘要会作为下游的上下文。
+  messages  NodeMessage[]
 
   @@index([canvasId, type])
   @@index([canvasId, status])
   /// 供 Edge 的复合外键使用：保证一条边的两个端点属于同一画布
   @@unique([canvasId, id])
+}
+
+/// 节点对话的一条消息。
+///
+/// 为什么落库而不是留在浏览器里：用户要求「连线意味着把上游节点的对话总结作为
+/// 下游的上下文」。上下文要参与执行与指纹，就必须在服务端可读；
+/// 只存在 sessionStorage 里的对话，换台机器、刷新一次就没了，也进不了下游提示词。
+model NodeMessage {
+  id     String @id @default(cuid())
+  nodeId String
+  node   Node   @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  /// user | assistant —— 用字符串而不是枚举：以后加 system/tool 不必再迁移
+  role    String
+  content String
+
+  createdAt DateTime @default(now())
+
+  @@index([nodeId, createdAt])
 }
 
 model Edge {

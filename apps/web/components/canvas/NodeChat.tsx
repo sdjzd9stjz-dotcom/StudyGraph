@@ -39,15 +39,54 @@ export function NodeChat({
   const [busy, setBusy] = useState(false)
   const bottom = useRef<HTMLDivElement>(null)
 
+  /**
+   * 对话以**服务端**为准（用户 2026-11-21 要求：连线要带上游对话总结）。
+   *
+   * 只存 sessionStorage 的对话换台机器就没了，也进不了下游提示词；
+   * 所以先在服务端读，读不到再退回本地缓存 —— 旧记录不至于凭空消失。
+   */
   useEffect(() => {
-    try {
-      const saved = window.sessionStorage.getItem(KEY_PREFIX + nodeId)
-      if (saved) setTurns(JSON.parse(saved) as Turn[])
-      else setTurns([])
-    } catch {
-      setTurns([])
+    let cancelled = false
+
+    async function load() {
+      try {
+        const response = await fetch(`${apiBaseUrl}/v1/nodes/${nodeId}/messages`, {
+          headers: { authorization: `Bearer ${token}` },
+        })
+        if (response.ok) {
+          const data = (await response.json()) as { messages?: Array<{ role: string; content: string }> }
+          if (!cancelled && Array.isArray(data.messages) && data.messages.length > 0) {
+            setTurns(
+              data.messages.map((message) => ({
+                role: message.role === 'user' ? 'user' : 'assistant',
+                text: message.content,
+              })),
+            )
+            return
+          }
+          if (!cancelled && Array.isArray(data.messages)) {
+            setTurns([])
+            return
+          }
+        }
+      } catch {
+        // 服务端不可达时再退回本地缓存
+      }
+      if (cancelled) return
+      try {
+        const saved = window.sessionStorage.getItem(KEY_PREFIX + nodeId)
+        if (saved) setTurns(JSON.parse(saved) as Turn[])
+        else setTurns([])
+      } catch {
+        setTurns([])
+      }
     }
-  }, [nodeId])
+
+    void load()
+    return () => {
+      cancelled = true
+    }
+  }, [nodeId, apiBaseUrl, token])
 
   useEffect(() => {
     try {
@@ -63,13 +102,13 @@ export function NodeChat({
     if (!message || busy) return
     setBusy(true)
     setInput('')
-    const history = turns.slice(-8)
     setTurns((prev) => [...prev, { role: 'user', text: message }])
     try {
+      // 历史由服务端从库里取：客户端再传一份只会和真正用于下游的版本分叉
       const response = await fetch(`${apiBaseUrl}/v1/nodes/${nodeId}/chat`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-        body: JSON.stringify({ message, history }),
+        body: JSON.stringify({ message }),
       })
       const data = (await response.json()) as { reply?: string; error?: { message?: string } }
       setTurns((prev) => [

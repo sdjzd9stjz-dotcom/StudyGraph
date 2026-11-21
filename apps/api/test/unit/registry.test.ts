@@ -17,16 +17,16 @@ import {
 // 模拟启动路径：注册内置执行器后再自检
 registerBuiltinExecutors()
 
-test('自检：17 个 NodeType 全部有执行器，计划表为空，没有问题项', () => {
+test('自检：全部 NodeType 有执行器，计划表为空，没有问题项', () => {
   const report = selfCheck()
-  assert.equal(report.unionSize, 17)
+  assert.equal(report.unionSize, NODE_TYPES.length)
   assert.deepEqual(report.problems, [])
   assert.deepEqual(report.missingPlan, [])
   assert.equal(report.ok, true)
 
   // 这一条是重点：以前 implemented 只有 4 个，现在必须等于全部 17 个。
   // 如果有人把某个执行器从 index.ts 里摘掉，这里立刻红。
-  assert.equal(report.implemented.length, 17)
+  assert.equal(report.implemented.length, NODE_TYPES.length)
   assert.deepEqual(report.implemented.slice().sort(), [...NODE_TYPES].sort())
   assert.deepEqual(report.planned, [], '计划表必须为空：没有"排了期但没做"的节点')
   assert.deepEqual(Object.keys(PLANNED_PLAN), [])
@@ -61,7 +61,7 @@ test('C：把一个已实现类型写进计划表 → ok:false（实现与计划
   assert.equal(selfCheck().ok, true)
 })
 
-test('C：extra（计划表里出现 17 之外的类型）必须被点名', () => {
+test('C：extra（计划表里出现 NODE_TYPES 之外的类型）必须被点名', () => {
   const saved = (PLANNED_PLAN as Record<string, string>).OUTSIDE
   ;(PLANNED_PLAN as Record<string, string>).OUTSIDE = 'M2'
   try {
@@ -87,7 +87,7 @@ test('C：断言直接拦下未通过的自检（启动路径用它）', () => {
   assert.doesNotThrow(() => assertRegistryReady())
 })
 
-test('调用不在 17 之内的类型 → 501 EXECUTOR_NOT_IMPLEMENTED', () => {
+test('调用不在 NODE_TYPES 之内的类型 → 501 EXECUTOR_NOT_IMPLEMENTED', () => {
   // 17 个都实现了，所以"未实现"这条路只能从 17 之外的类型走。
   // 这条仍要留：它保证 getExecutor 对未知输入不会返回 undefined。
   assert.throws(
@@ -117,7 +117,7 @@ test('getExecutor 对任何类型都不会返回 undefined', () => {
   }
 })
 
-test('registerExecutor 拒绝 17 个之外的类型', () => {
+test('registerExecutor 拒绝 NODE_TYPES 之外的类型', () => {
   assert.throws(
     () =>
       registerExecutor({
@@ -130,7 +130,7 @@ test('registerExecutor 拒绝 17 个之外的类型', () => {
           return { outputs: {}, usage: { tokensIn: 0, tokensOut: 0, cachedTokens: 0 } }
         },
       }),
-    /不在 17 个 NodeType 之内/,
+    /不在 NodeType 列表之内/,
   )
 })
 

@@ -17,12 +17,12 @@ function enumValues(source: string, name: string): string[] {
     .filter((line) => line.length > 0)
 }
 
-test('17 个节点类型一个不多一个不少', () => {
-  assert.equal(NODE_TYPES.length, 17)
-  assert.equal(new Set(NODE_TYPES).size, 17)
+test('节点类型一个不多一个不少（当前 19 个）', () => {
+  assert.equal(NODE_TYPES.length, 19)
+  assert.equal(new Set(NODE_TYPES).size, 19)
 })
 
-test('端口声明覆盖全部 17 个类型，且端口类型都在 PORT_TYPES 内', () => {
+test('端口声明覆盖全部类型，且端口类型都在 PORT_TYPES 内', () => {
   for (const type of NODE_TYPES) {
     const ports = NODE_PORTS[type]
     assert.ok(ports, `${type} 缺少端口声明`)
@@ -164,4 +164,23 @@ test('契约与 Prisma schema 不漂移：NodeType / EdgeKind 逐字一致', () 
 test('Edge 仍然只有三种语义（第四种 = P0）', () => {
   assert.equal(EDGE_KINDS.length, 3)
   assert.deepEqual([...EDGE_KINDS].sort(), ['CITES', 'DERIVED_FROM', 'PREREQUISITE'])
+})
+
+test('DEEPEN 只接受知识卡与题目：其它类型连不上', () => {
+  const card = validateConnection({ fromType: 'CARD', fromPort: 'out', toType: 'DEEPEN', toPort: 'in' })
+  const quiz = validateConnection({ fromType: 'QUIZ', fromPort: 'out', toType: 'DEEPEN', toPort: 'in' })
+  const extract = validateConnection({ fromType: 'EXTRACT', fromPort: 'out', toType: 'DEEPEN', toPort: 'in' })
+
+  assert.equal(card.ok, true)
+  assert.equal(quiz.ok, true)
+  assert.equal(extract.ok, false)
+  if (!extract.ok) assert.equal(extract.code, 'EDGE_PORT_TYPE_MISMATCH')
+})
+
+test('LECTURE 接受多种上游：知识卡、题目、抽取结果、深入理解都能进', () => {
+  for (const fromType of ['CARD', 'QUIZ', 'EXTRACT', 'DEEPEN', 'CHUNK', 'SOURCE'] as const) {
+    const fromPort = defaultPortName(fromType, 'output')!
+    const check = validateConnection({ fromType, fromPort, toType: 'LECTURE', toPort: 'context' })
+    assert.equal(check.ok, true, `${fromType} 应该能连到 LECTURE`)
+  }
 })

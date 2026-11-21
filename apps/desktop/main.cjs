@@ -11,7 +11,7 @@
 //   · 不能用 `--experimental-strip-types` 直接跑 .ts：Electron 内置 Node 20 没有这个开关，
 //     主进程会以 "bad option" 静默失败。桌面版一律跑编译后的 .js。
 //   · 端口不能写死：学生机器上可能已经有别的东西占着 3000/3001。
-const { app, BrowserWindow, dialog, shell } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron')
 const { spawn } = require('node:child_process')
 const crypto = require('node:crypto')
 const path = require('node:path')
@@ -206,13 +206,57 @@ async function boot() {
   return `http://127.0.0.1:${webPort}/`
 }
 
+/**
+ * 讲义 PDF：把渲染进程给来的 HTML 用隐藏窗口打印成 PDF，再让用户选保存位置。
+ *
+ * 为什么不用 pdfkit：中文字体要自己打包、CJK 断行要自己处理，
+ * 而 Chromium 本来就在包里 —— printToPDF 的排版就是浏览器排版。
+ * HTML 先落临时文件再 loadFile：data: URL 有长度上限，长讲义会被截断。
+ */
+ipcMain.handle('studygraph:save-pdf', async (_event, html, suggestedName) => {
+  const source = typeof html === 'string' ? html : ''
+  if (source.trim().length === 0) return { ok: false, error: '讲义内容为空' }
+
+  const safeName = (typeof suggestedName === 'string' ? suggestedName : '').trim() || '课程讲义'
+  const { canceled, filePath } = await dialog.showSaveDialog({
+    title: '导出讲义 PDF',
+    defaultPath: `${safeName.replace(/[\/:*?"<>|]/g, '-')}.pdf`,
+    filters: [{ name: 'PDF', extensions: ['pdf'] }],
+  })
+  if (canceled || !filePath) return { ok: false, canceled: true }
+
+  const tempFile = path.join(app.getPath('temp'), `studygraph-lecture-${Date.now()}.html`)
+  const printer = new BrowserWindow({ show: false, webPreferences: { javascript: false } })
+  try {
+    fs.writeFileSync(tempFile, source, 'utf8')
+    await printer.loadFile(tempFile)
+    const pdf = await printer.webContents.printToPDF({
+      printBackground: true,
+      pageSize: 'A4',
+      margins: { top: 0.6, bottom: 0.6, left: 0.6, right: 0.6 },
+    })
+    await fs.promises.writeFile(filePath, pdf)
+    return { ok: true, filePath }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  } finally {
+    printer.destroy()
+    fs.promises.unlink(tempFile).catch(() => undefined)
+  }
+})
+
 function createWindow(url) {
   const window = new BrowserWindow({
     width: 1440,
     height: 900,
     title: 'StudyGraph',
     backgroundColor: '#ffffff',
-    webPreferences: { contextIsolation: true, nodeIntegration: false },
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      // 讲义 PDF 需要 printToPDF（只有主进程能调），桥就是这个文件
+      preload: path.join(__dirname, 'preload.cjs'),
+    },
   })
   window.webContents.setWindowOpenHandler(({ url: target }) => {
     shell.openExternal(target)

@@ -1,4 +1,7 @@
+import { createHash } from 'node:crypto'
+
 import { computeFingerprint } from '../../../../packages/contracts/src/index.ts'
+import { summarizeArtifact } from '../domain/artifact-text.ts'
 import type { PrismaClient } from '../../../../packages/db/src/index.ts'
 import { AppError } from '../lib/errors.ts'
 import { createGateway } from '../llm/gateway.ts'
@@ -45,6 +48,23 @@ export interface RunOutcome {
 interface UpstreamArtifact {
   readonly hash: string
   readonly structured: unknown
+  readonly kind: string
+  readonly port: string
+}
+
+/**
+ * 上游节点带进下游的「对话上下文」。
+ *
+ * 连线不再只是"把产物递给下游"：每个上游节点本身是一个会话，
+ * 它的产出摘要 + 最近几轮对话会一起进入下游提示词（用户 2026-11-21 要求）。
+ */
+export interface UpstreamContextEntry {
+  readonly nodeId: string
+  readonly type: string
+  readonly title: string
+  readonly artifactKind: string | null
+  readonly summary: string
+  readonly conversation: string
   readonly port: string
 }
 
@@ -80,30 +100,82 @@ async function collectInputs(
 
   if (upstreamNodeIds.length === 0) return { inputs: {}, hashes: [] }
 
+  // 去重 + 排序：产物合并与指纹都不能随数据库返回顺序抖动
+  const uniqueUpstreamIds = [...new Set(upstreamNodeIds)].filter((id) => id !== nodeId).sort()
   const portByNode = new Map(edges.map((edge) => [edge.fromNodeId, edge.toPort]))
 
-  const artifacts: UpstreamArtifact[] = []
-  for (const upstreamId of upstreamNodeIds) {
-    if (upstreamId === nodeId) continue // 组里不该包含自己，防御一下
-    const artifact = await prisma.artifact.findFirst({
-      where: { nodeId: upstreamId },
+  const [artifactRows, upstreamNodes, messageRows] = await Promise.all([
+    prisma.artifact.findMany({
+      where: { nodeId: { in: uniqueUpstreamIds } },
       orderBy: { createdAt: 'desc' },
-      select: { hash: true, structured: true },
-    })
+      select: { nodeId: true, hash: true, structured: true, kind: true },
+    }),
+    prisma.node.findMany({
+      where: { id: { in: uniqueUpstreamIds } },
+      select: { id: true, type: true, title: true },
+    }),
+    prisma.nodeMessage.findMany({
+      where: { nodeId: { in: uniqueUpstreamIds } },
+      orderBy: { createdAt: 'asc' },
+      select: { nodeId: true, role: true, content: true },
+    }),
+  ])
+
+  // 每个节点只取最新一条产物
+  const latestArtifact = new Map<string, (typeof artifactRows)[number]>()
+  for (const row of artifactRows) {
+    if (!latestArtifact.has(row.nodeId)) latestArtifact.set(row.nodeId, row)
+  }
+  const nodeById = new Map(upstreamNodes.map((node) => [node.id, node]))
+
+  const messagesByNode = new Map<string, string[]>()
+  for (const row of messageRows) {
+    const list = messagesByNode.get(row.nodeId) ?? []
+    const who = row.role === 'user' ? '用户' : '助手'
+    list.push(`${who}：${row.content.replace(/\s+/g, ' ').trim()}`)
+    messagesByNode.set(row.nodeId, list)
+  }
+
+  const artifacts: UpstreamArtifact[] = []
+  const inputs: Record<string, unknown> = {}
+  const upstreamContext: UpstreamContextEntry[] = []
+
+  for (const upstreamId of uniqueUpstreamIds) {
+    const artifact = latestArtifact.get(upstreamId)
+
     if (artifact) {
       artifacts.push({
         hash: artifact.hash,
         structured: artifact.structured,
+        kind: artifact.kind,
+        port: portByNode.get(upstreamId) ?? 'context',
+      })
+      const structured = artifact.structured as Record<string, unknown> | null
+      if (structured && typeof structured === 'object') Object.assign(inputs, structured)
+    }
+
+    /**
+     * 「连线」的第二层含义（用户 2026-11-21 要求）：
+     * 下游拿到的不只是上游的产物，还有**上游这个节点自己的对话总结**。
+     * 没有对话的节点只带产物摘要；两者都没有就不进上下文（不占提示词）。
+     */
+    const conversation = (messagesByNode.get(upstreamId) ?? []).slice(-8).join('\n').slice(0, 1600)
+    const summary = artifact ? summarizeArtifact(artifact.kind, artifact.structured).slice(0, 1200) : ''
+    if (summary.length > 0 || conversation.length > 0) {
+      const node = nodeById.get(upstreamId)
+      upstreamContext.push({
+        nodeId: upstreamId,
+        type: node?.type ?? '',
+        title: node?.title ?? node?.type ?? upstreamId,
+        artifactKind: artifact?.kind ?? null,
+        summary,
+        conversation,
         port: portByNode.get(upstreamId) ?? 'context',
       })
     }
   }
 
-  const inputs: Record<string, unknown> = {}
-  for (const artifact of artifacts) {
-    const structured = artifact.structured as Record<string, unknown> | null
-    if (structured && typeof structured === 'object') Object.assign(inputs, structured)
-  }
+  if (upstreamContext.length > 0) inputs.upstreamContext = upstreamContext
 
   // 分组来源单独列出来：执行器要区分"这是直接上游"还是"这是打包来的上下文"
   if (groupLinks.length > 0) {
@@ -113,7 +185,15 @@ async function collectInputs(
     }))
   }
 
-  return { inputs, hashes: artifacts.map((artifact) => artifact.hash) }
+  /**
+   * 指纹要把上游对话算进去：用户在上游追问了两轮，下游的"上下文"就不一样了。
+   * 只算产物哈希的话，改了对话还能命中缓存，下游永远看不到新总结。
+   */
+  const conversationHashes = upstreamContext
+    .filter((entry) => entry.conversation.length > 0)
+    .map((entry) => createHash('sha256').update(`${entry.nodeId}\n${entry.conversation}`).digest('hex'))
+
+  return { inputs, hashes: [...artifacts.map((artifact) => artifact.hash), ...conversationHashes] }
 }
 
 export async function executeNode(

@@ -19,6 +19,9 @@ export const PRIMARY_NODES: Array<{
   { type: 'CARD', label: '知识卡', hint: '每条概念一张可溯源的卡', color: '#10b981' },
   { type: 'PREREQ', label: '先修', hint: '推断知识之间的先后关系', color: '#ec4899' },
   { type: 'REVIEW', label: '复习', hint: '按记忆强度安排复习', color: '#6366f1' },
+  // 第四批：让画布成为知识网络（而非工作流）
+  { type: 'DEEPEN', label: '深入理解', hint: '从知识卡与题目里提炼核心观点', color: '#d946ef' },
+  { type: 'LECTURE', label: '导出讲义', hint: '汇总多个节点的问答，生成 PDF 讲义', color: '#0f766e' },
 ]
 
 export const PRIMARY_TYPES = new Set<NodeType>(PRIMARY_NODES.map((node) => node.type))
@@ -84,6 +87,7 @@ export const NODE_PARAM_FIELDS: Partial<Record<NodeType, ParamField[]>> = {
     { key: 'difficulty', label: '难度 1–5', type: 'number', placeholder: '留空由模型判断' },
     { key: 'types', label: '限定题型', type: 'csv', placeholder: 'SINGLE_CHOICE, FILL_BLANK' },
   ],
+  LECTURE: [{ key: 'title', label: '讲义标题', type: 'text', placeholder: '留空由模型拟定' }],
   PROBE: [{ key: 'text', label: '题目原文', type: 'textarea', placeholder: '把这道题的题干粘进来' }],
   METHOD: [{ key: 'text', label: '例题原文', type: 'textarea', placeholder: '例题题干与解法' }],
   SOLVE: [{ key: 'text', label: '题目原文', type: 'textarea', placeholder: '要分步讲解的题' }],
