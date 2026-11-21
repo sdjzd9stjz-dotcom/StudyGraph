@@ -69,3 +69,25 @@ test('问句与建图指令分开：问句不会被当成"帮我建节点"', () 
   assert.equal(looksLikeQuestion('为什么这一步成立?'), true)
   assert.equal(looksLikeQuestion('解释一下导数的定义'), true)
 })
+
+test('模型用 label / note / source+target 命名时照样能落地（DeepSeek 实际就这么写）', () => {
+  // 2026-11-21 实测 deepseek-flash 的输出形态：nodes 用 label，edges 用 source/target
+  const actions = actionsFromModelPlan(
+    {
+      nodes: [
+        { type: 'SOURCE', label: '课件原件' } as never,
+        { type: 'CHUNK', label: '按章节切分' } as never,
+      ],
+      edges: [{ source: 'SOURCE', target: 'CHUNK' } as never],
+    },
+    [],
+  )
+
+  const created = actions.filter((action) => action.kind === 'create-node')
+  assert.equal(created.length, 2)
+  assert.equal((created[0]!.payload as { title: string }).title, '课件原件', 'label 要当标题用，否则卡片标题全是类型名')
+
+  // 连线的别名不认，整张图就只剩孤立节点 —— 界面上看不出是哪一步丢的
+  const edges = actions.filter((action) => action.kind === 'create-edge')
+  assert.deepEqual(edges.map((edge) => edge.payload), [{ from: 'SOURCE', to: 'CHUNK' }])
+})

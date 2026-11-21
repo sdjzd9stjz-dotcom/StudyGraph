@@ -55,7 +55,7 @@ test('response_format 被拒 → 去掉它重试，并成功返回', async () =>
 
   assert.equal(bodies.length, 2, '应该重试一次')
   assert.ok(bodies[0]!.response_format, '第一次要带 response_format')
-  assert.equal('response_format' in bodies[1]!, false, '重试时不能还带着它，否则等于把同一个错误再发一遍')
+  assert.deepEqual(bodies[1]!.response_format, { type: 'json_object' }, '第二步降级成 json_object（DeepSeek 认这个），不要一步丢光结构约束')
   assert.deepEqual(result.data, { reply: '好的' })
 
   // 没有 response_format 时，只能靠提示词要求 JSON —— 这条不能丢

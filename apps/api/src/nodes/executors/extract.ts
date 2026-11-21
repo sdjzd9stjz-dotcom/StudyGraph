@@ -124,6 +124,12 @@ export const extractExecutor: NodeExecutor<ExtractParams> = {
           required: ['claims'],
           additionalProperties: false,
         },
+        /**
+         * 一批最多 15 个 chunk × 3 条 claim，每条四个字段 —— 2048 的默认额度
+         * 写到一半就会被切断（真实事故见 provider-json-recovery.test.ts）。
+         * 抽取本来就是"列清单"，按任务给定 8192，别靠翻倍重试兜底多付一次钱。
+         */
+        maxTokens: 8192,
         user: ctx.user,
       })
 

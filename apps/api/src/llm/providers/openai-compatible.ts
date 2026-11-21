@@ -34,6 +34,74 @@ export interface OpenAICompatibleConfig {
   readonly jsonMode?: 'json_schema' | 'json_object'
 }
 
+/**
+ * 输出额度。
+ *
+ * 2048 是历史默认值，现在不够用了：DeepSeek 当前模型把**思考 token 也算进
+ * `completion_tokens`**，同一份 2048 的预算，思考先吃掉大半，剩下的 JSON
+ * 写到一半被切断（`finish_reason: length`），有的干脆一个字都没有。
+ * 实测 `deepseek-flash` / `deepseek-v4-pro` 都接受 8192 与 16384。
+ */
+const DEFAULT_MAX_TOKENS = 4096
+const HARD_MAX_TOKENS = 16384
+
+/**
+ * 从一段可能夹着围栏、寒暄、解释的文字里取出 JSON 值。
+ *
+ * 模型经常这样返回：`好的，以下是结果：\n```json\n{...}\n````。
+ * 这种情况下 `JSON.parse` 必然失败，但内容其实是好的 —— 因为包装层判死
+ * 等于白白扔掉一次已经付过钱的调用。
+ *
+ * **但只取完整的**：括号没闭合就返回 null，让上层按"截断"处理，
+ * 绝不试图补括号 —— 半份定义比没有定义更危险。
+ */
+function extractJsonValue(text: string): string | null {
+  const start = text.search(/[{\[]/)
+  if (start < 0) return null
+
+  let depth = 0
+  let inString = false
+  let escaped = false
+
+  for (let i = start; i < text.length; i += 1) {
+    const char = text[i]
+    if (inString) {
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === '"') inString = false
+      continue
+    }
+    if (char === '"') {
+      inString = true
+      continue
+    }
+    if (char === '{' || char === '[') depth += 1
+    else if (char === '}' || char === ']') {
+      depth -= 1
+      if (depth === 0) return text.slice(start, i + 1)
+    }
+  }
+
+  return null
+}
+
+function parseLooseJson(content: string): unknown {
+  const trimmed = content.replace(/^﻿/, '').trim()
+  const fenced = /```(?:json|JSON)?\s*([\s\S]*?)```/.exec(trimmed)?.[1]?.trim()
+
+  for (const candidate of fenced ? [trimmed, fenced] : [trimmed]) {
+    try {
+      return JSON.parse(candidate)
+    } catch {
+      // 继续尝试更宽松的取法
+    }
+  }
+
+  const sliced = extractJsonValue(fenced ?? trimmed)
+  if (sliced) return JSON.parse(sliced)
+  throw new Error('no-json')
+}
+
 export function createOpenAICompatibleProvider(config: OpenAICompatibleConfig) {
   const jsonMode = config.jsonMode ?? 'json_schema'
   const doFetch = config.fetchImpl ?? fetch
@@ -53,33 +121,19 @@ export function createOpenAICompatibleProvider(config: OpenAICompatibleConfig) {
      * （DeepSeek 现在的 flash / v4-pro 就返回
      * "This response_format type is unavailable now"），
      * 那时只能靠指令让模型自己输出 JSON。见下面的降级重试。
+     *
+     * 指令里带上 schema 原文：降级后模型看不到 `response_format`，
+     * 只靠一句"输出 JSON"它就会自由发挥字段名（实测它会把 `title` 写成
+     * `label`、`from/to` 写成 `source/target`）。
      */
     if (input.jsonSchema) {
       messages.push({
         role: 'system',
-        content: '只输出一个 JSON 对象（json），不要输出任何解释、不要用 Markdown 代码块。',
+        content:
+          '只输出一个 JSON 对象（json），不要输出任何解释、不要用 Markdown 代码块。' +
+          '对象必须严格满足这个 JSON Schema：' +
+          JSON.stringify(input.jsonSchema),
       })
-    }
-
-    const body: Record<string, unknown> = {
-      model: input.model,
-      messages,
-      max_tokens: input.maxTokens ?? 2048,
-    }
-
-    if (input.jsonSchema) {
-      body.response_format =
-        jsonMode === 'json_object'
-          ? { type: 'json_object' }
-          : {
-              type: 'json_schema',
-              json_schema: { name: 'studygraph_result', strict: true, schema: input.jsonSchema },
-            }
-    }
-
-    if (input.cachePrefix?.key && config.provider === 'openai') {
-      // 只有 OpenAI 有显式路由键；DeepSeek 是自动上下文缓存（SG-SUP-009 §3.1）
-      body.prompt_cache_key = input.cachePrefix.key
     }
 
     const post = (payload: Record<string, unknown>) =>
@@ -92,64 +146,139 @@ export function createOpenAICompatibleProvider(config: OpenAICompatibleConfig) {
         body: JSON.stringify(payload),
       })
 
-    let response = await post(body)
-
     /**
-     * `response_format` 被拒时去掉它重试一次。
+     * `response_format` 被拒时的降级阶梯：`json_schema` → `json_object` → 不带格式。
      *
-     * 有的厂商会明确说 "This response_format type is unavailable now"
-     * （DeepSeek 的当前模型就是这样），有的直接 400。这属于**同一个模型
-     * 换了服务端版本**，不是配置错误 —— 降级到"靠提示词要 JSON"仍然可用，
-     * 直接报错等于把一个本来能用的模型判死。
-     * 只重试一次：重试还不行就是真不行，不要瞒着用户反复烧额度。
+     * DeepSeek 拒 `json_schema` 但**接受 `json_object`**（实测），
+     * 所以第一步不要直接扔掉格式 —— 那等于把结构约束一起扔了。
+     * 有的厂商只支持 `json_schema`，第二步保留 `json_schema` 不动。
+     * 每一步都必须确认错误确实是 `response_format` 引起的，
+     * 401 / 429 重试没有意义，只会多花一次请求。
      */
-    if (!response.ok && body.response_format) {
-      const firstText = await response.clone().text().catch(() => '')
-      if (/response_format|json_schema|json_object|unavailable/i.test(firstText)) {
-        const { response_format: _dropped, ...withoutFormat } = body
-        void _dropped
-        response = await post(withoutFormat)
+    const postWithFormatFallback = async (payload: Record<string, unknown>) => {
+      const first = await post(payload)
+      if (first.ok || !payload.response_format) return first
+
+      const firstText = await first.clone().text().catch(() => '')
+      if (!/response_format|json_schema|json_object|unavailable/i.test(firstText)) return first
+
+      const currentType = (payload.response_format as { type?: string }).type
+
+      if (currentType !== 'json_object') {
+        const second = await post({ ...payload, response_format: { type: 'json_object' } })
+        if (second.ok) return second
+
+        const secondText = await second.clone().text().catch(() => '')
+        if (!/response_format|json_schema|json_object|unavailable/i.test(secondText)) return second
       }
+
+      const { response_format: _dropped, ...rest } = payload
+      void _dropped
+      return post(rest)
     }
 
-    if (!response.ok) {
-      const text = await response.text()
-      throw new Error(`${config.provider} ${response.status}: ${text.slice(0, 400)}`)
-    }
+    let budget = Math.min(Math.max(input.maxTokens ?? DEFAULT_MAX_TOKENS, 512), HARD_MAX_TOKENS)
+    let retriedForLength = false
 
-    const payload = (await response.json()) as {
-      model?: unknown
-      choices?: Array<{ message?: { content?: string } }>
-      usage?: unknown
-    }
+    for (;;) {
+      const body: Record<string, unknown> = {
+        model: input.model,
+        messages,
+        max_tokens: budget,
+      }
 
-    const content = payload.choices?.[0]?.message?.content
-    if (typeof content !== 'string') throw new Error(`${config.provider} 返回缺少 message.content`)
+      if (input.jsonSchema) {
+        body.response_format =
+          jsonMode === 'json_object'
+            ? { type: 'json_object' }
+            : {
+                type: 'json_schema',
+                json_schema: { name: 'studygraph_result', strict: true, schema: input.jsonSchema },
+              }
+      }
 
-    let data: unknown
-    try {
-      data = JSON.parse(content)
-    } catch {
-      throw new Error(`${config.provider} 返回的内容不是合法 JSON：${content.slice(0, 200)}`)
-    }
+      if (input.cachePrefix?.key && config.provider === 'openai') {
+        // 只有 OpenAI 有显式路由键；DeepSeek 是自动上下文缓存（SG-SUP-009 §3.1）
+        body.prompt_cache_key = input.cachePrefix.key
+      }
 
-    const { modelVersion, usage } = assertUsageAndModel(config.provider, payload, (raw) => {
-      if (config.provider === 'deepseek') {
-        // DeepSeek 把缓存命中直接写在 usage 里（009 §3.1），最省事的一家
+      const response = await postWithFormatFallback(body)
+
+      if (!response.ok) {
+        const text = await response.text()
+        throw new Error(`${config.provider} ${response.status}: ${text.slice(0, 400)}`)
+      }
+
+      const payload = (await response.json()) as {
+        model?: unknown
+        choices?: Array<{
+          message?: { content?: string; reasoning_content?: string }
+          finish_reason?: string
+        }>
+        usage?: unknown
+      }
+
+      const choice = payload.choices?.[0]
+      const content = choice?.message?.content
+      const finishReason = choice?.finish_reason
+      const reasoningChars =
+        typeof choice?.message?.reasoning_content === 'string' ? choice.message.reasoning_content.length : 0
+
+      /**
+       * 额度用完 → 翻倍重试**一次**。
+       *
+       * 两种表现其实是同一件事：
+       * - `finish_reason: length` 且 JSON 断在半截
+       * - `content` 为空（思考把额度全吃了，一个字都没轮到输出）
+       * 用户看到的都是"不是合法 JSON"，但重发一遍（同一额度）不会好，
+       * 只有把预算加大才有意义。所以只翻一次，避免无底洞烧钱。
+       */
+      const empty = typeof content !== 'string' || content.trim().length === 0
+      if ((empty || finishReason === 'length') && !retriedForLength && budget < HARD_MAX_TOKENS) {
+        retriedForLength = true
+        budget = Math.min(budget * 2, HARD_MAX_TOKENS)
+        continue
+      }
+
+      if (empty) {
+        throw new Error(
+          `${config.provider} 没有返回内容` +
+            (reasoningChars > 0
+              ? `：模型把 ${budget} 个输出额度花在思考上了（reasoning ${reasoningChars} 字符），没有产出答案`
+              : `（finish_reason=${finishReason ?? 'unknown'}）`),
+        )
+      }
+
+      let data: unknown
+      try {
+        data = parseLooseJson(content)
+      } catch {
+        // 截断和"模型没按要求输出"是两件事，告诉用户/日志时不能混为一谈
+        throw new Error(
+          finishReason === 'length'
+            ? `${config.provider} 输出被截断（max_tokens=${budget} 已用完），JSON 不完整：${content.slice(0, 200)}`
+            : `${config.provider} 返回的内容不是合法 JSON：${content.slice(0, 200)}`,
+        )
+      }
+
+      const { modelVersion, usage } = assertUsageAndModel(config.provider, payload, (raw) => {
+        if (config.provider === 'deepseek') {
+          // DeepSeek 把缓存命中直接写在 usage 里（009 §3.1），最省事的一家
+          return {
+            tokensIn: raw.prompt_tokens,
+            tokensOut: raw.completion_tokens,
+            cachedTokens: raw.prompt_cache_hit_tokens,
+          }
+        }
+        const details = raw.prompt_tokens_details as { cached_tokens?: unknown } | undefined
         return {
           tokensIn: raw.prompt_tokens,
           tokensOut: raw.completion_tokens,
-          cachedTokens: raw.prompt_cache_hit_tokens,
+          cachedTokens: details?.cached_tokens,
         }
-      }
-      const details = raw.prompt_tokens_details as { cached_tokens?: unknown } | undefined
-      return {
-        tokensIn: raw.prompt_tokens,
-        tokensOut: raw.completion_tokens,
-        cachedTokens: details?.cached_tokens,
-      }
-    })
+      })
 
-    return { data, usage, modelVersion }
+      return { data, usage, modelVersion }
+    }
   }
 }

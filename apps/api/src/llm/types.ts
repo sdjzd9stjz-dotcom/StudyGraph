@@ -54,6 +54,14 @@ export interface LLMCompleteRequest {
   readonly taskType: TaskType
   readonly messages: readonly Message[]
   readonly jsonSchema?: JSONSchema
+  /**
+   * 输出额度上限。不传时用适配器默认值。
+   *
+   * 必须能传下去：DeepSeek 现在的模型把**思考 token 也算进输出额度**，
+   * 同一个 2048 的预算，有的模型能写完 JSON，有的思考完就没了。
+   * 需要列清单的任务（如概念抽取）只能按任务抬高它。
+   */
+  readonly maxTokens?: number
   /** 前缀材料（新接口） */
   readonly cachePrefix?: CachePrefix
   /** @deprecated 旧调用方只传键；内部等价于 `{ key, text: '' }`。新代码请用 cachePrefix */

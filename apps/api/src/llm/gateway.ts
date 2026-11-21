@@ -89,6 +89,7 @@ export function createGateway(deps: GatewayDeps): LLMGateway {
           model,
           messages: request.messages,
           jsonSchema: request.jsonSchema,
+          maxTokens: request.maxTokens,
           cachePrefix,
         })
         return { ...result, provider: providerLabel }

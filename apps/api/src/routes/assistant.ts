@@ -434,8 +434,13 @@ function registerNodeChat(app: FastifyInstance, deps: AssistantRouteDeps): void 
  * 由调用方退回规则规划。
  */
 export interface ModelPlanShape {
-  readonly nodes?: ReadonlyArray<{ type?: unknown; title?: unknown }>
-  readonly edges?: ReadonlyArray<{ from?: unknown; to?: unknown }>
+  /**
+   * 字段名按**实测**放宽：降级到不带 `response_format` 时，模型会把
+   * `title` 写成 `label`/`name`，把边写成 `source/target`。
+   * 只认一种写法的话，节点会在、线会全丢 —— 界面上看不出是哪一步丢的。
+   */
+  readonly nodes?: ReadonlyArray<{ type?: unknown; title?: unknown; label?: unknown; name?: unknown }>
+  readonly edges?: ReadonlyArray<{ from?: unknown; to?: unknown; source?: unknown; target?: unknown }>
 }
 
 /**
@@ -464,7 +469,10 @@ export function actionsFromModelPlan(plan: ModelPlanShape | undefined, existingT
 
     // 已知类型沿用思维导图布局；其它组合按列顺排，避免全叠在原点
     const preset = GRAPH_NODES.find((entry) => entry.type === type)
-    const title = typeof node.title === 'string' && node.title.trim().length > 0 ? node.title.trim() : preset?.title ?? type
+    const rawTitle = [node.title, node.label, node.name].find(
+      (candidate): candidate is string => typeof candidate === 'string' && candidate.trim().length > 0,
+    )
+    const title = rawTitle?.trim() ?? preset?.title ?? type
     actions.push({
       kind: 'create-node',
       payload: {
@@ -479,8 +487,8 @@ export function actionsFromModelPlan(plan: ModelPlanShape | undefined, existingT
 
   const available = new Set<string>([...existing, ...created])
   for (const edge of plan?.edges ?? []) {
-    const from = edge.from
-    const to = edge.to
+    const from = edge.from ?? edge.source
+    const to = edge.to ?? edge.target
     if (typeof from !== 'string' || typeof to !== 'string') continue
     if (!available.has(from) || !available.has(to) || from === to) continue
     actions.push({ kind: 'create-edge', payload: { from, to } })

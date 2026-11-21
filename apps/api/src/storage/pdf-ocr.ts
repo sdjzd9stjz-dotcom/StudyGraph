@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, copyFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { pdf } from 'pdf-to-img'
 import { createWorker } from 'tesseract.js'
@@ -48,13 +48,28 @@ function resolveLangDir(): string {
     ['chi_sim', '@tesseract.js-data/chi_sim/4.0.0/chi_sim.traineddata.gz'],
     ['eng', '@tesseract.js-data/eng/4.0.0/eng.traineddata.gz'],
   ]
+  /**
+   * 语言包装在**谁**的 node_modules 里取决于包管理器和执行目录：
+   * 从仓库根跑脚本时在根下，从 `apps/api` 跑单元测试时根下不一定被链接进来。
+   * 所以按"就近 → 仓库根"逐个找，而不是只认一个目录。
+   */
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url))
+  const roots = [
+    process.cwd(),
+    path.resolve(moduleDir, '../..'), // apps/api
+    path.resolve(moduleDir, '../../../..'), // 仓库根
+  ]
+  const searchDirs = [...new Set(roots.flatMap((root) => [root, path.join(root, '..')]))]
+
   for (const [lang, relative] of wanted) {
     const target = path.join(cacheDir, `${lang}.traineddata.gz`)
     if (existsSync(target)) continue
-    const source = path.join(process.cwd(), 'node_modules', ...relative.split('/'))
-    if (!existsSync(source)) {
+    const source = searchDirs
+      .map((dir) => path.join(dir, 'node_modules', ...relative.split('/')))
+      .find((candidate) => existsSync(candidate))
+    if (!source) {
       throw new Error(
-        `OCR 语言包缺失：找不到 ${source}。开发期需要安装 @tesseract.js-data/${lang}。`,
+        `OCR 语言包缺失：找不到 ${relative}。开发期需要安装 @tesseract.js-data/${lang}。`,
       )
     }
     copyFileSync(source, target)
