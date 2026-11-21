@@ -14,6 +14,14 @@ export function SourceUploader({ canvasId, apiBaseUrl, token }: { canvasId: stri
   const inputRef = useRef<HTMLInputElement>(null)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
+  /**
+   * 「这是扫描件」。
+   *
+   * 默认不勾：扫描件要 OCR，而 OCR 是**把像素猜成字**。
+   * 猜出来的文字会被当成原文引用，所以必须由用户明确要求，
+   * 不能因为"反正能抽点东西"就默默打开。
+   */
+  const [ocr, setOcr] = useState(false)
 
   return (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
@@ -35,6 +43,7 @@ export function SourceUploader({ canvasId, apiBaseUrl, token }: { canvasId: stri
                 'content-type': 'application/octet-stream',
                 authorization: `Bearer ${token}`,
                 'x-filename': encodeURIComponent(file.name),
+                ...(ocr ? { 'x-ocr': '1' } : {}),
               },
               body: file,
             })
@@ -53,6 +62,18 @@ export function SourceUploader({ canvasId, apiBaseUrl, token }: { canvasId: stri
           }
         }}
       />
+      <label
+        title="扫描件没有文字层。勾上会用本机 OCR 识别，慢一些，且识别结果不是原文"
+        style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, color: '#6b7280', cursor: 'pointer' }}
+      >
+        <input
+          type="checkbox"
+          data-testid="upload-ocr"
+          checked={ocr}
+          onChange={(event) => setOcr(event.target.checked)}
+        />
+        扫描件（OCR）
+      </label>
       <button
         type="button"
         disabled={busy}
@@ -60,7 +81,7 @@ export function SourceUploader({ canvasId, apiBaseUrl, token }: { canvasId: stri
         onClick={() => inputRef.current?.click()}
         style={{ padding: '6px 12px', borderRadius: 6, border: '1px solid #d1d5db', background: '#fff', cursor: 'pointer' }}
       >
-        {busy ? '上传中…' : '上传课件'}
+        {busy ? (ocr ? '识别中…' : '上传中…') : '上传课件'}
       </button>
       {message && (
         <span data-testid="upload-message" style={{ fontSize: 12, color: message.startsWith('上传失败') ? '#dc2626' : '#059669' }}>

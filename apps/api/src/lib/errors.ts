@@ -181,7 +181,8 @@ export const sourceHasNoTextLayer = (filename: string) =>
   new AppError(
     422,
     'SOURCE_HAS_NO_TEXT_LAYER',
-    `这份 PDF 没有文字层（可能是扫描件），M2 暂不支持 OCR：${filename}`,
+    `这份 PDF 没有文字层，是扫描件（整页都是图片）：${filename}\n` +
+      '如果要用它，在上传时勾选「扫描件（OCR）」再传一次 —— 会用本机 OCR 识别文字（慢一些，结果不是原文）。',
     { filename },
   )
 
@@ -198,6 +199,8 @@ export const sourceTextLayerUnusable = (
   new AppError(
     422,
     'SOURCE_TEXT_LAYER_UNUSABLE',
-    `这份文件的文字层不可用（${detail.totalPages} 页中只有 ${detail.nonEmptyPages} 页能识别出零星字符，且内容多为乱码）。这通常是扫描件经过劣质 OCR 的结果。可以换一份电子版课件，或等后续版本支持重新 OCR。`,
+    `这份文件的文字层不可用（${detail.totalPages} 页中只有 ${detail.nonEmptyPages} 页能识别出零星字符，内容多为乱码）。` +
+      '如果它本来就是扫描件，上传时勾选「扫描件（OCR）」重试；识别质量仍然很差的话，建议换电子版课件 —— ' +
+      '拿乱码当原文，下游会产出"看着像概念、引用一段乱码"的假卡。',
     { filename, ...detail },
   )

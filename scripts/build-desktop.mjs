@@ -17,7 +17,7 @@
 //
 // 用法：node scripts/build-desktop.mjs
 import { spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, copyFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, copyFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 
 const root = path.resolve(import.meta.dirname, '..')
@@ -87,6 +87,32 @@ if (!existsSync(path.join(pgRuntime, 'bin', 'pg_ctl.exe'))) {
 cpSync(pgRuntime, path.join(resources, 'pgsql'), { recursive: true })
 const pgManifest = JSON.parse(readFileSync(path.join(pgRuntime, 'PG-BUNDLE.json'), 'utf8'))
 console.log(`PostgreSQL ${pgManifest.postgres} + pgvector 已打包`)
+
+// ── 2.6 OCR 语言包 ─────────────────────────────────────────────────────────
+step('复制 OCR 语言包')
+/**
+ * 扫描件 PDF 要靠 tesseract 识别，而它默认**从 CDN 下语言包** ——
+ * 没网的电脑上第一次用就失败。所以把 chi_sim 与 eng 直接打进包里（约 31MB）。
+ *
+ * 放 resources/ocr：tesseract 的 langPath 只接受一个目录，两种语言必须在同一处，
+ * 所以这里合并两个 npm 包里的 .gz，而不是直接搬它们的目录。
+ */
+const ocrTarget = path.join(resources, 'ocr')
+mkdirSync(ocrTarget, { recursive: true })
+const ocrLangs = [
+  ['chi_sim', path.join(root, 'node_modules', '@tesseract.js-data', 'chi_sim', '4.0.0', 'chi_sim.traineddata.gz')],
+  ['eng', path.join(root, 'node_modules', '@tesseract.js-data', 'eng', '4.0.0', 'eng.traineddata.gz')],
+]
+let ocrBytes = 0
+for (const [lang, source] of ocrLangs) {
+  if (!existsSync(source)) {
+    console.error(`❌ 缺少 OCR 语言包：${source}\n   请先运行：npm install @tesseract.js-data/${lang}`)
+    process.exit(1)
+  }
+  copyFileSync(source, path.join(ocrTarget, `${lang}.traineddata.gz`))
+  ocrBytes += statSync(source).size
+}
+console.log(`OCR 语言包 chi_sim + eng 已打包（${Math.round(ocrBytes / 1048576)}MB）`)
 
 // ── 3. API 产物 ────────────────────────────────────────────────────────────
 step('复制 API 产物')

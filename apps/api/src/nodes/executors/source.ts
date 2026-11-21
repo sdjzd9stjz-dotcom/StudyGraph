@@ -14,6 +14,13 @@ interface SourceParams {
   /** 本地文件路径（M2 用；M4 的 upload API 会把文件先落到 S3 再传 key） */
   localPath: string
   filename?: string
+  /**
+   * 用户在界面上勾了「这是扫描件」。
+   *
+   * 只影响没有文字层的 PDF：允许走 OCR。没有这个标记时，无文字层照旧报错 ——
+   * OCR 是猜字，不能被默认打开（见 storage/pdf-ocr.ts）。
+   */
+  ocr?: boolean
 }
 
 /**
@@ -48,7 +55,8 @@ export const sourceExecutor: NodeExecutor<SourceParams> = {
     if (!localPath) throw new Error('source 节点缺少 params.localPath')
 
     const filename = ctx.params.filename ?? basename(localPath)
-    const extraction = await extractSource(localPath)
+    // 只有用户明确标了"这是扫描件"才允许 OCR（见 extractSource 的 ExtractOptions）
+    const extraction = await extractSource(localPath, { ocr: ctx.params.ocr === true })
 
     // 第一层：一个字符都没有 → 没有文字层
     if (extraction.textChars === 0) {
@@ -122,6 +130,20 @@ export const sourceExecutor: NodeExecutor<SourceParams> = {
       spanCount,
     })
 
-    return { outputs: { sourceDoc }, usage: ZERO_USAGE }
+    /**
+     * `textLayer` 必须进产物。
+     *
+     * `OCR` 意味着这些"原文"是从像素猜出来的 —— 下游做引用时必须知道这一点，
+     * 否则一张卡会声称"原文第 2 页这么写"，而那句话其实是识别结果。
+     * 不是给程序看的开关，是给人看的交代。
+     */
+    return {
+      outputs: {
+        sourceDoc,
+        textLayer: extraction.textLayer ?? 'NATIVE',
+        ...(extraction.ocr ? { ocr: extraction.ocr } : {}),
+      },
+      usage: ZERO_USAGE,
+    }
   },
 }

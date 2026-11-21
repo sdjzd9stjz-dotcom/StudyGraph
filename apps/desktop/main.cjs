@@ -191,7 +191,14 @@ async function boot() {
   const byokKey = env.BYOK_ENCRYPTION_KEY ?? ensureByokKey(database.baseDir)
   const byokEnv = byokKey ? { BYOK_ENCRYPTION_KEY: byokKey } : {}
 
-  await startApi(apiPort, { ...env, ...authEnv, ...storageEnv, ...byokEnv, DATABASE_URL: database.databaseUrl })
+  // OCR 语言包（扫描件 PDF 用）：tesseract 默认从 CDN 下，没网的电脑上第一次用就失败。
+  // 包里已经带了 chi_sim + eng，这里把路径指过去。
+  const ocrLangDir = IS_PACKAGED ? path.join(process.resourcesPath, 'ocr') : path.join(ROOT, 'tmp', 'ocr-langs')
+  const ocrEnv = fs.existsSync(path.join(ocrLangDir, 'chi_sim.traineddata.gz'))
+    ? { STUDYGRAPH_OCR_LANG_DIR: ocrLangDir }
+    : {}
+
+  await startApi(apiPort, { ...env, ...authEnv, ...storageEnv, ...byokEnv, ...ocrEnv, DATABASE_URL: database.databaseUrl })
   await startWeb(webPort, apiPort, { ...env, ...authEnv })
   return `http://127.0.0.1:${webPort}/`
 }

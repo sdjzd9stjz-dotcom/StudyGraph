@@ -6,6 +6,7 @@ import type { StoredPageText } from './page-text.ts'
 import { extractPptx } from './pptx.ts'
 import { extractPpt } from './ppt.ts'
 import { extractPdf } from './pdf.ts'
+import { ocrPdf } from './pdf-ocr.ts'
 
 /**
  * 按文件类型分派抽取。
@@ -23,6 +24,22 @@ export interface ExtractionResult {
   readonly textChars: number
   readonly checksum: string
   readonly byteSize: number
+  /**
+   * 文字是怎么来的。缺省 `NATIVE` = 文件自带文字层。
+   * `OCR` = 从页面像素识别出来的，**不是原文**，下游引用时必须让人看得出来。
+   */
+  readonly textLayer?: 'NATIVE' | 'OCR'
+  readonly ocr?: { readonly confidence: number; readonly skippedPages: number }
+}
+
+export interface ExtractOptions {
+  /**
+   * 允许对没有文字层的 PDF 做 OCR。
+   *
+   * 默认 false：OCR 是猜测，会把"猜出来的文字"变成可被引用的原文 ——
+   * 这件事必须由用户明确要求，不能因为"反正能抽点东西"就默默打开。
+   */
+  readonly ocr?: boolean
 }
 
 export function detectKind(filename: string): SourceKindDetected {
@@ -37,7 +54,7 @@ export function sha256Of(buffer: Buffer): string {
   return createHash('sha256').update(buffer).digest('hex')
 }
 
-export async function extractSource(filePath: string): Promise<ExtractionResult> {
+export async function extractSource(filePath: string, options: ExtractOptions = {}): Promise<ExtractionResult> {
   const buffer = readFileSync(filePath)
   const filename = path.basename(filePath)
   const kind = detectKind(filename)
@@ -79,12 +96,43 @@ export async function extractSource(filePath: string): Promise<ExtractionResult>
   }
 
   const { pageCount, pages } = await extractPdf(new Uint8Array(buffer))
+  const nativeChars = pages.reduce((sum, page) => sum + page.text.length, 0)
+
+  // 有文字层就是普通 PDF，不碰 OCR
+  if (nativeChars > 0) {
+    return {
+      kind,
+      pageCount,
+      pages,
+      textChars: nativeChars,
+      checksum: sha256Of(buffer),
+      byteSize: buffer.length,
+      textLayer: 'NATIVE',
+    }
+  }
+
+  // 一个字符都没有 = 扫描件。只有用户明确要求才识别。
+  if (!options.ocr) {
+    return {
+      kind,
+      pageCount,
+      pages,
+      textChars: 0,
+      checksum: sha256Of(buffer),
+      byteSize: buffer.length,
+      textLayer: 'NATIVE',
+    }
+  }
+
+  const ocr = await ocrPdf(buffer)
   return {
     kind,
-    pageCount,
-    pages,
-    textChars: pages.reduce((sum, page) => sum + page.text.length, 0),
+    pageCount: Math.max(pageCount, ocr.pages.length),
+    pages: ocr.pages,
+    textChars: ocr.pages.reduce((sum, page) => sum + page.text.length, 0),
     checksum: sha256Of(buffer),
     byteSize: buffer.length,
+    textLayer: 'OCR',
+    ocr: { confidence: ocr.confidence, skippedPages: ocr.skippedPages },
   }
 }

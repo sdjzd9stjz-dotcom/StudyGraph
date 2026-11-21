@@ -54,6 +54,11 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
         throw new AppError(400, 'SOURCE_FILENAME_INVALID', 'x-filename 不是合法的 URI 编码')
       }
 
+      // 扫描件标记：只有用户在界面上勾了"这是扫描件"才为真。
+      // 不猜：没勾就按原样处理，没有文字层时照常报错，绝不偷偷 OCR。
+      const rawOcr = request.headers['x-ocr']
+      const wantsOcr = (Array.isArray(rawOcr) ? rawOcr[0] : rawOcr) === '1'
+
       if (!ALLOWED_EXT.test(filename)) {
         throw new AppError(400, 'SOURCE_TYPE_UNSUPPORTED', `只接受 .pptx 与 .pdf，收到：${filename}`)
       }
@@ -90,7 +95,7 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
           canvasId,
           type: 'SOURCE',
           title: filename,
-          params: { localPath, filename } as object,
+          params: { localPath, filename, ...(wantsOcr ? { ocr: true } : {}) } as object,
           status: 'DRAFT',
           posX: 0,
           posY: 0,
