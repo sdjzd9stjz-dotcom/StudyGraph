@@ -51,6 +51,11 @@ export const TASK_ROUTING: Record<TaskType, ModelRoute> = {
   method: { provider: 'deepseek', model: DEEPSEEK_REASONER, tier: 'frontier' },
   solve: { provider: 'deepseek', model: DEEPSEEK_REASONER, tier: 'frontier' },
   variant: { provider: 'deepseek', model: DEEPSEEK_REASONER, tier: 'frontier' },
+  /**
+   * 底部对话栏：要读画布内容、还要调工具改画布，属于推理型任务。
+   * 在「模型供应商 → 按任务指定模型」里可以单独把它换成更便宜/更快的模型。
+   */
+  assistant: { provider: 'deepseek', model: DEEPSEEK_REASONER, tier: 'frontier' },
 }
 
 /**

@@ -52,6 +52,8 @@ const REQUIRED_CAPABILITY: Record<string, 'jsonObject' | null> = {
   probe: null,
   method: null,
   solve: null,
+  // 对话要的是工具调用能力，不是 JSON 输出能力
+  assistant: null,
 }
 
 export interface ProviderRouteDeps {

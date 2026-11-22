@@ -32,6 +32,8 @@ export const TASK_TYPES = [
   'variant',
   'check',
   'judge',
+  /** 底部对话栏（回答 + 操作画布）。单独一条，学生可以只给它换模型。 */
+  'assistant',
 ] as const
 
 export type TaskType = (typeof TASK_TYPES)[number]

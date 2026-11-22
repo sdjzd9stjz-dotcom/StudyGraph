@@ -616,7 +616,8 @@ export async function runCanvasAgent(
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     const result = await llm.chatWithTools({
-      taskType: 'method',
+      // 独立的任务类型：学生在「模型供应商」里能单独给底部对话指定模型
+      taskType: 'assistant',
       messages,
       tools: CANVAS_TOOLS,
       user: { id: deps.userId } as never,

@@ -15,6 +15,7 @@ const TASK_LABELS: Record<string, string> = {
   probe: '探查',
   method: '方法',
   solve: '解题',
+  assistant: '底部对话',
 }
 
 /**
