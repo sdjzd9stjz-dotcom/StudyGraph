@@ -456,10 +456,37 @@ export interface AgentRunResult {
   readonly reply: string
   readonly changes: readonly CanvasChange[]
   readonly rounds: number
+  /** 实际回答问题的模型标识（来自厂商响应），用来证明用的是用户自己的模型 */
+  readonly model: string | null
 }
 
-/** 画布快照：给模型的"当前状态"，每次运行前取一次，工具执行后由 list_canvas 刷新 */
-async function describeCanvas(deps: AgentDeps): Promise<string> {
+/** 每个节点进上下文的产出摘要上限 */
+const PER_NODE_SUMMARY = 1200
+/** 每个节点进上下文的对话条数 / 字符上限 */
+const PER_NODE_MESSAGES = 6
+const PER_NODE_CONVERSATION = 800
+/** 全部节点加起来的上限：再多会挤掉系统提示与用户问题 */
+const CONTEXT_BUDGET = 16_000
+
+export interface CanvasContext {
+  /** 给模型的完整上下文（节点清单 + 产出内容 + 对话 + 连线） */
+  readonly text: string
+  readonly nodeCount: number
+  /** 有内容被截断的节点数：截断时提示模型可以调 read_node_output 看全文 */
+  readonly truncated: number
+}
+
+/**
+ * 画布上下文：**把所有节点及其内容一起交给模型**。
+ *
+ * 之前只给"标题 + 状态"，模型要回答"这个概念怎么理解"时必须自己调工具去读；
+ * 读不读、读几个，全看它心情 —— 用户要的是"以全部卡片及其内容为上下文"，
+ * 那就必须**主动**把内容放进去，工具只是补全细节的手段。
+ *
+ * 预算按节点均分：节点少时每个能读全文，节点多时按比例截断，
+ * 并在结尾明确写"哪些被截断了"，而不是悄悄丢内容。
+ */
+export async function buildCanvasContext(deps: AgentDeps): Promise<CanvasContext> {
   const [nodes, edges] = await Promise.all([
     deps.prisma.node.findMany({
       where: { canvasId: deps.canvasId },
@@ -471,27 +498,90 @@ async function describeCanvas(deps: AgentDeps): Promise<string> {
       select: { fromNodeId: true, toNodeId: true },
     }),
   ])
-  if (nodes.length === 0) return '（空画布）'
+  if (nodes.length === 0) return { text: '（空画布）', nodeCount: 0, truncated: 0 }
+
+  const ids = nodes.map((node) => node.id)
+  const [artifacts, messages] = await Promise.all([
+    deps.prisma.artifact.findMany({
+      where: { nodeId: { in: ids } },
+      orderBy: { createdAt: 'desc' },
+      select: { nodeId: true, kind: true, structured: true },
+    }),
+    deps.prisma.nodeMessage.findMany({
+      where: { nodeId: { in: ids } },
+      orderBy: { createdAt: 'asc' },
+      select: { nodeId: true, role: true, content: true },
+    }),
+  ])
+
+  const latest = new Map<string, { kind: string; structured: unknown }>()
+  for (const artifact of artifacts) {
+    if (!latest.has(artifact.nodeId)) latest.set(artifact.nodeId, { kind: artifact.kind, structured: artifact.structured })
+  }
+  const conversation = new Map<string, string[]>()
+  for (const message of messages) {
+    const list = conversation.get(message.nodeId) ?? []
+    list.push(`${message.role === 'user' ? '用户' : '助手'}：${message.content.replace(/\s+/g, ' ').trim()}`)
+    conversation.set(message.nodeId, list)
+  }
+
+  // 节点越多，每个分到的预算越小，但不少于 400 字，保证还能看出在讲什么
+  const perNode = Math.max(400, Math.min(PER_NODE_SUMMARY, Math.floor(CONTEXT_BUDGET / nodes.length) - 300))
   const nameOf = new Map(nodes.map((node) => [node.id, node.title ?? node.type]))
-  const lines = nodes.map(
-    (node) => `- ${node.id} | ${node.type} | ${node.title ?? node.type} | ${node.status}`,
-  )
+  const blocks: string[] = []
+  let budget = CONTEXT_BUDGET
+  let truncated = 0
+
+  for (const node of nodes) {
+    const artifact = latest.get(node.id)
+    const summary = artifact ? summarizeArtifact(artifact.kind, artifact.structured) : ''
+    const clippedSummary = summary.length > perNode ? `${summary.slice(0, perNode)}…（已截断，可调 read_node_output 看全文）` : summary
+    if (summary.length > perNode) truncated += 1
+
+    const talk = (conversation.get(node.id) ?? []).slice(-PER_NODE_MESSAGES).join('\n')
+    const clippedTalk = talk.length > PER_NODE_CONVERSATION ? `${talk.slice(0, PER_NODE_CONVERSATION)}…` : talk
+
+    const block =
+      `### ${node.type}｜${node.title ?? node.type}｜${node.status}｜id=${node.id}\n` +
+      (artifact ? `产物（${artifact.kind}）：\n${clippedSummary || '（空）'}\n` : '尚未运行，没有产物\n') +
+      (clippedTalk ? `对话：\n${clippedTalk}\n` : '')
+
+    if (budget - block.length < 0) {
+      truncated += 1
+      break
+    }
+    budget -= block.length
+    blocks.push(block)
+  }
+
   const edgeLines = edges.map(
     (edge) => `- ${nameOf.get(edge.fromNodeId) ?? edge.fromNodeId} → ${nameOf.get(edge.toNodeId) ?? edge.toNodeId}`,
   )
-  return (
-    `节点（id | 类型 | 标题 | 状态）：\n${lines.join('\n')}\n` +
-    (edgeLines.length > 0 ? `连线：\n${edgeLines.join('\n')}` : '连线：无')
-  )
+
+  return {
+    text:
+      `节点与内容（共 ${nodes.length} 个）：\n\n${blocks.join('\n')}\n` +
+      (edgeLines.length > 0 ? `连线：\n${edgeLines.join('\n')}\n` : '连线：无\n') +
+      (truncated > 0 ? `\n（有 ${truncated} 个节点的内容因长度被截断；需要细节时调 read_node_output 读全文）` : ''),
+    nodeCount: nodes.length,
+    truncated,
+  }
 }
 
 const SYSTEM_RULES = [
-  '你是 StudyGraph 画布上的操作助手。你的全部能力就是调用下面这些工具。',
-  '工具只能读写**当前这块画布**：节点、连线、节点的运行产出。',
+  '你是 StudyGraph 画布上的学习助手 + 操作助手。',
+  '',
+  '你有两件事要做：',
+  '· **回答问题**：用户问的任何问题都可以回答。关于画布的问题，优先依据下面给出的全部节点内容；',
+  '  问到画布之外的知识，就用你本身的知识正常回答，但要说明"这部分不在画布内容里"。不要拒答，不要只回"画布上没有"。',
+  '· **操作画布**：通过工具建节点、连线、改提示词、整理布局。',
+  '',
+  '下面「当前画布」里已经包含**每个节点的产出内容与最近对话**，是你回答画布问题的首要依据；',
+  '内容被标注截断时，再调 read_node_output 读全文。',
   '',
   '规则（按重要性排序）：',
   '1. 用户让你建图、改图、删东西时，**直接用工具做**，不要只给建议，也不要说"你可以自己建"。做完用一两句话说明改了什么。',
-  '2. 用户问画布内容时，先用 read_node_output 读对应节点的产出，再依据读到的内容回答；读不到就说"这个节点的产出里没有"，不要编。',
+  '2. 回答画布相关问题时，引用节点里的具体内容（概念名、定义、题目），不要泛泛而谈；内容里确实没有就直说没有，不要编造引文。',
   '3. 只有用户明确要求删除时才调用 delete_node / delete_edge。',
   '4. 不要重复创建用户已经有的节点类型，除非用户明确要求。',
   '4a. 用户要"知识卡"时，如果画布上已有概念抽取节点且跑过，用 split_cards 按概念拆成一概念一节点；不要建一个塞满所有卡的单节点。',
@@ -512,15 +602,17 @@ export async function runCanvasAgent(
   deps: AgentDeps,
   input: AgentRunInput,
 ): Promise<AgentRunResult> {
-  const state = await describeCanvas(deps)
+  // 全部节点及其产出、对话一起交给模型：这是"以全部卡片及其内容为上下文"的落点
+  const context = await buildCanvasContext(deps)
   const messages: AgentMessage[] = [
-    { role: 'system', content: `${SYSTEM_RULES}\n\n当前画布：\n${state}` },
+    { role: 'system', content: `${SYSTEM_RULES}\n\n当前画布（含全部节点内容）：\n${context.text}` },
     ...input.history.slice(-6).map((turn) => ({ role: turn.role, content: turn.text }) as AgentMessage),
     { role: 'user', content: input.message },
   ]
 
   const changes: CanvasChange[] = []
   let lastText = ''
+  let model: string | null = null
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     const result = await llm.chatWithTools({
@@ -545,6 +637,7 @@ export async function runCanvasAgent(
     })
 
     lastText = result.content.trim()
+    model = result.modelVersion
 
     // 没有工具调用 = 模型认为事情办完了
     if (result.toolCalls.length === 0) {
@@ -552,6 +645,7 @@ export async function runCanvasAgent(
         reply: lastText.length > 0 ? lastText : summarizeChanges(changes),
         changes,
         rounds: round + 1,
+        model,
       }
     }
 
@@ -574,6 +668,7 @@ export async function runCanvasAgent(
         ? lastText
         : `这一轮工具调用达到上限（${MAX_TOOL_ROUNDS} 次），先停在这里。已经改动 ${changes.length} 处，你可以让我继续。`,
     changes,
+    model,
     rounds: MAX_TOOL_ROUNDS,
   }
 }

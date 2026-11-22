@@ -12,6 +12,8 @@ export interface AssistantReply {
   reply: string
   changes: CanvasChange[]
   source: string
+  /** 实际回答的模型标识（来自厂商响应） */
+  model?: string | null
 }
 
 interface Turn {
@@ -19,6 +21,7 @@ interface Turn {
   role: 'user' | 'assistant'
   text: string
   changes?: CanvasChange[]
+  model?: string | null
   source?: string
 }
 
@@ -110,7 +113,7 @@ export function AssistantBar({
       const changes = Array.isArray(data.changes) ? data.changes : []
       setThread((prev) => [
         ...prev,
-        { id: `a-${Date.now()}`, role: 'assistant', text: data.reply, changes, source: data.source },
+        { id: `a-${Date.now()}`, role: 'assistant', text: data.reply, changes, source: data.source, model: data.model ?? null },
       ])
       // 模型已经直接改过画布了：刷新一次，让用户看到节点/连线真的变了
       if (changes.length > 0) onApplied()
@@ -155,7 +158,7 @@ export function AssistantBar({
             >
               <div style={{ fontSize: 10, color: '#94a3b8', marginBottom: 3 }}>
                 {turn.role === 'user' ? '你' : 'AI'}
-                {turn.source === 'model' ? ' · 你的模型' : ''}
+                {turn.source === 'model' ? ` · 你的模型${turn.model ? `（${turn.model}）` : ''}` : ''}
               </div>
               <div style={{ color: '#334155', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>{turn.text}</div>
 

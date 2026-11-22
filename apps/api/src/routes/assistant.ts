@@ -221,6 +221,8 @@ export function registerAssistantRoutes(app: FastifyInstance, deps: AssistantRou
       changes: result.changes,
       source: 'model',
       rounds: result.rounds,
+      // 让界面能显示"这次是哪个模型答的"——证明走的是用户自己的模型
+      model: result.model,
     })
   })
 }

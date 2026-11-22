@@ -138,6 +138,10 @@ function makePrisma(seed?: { nodes?: Partial<FakeNode>[]; artifacts?: Array<{ no
         const row = artifacts.find((artifact) => artifact.nodeId === where.nodeId)
         return row ? pick(row, select) : null
       },
+      findMany: async () => [],
+    },
+    nodeMessage: {
+      findMany: async () => [],
     },
     usageRecord: {
       create: async ({ data }: any) => {
