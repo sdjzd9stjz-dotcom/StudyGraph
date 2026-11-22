@@ -259,18 +259,6 @@ export function createOpenAICompatibleProvider(config: OpenAICompatibleConfig) {
         )
       }
 
-      let data: unknown
-      try {
-        data = parseLooseJson(content)
-      } catch {
-        // 截断和"模型没按要求输出"是两件事，告诉用户/日志时不能混为一谈
-        throw new Error(
-          finishReason === 'length'
-            ? `${config.provider} 输出被截断（max_tokens=${budget} 已用完），JSON 不完整：${content.slice(0, 200)}`
-            : `${config.provider} 返回的内容不是合法 JSON：${content.slice(0, 200)}`,
-        )
-      }
-
       const { modelVersion, usage } = assertUsageAndModel(config.provider, payload, (raw) => {
         if (config.provider === 'deepseek') {
           // DeepSeek 把缓存命中直接写在 usage 里（009 §3.1），最省事的一家
@@ -287,6 +275,31 @@ export function createOpenAICompatibleProvider(config: OpenAICompatibleConfig) {
           cachedTokens: details?.cached_tokens,
         }
       })
+
+      /**
+       * 没要求 JSON 的调用**不解析内容**，原样当文本返回。
+       *
+       * 这是"什么时候强制 JSON、什么时候开放"的分界线：
+       *   · 要写进产物、要被程序读字段的（抽取、出题、讲义…）→ 调用方传 jsonSchema，强制 JSON
+       *   · 对话就是对话（节点里的问答、解释、追问）→ 不传 jsonSchema，模型怎么写就怎么回
+       * 以前这里无条件 JSON.parse，于是一段正常的解释文字被判成
+       * "返回的内容不是合法 JSON" —— 错的是解析方，不是模型。
+       */
+      if (!input.jsonSchema) {
+        return { data: { text: content.trim() }, usage, modelVersion }
+      }
+
+      let data: unknown
+      try {
+        data = parseLooseJson(content)
+      } catch {
+        // 截断和"模型没按要求输出"是两件事，告诉用户/日志时不能混为一谈
+        throw new Error(
+          finishReason === 'length'
+            ? `${config.provider} 输出被截断（max_tokens=${budget} 已用完），JSON 不完整：${content.slice(0, 200)}`
+            : `${config.provider} 返回的内容不是合法 JSON：${content.slice(0, 200)}`,
+        )
+      }
 
       return { data, usage, modelVersion }
     }

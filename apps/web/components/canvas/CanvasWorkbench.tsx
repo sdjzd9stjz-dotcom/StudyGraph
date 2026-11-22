@@ -360,6 +360,33 @@ function Inner({
   )
 
   /**
+   * 一键整理：服务端算好分层坐标，本地直接套用（不等整页刷新，点完就动）。
+   *
+   * 只改位置：不建不删、不连线、不执行，也不改任何节点状态。
+   */
+  const arrangeNodes = useCallback(async () => {
+    const response = await fetch(`${apiBaseUrl}/v1/canvases/${canvasId}/layout`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}` },
+    })
+    const body = (await response.json().catch(() => null)) as
+      | { moved?: number; positions?: Record<string, { x: number; y: number }>; error?: { message?: string } }
+      | null
+    if (!response.ok) {
+      notify(body?.error?.message ?? `整理失败：HTTP ${response.status}`)
+      return
+    }
+    const positions = body?.positions ?? {}
+    setNodes((current) =>
+      current.map((node) => {
+        const pos = positions[node.id]
+        return pos ? { ...node, position: { x: pos.x, y: pos.y } } : node
+      }),
+    )
+    notify(`已整理 ${body?.moved ?? Object.keys(positions).length} 个节点`)
+  }, [apiBaseUrl, canvasId, notify, setNodes, token])
+
+  /**
    * 导出讲义 PDF。
    *
    * 正文从服务端取（`GET /v1/nodes/:id/lecture`）—— 画布上那段 `outputSummary`
@@ -698,6 +725,31 @@ function Inner({
         />
 
         <div style={{ flex: 1, position: 'relative' }} ref={wrapper}>
+          {/*
+            一键整理：按依赖方向把节点排成左→右。
+            浮动在画布左上角 —— 它是"看完图之后想让它更清楚"时才点的动作，
+            放进菜单里反而找不到。
+          */}
+          <div style={{ position: 'absolute', top: 12, left: 12, zIndex: 5, display: 'flex', gap: 6 }}>
+            <button
+              type="button"
+              data-testid="arrange-nodes"
+              title="按依赖方向重排节点位置（不改结构、不执行）"
+              onClick={() => void arrangeNodes()}
+              style={{
+                border: '1px solid #cbd5e1',
+                background: '#fff',
+                color: '#334155',
+                borderRadius: 8,
+                padding: '6px 12px',
+                fontSize: 12,
+                cursor: 'pointer',
+                boxShadow: '0 1px 3px rgba(15,23,42,0.08)',
+              }}
+            >
+              ▦ 整理
+            </button>
+          </div>
           {chatTarget && (
             <NodeChat
               nodeId={chatTarget.id}

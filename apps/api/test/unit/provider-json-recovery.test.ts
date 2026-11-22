@@ -186,3 +186,74 @@ test('调用方指定额度时按指定值用，不被默认值覆盖', async ()
   await call({ model: 'deepseek-flash', messages: [], jsonSchema, maxTokens: 2048 })
   assert.equal(seen, 2048)
 })
+
+test('没要求 JSON 的调用：散文原样返回 { text }，不判成"不是合法 JSON"', async () => {
+  // 真实事故：节点对话框里问"为什么需要它"，模型回了一段正常解释，
+  // 适配器却无条件 JSON.parse，把这段回答判成"返回的内容不是合法 JSON"。
+  const prose = '这个节点的产出里只给了一层理由，而且明确标注了缺口。\n\n**理由：**\n• 它是一条转换通道……'
+  const fakeFetch = (async () =>
+    Response.json({
+      model: 'deepseek-flash',
+      choices: [{ message: { content: prose }, finish_reason: 'stop' }],
+      usage: usage(),
+    })) as unknown as typeof fetch
+
+  const call = createOpenAICompatibleProvider({
+    provider: 'deepseek',
+    apiKey: 'sk-test',
+    baseUrl: 'https://api.deepseek.com',
+    fetchImpl: fakeFetch,
+  })
+
+  // 不传 jsonSchema
+  const result = await call({ model: 'deepseek-flash', messages: [{ role: 'user', content: '为什么需要它？' }] })
+  assert.deepEqual(result.data, { text: prose.trim() })
+})
+
+test('不传 jsonSchema 时，出站请求里不能带 response_format，也不能塞"只输出 JSON"的指令', async () => {
+  const bodies: Array<Record<string, any>> = []
+  const fakeFetch = (async (_url: string, init: RequestInit) => {
+    bodies.push(JSON.parse(String(init.body)))
+    return Response.json({
+      model: 'deepseek-flash',
+      choices: [{ message: { content: '好的，我解释一下。' }, finish_reason: 'stop' }],
+      usage: usage(),
+    })
+  }) as unknown as typeof fetch
+
+  const call = createOpenAICompatibleProvider({
+    provider: 'deepseek',
+    apiKey: 'sk-test',
+    baseUrl: 'https://api.deepseek.com',
+    fetchImpl: fakeFetch,
+  })
+
+  await call({ model: 'deepseek-flash', messages: [{ role: 'user', content: '讲讲上确界' }] })
+
+  assert.equal('response_format' in bodies[0]!, false, '对话不该强制 JSON，否则模型只能吐对象')
+  const messages = bodies[0]!.messages as Array<{ role: string; content: string }>
+  assert.equal(
+    messages.some((message) => /只输出一个 JSON/.test(message.content)),
+    false,
+    '没要求 JSON 却不能塞"只输出 JSON"的指令，那会把对话变成格式任务',
+  )
+})
+
+test('要求 JSON 时仍按 JSON 解析（开放格式不能把结构化任务也放开）', async () => {
+  const fakeFetch = (async () =>
+    Response.json({
+      model: 'deepseek-flash',
+      choices: [{ message: { content: goodJson }, finish_reason: 'stop' }],
+      usage: usage(),
+    })) as unknown as typeof fetch
+
+  const call = createOpenAICompatibleProvider({
+    provider: 'deepseek',
+    apiKey: 'sk-test',
+    baseUrl: 'https://api.deepseek.com',
+    fetchImpl: fakeFetch,
+  })
+
+  const result = await call({ model: 'deepseek-flash', messages: [], jsonSchema })
+  assert.deepEqual(result.data, JSON.parse(goodJson))
+})

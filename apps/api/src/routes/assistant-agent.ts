@@ -3,6 +3,7 @@ import type { NodeType } from '../../../../packages/contracts/src/index.ts'
 import type { PrismaClient } from '../../../../packages/db/src/index.ts'
 import { summarizeArtifact } from '../domain/artifact-text.ts'
 import { splitCardsForConcepts } from '../domain/split-cards.ts'
+import { computeLayout } from '../domain/layout.ts'
 import type { AgentMessage, LLMGateway, ToolSpec } from '../llm/types.ts'
 
 /**
@@ -52,6 +53,11 @@ export const CANVAS_TOOLS: readonly ToolSpec[] = [
       required: ['nodeId'],
       additionalProperties: false,
     },
+  },
+  {
+    name: 'arrange_nodes',
+    description: '按依赖方向把画布节点重新排成左→右（上游在左、下游在右）。只改位置，不改结构。',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
     name: 'create_node',
@@ -260,6 +266,29 @@ export async function executeCanvasTool(
         truncated: text.length > OUTPUT_LIMIT,
         content: text.slice(0, OUTPUT_LIMIT),
       })
+    }
+
+    case 'arrange_nodes': {
+      const [nodes, edges] = await Promise.all([
+        deps.prisma.node.findMany({
+          where: { canvasId: deps.canvasId },
+          select: { id: true, posX: true, posY: true },
+        }),
+        deps.prisma.edge.findMany({ where: { canvasId: deps.canvasId }, select: { fromNodeId: true, toNodeId: true } }),
+      ])
+      const positions = computeLayout(
+        nodes.map((node) => ({ id: node.id, x: node.posX, y: node.posY })),
+        edges.map((edge) => ({ from: edge.fromNodeId, to: edge.toNodeId })),
+      )
+      await deps.prisma.$transaction(
+        [...positions.entries()].map(([nodeId, pos]) =>
+          deps.prisma.node.update({ where: { id: nodeId }, data: { posX: pos.x, posY: pos.y } }),
+        ),
+      )
+      return ok(
+        { moved: positions.size },
+        { kind: 'update-node', id: 'layout', label: `整理 ${positions.size} 个节点的位置` },
+      )
     }
 
     case 'create_node': {

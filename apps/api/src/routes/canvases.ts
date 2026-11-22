@@ -3,6 +3,7 @@ import { z } from 'zod'
 
 import type { PrismaClient } from '../../../../packages/db/src/index.ts'
 import { summarizeArtifact } from '../domain/artifact-text.ts'
+import { computeLayout } from '../domain/layout.ts'
 import { findCanvasForUser, requireCanvasOwner } from '../lib/access.ts'
 import { parse } from '../lib/validate.ts'
 import { getAuth } from '../plugins/auth.ts'
@@ -147,6 +148,40 @@ export function registerCanvasRoutes(app: FastifyInstance, deps: CanvasRouteDeps
    * 署名：写 `forkedFromId` 与 `originAuthorName`，原作者 `forkCount` +1。
    * 这是分享工作流的基本礼节，也是规格里「分享时只授予 canvas:read + clone」的落点。
    */
+  /**
+   * 一键整理：按依赖方向重排节点位置（用户 2026-11-21 要求）。
+   *
+   * 只改坐标，不改结构：不建节点、不连线、不执行、不动产物。
+   * 所以它便宜到可以随手点，也**不会**让任何节点失效。
+   */
+  app.post('/v1/canvases/:id/layout', { preHandler: guard('CANVAS_WRITE') }, async (request) => {
+    const auth = getAuth(request)
+    const { id } = request.params as { id: string }
+    await findCanvasForUser(prisma, id, auth.user.id)
+
+    const [nodes, edges] = await Promise.all([
+      prisma.node.findMany({
+        where: { canvasId: id },
+        select: { id: true, posX: true, posY: true },
+      }),
+      prisma.edge.findMany({ where: { canvasId: id }, select: { fromNodeId: true, toNodeId: true } }),
+    ])
+
+    const positions = computeLayout(
+      nodes.map((node) => ({ id: node.id, x: node.posX, y: node.posY })),
+      edges.map((edge) => ({ from: edge.fromNodeId, to: edge.toNodeId })),
+    )
+
+    // 一次事务批量落库：中途失败不会留下"排了一半"的画布
+    await prisma.$transaction(
+      [...positions.entries()].map(([nodeId, pos]) =>
+        prisma.node.update({ where: { id: nodeId }, data: { posX: pos.x, posY: pos.y } }),
+      ),
+    )
+
+    return { moved: positions.size, positions: Object.fromEntries(positions) }
+  })
+
   app.post('/v1/canvases/:id/clone', { preHandler: guard('CANVAS_READ') }, async (request, reply) => {
     const auth = getAuth(request)
     const { id } = request.params as { id: string }

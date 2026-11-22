@@ -143,7 +143,9 @@ function registerNodeChat(app: FastifyInstance, deps: AssistantRouteDeps): void 
         },
       })
 
-      const text = (result.data as { reply?: string } | undefined)?.reply
+      // 不传 jsonSchema 时适配器返回纯文本（{ text }）—— 对话不该被 JSON 解析拖累
+      const text = (result.data as { reply?: string; text?: string } | undefined)?.reply
+        ?? (result.data as { text?: string } | undefined)?.text
       const replyText = typeof text === 'string' && text.trim().length > 0 ? text : '模型没有返回内容，换个问法再试一次。'
       await prisma.nodeMessage.create({ data: { nodeId: id, role: 'assistant', content: replyText } })
       return reply.status(200).send({
