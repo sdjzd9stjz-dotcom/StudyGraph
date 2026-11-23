@@ -30,6 +30,7 @@ import { NodeChat } from './NodeChat'
 import { NodeSearch } from './NodeSearch'
 import { Sidebar } from './Sidebar'
 import type { SkillView } from './Sidebar'
+import { usePrompt } from '../ui/PromptDialog'
 
 const nodeTypes = { sg: SgNode }
 
@@ -206,6 +207,8 @@ function Inner({
     portsByType: Map<NodeType, string[]>
   } | null>(null)
   const [toast, setToast] = useState<string | null>(null)
+  /** 重命名 / 起名 / 拒绝理由：Electron 没有 window.prompt，统一用应用内弹窗 */
+  const { prompt, confirm, dialog } = usePrompt()
   /**
    * 收起的打包组（用户 2026-11-23 要求：点「展开」按节点铺开，收起时看不到内部）。
    *
@@ -222,6 +225,15 @@ function Inner({
     return ids
   }, [groups, collapsed])
   const wrapper = useRef<HTMLDivElement>(null)
+  /**
+   * 右键拖动画布时不要弹右键菜单。
+   *
+   * 用户 2026-11-23 要求：左键选择/框选/移动节点，**右键拖动画布**。
+   * 但浏览器在右键松开时会照常派发 contextmenu —— 拖了半个屏幕再弹菜单很烦。
+   * 所以记下右键按下的位置，松手时若已经移出几像素，就当"平移"处理，不弹菜单。
+   */
+  const rightDown = useRef<{ x: number; y: number } | null>(null)
+  const RIGHT_DRAG_THRESHOLD = 4
   const { screenToFlowPosition, getViewport } = useReactFlow()
   /**
    * 分组框要跟着画布缩放/平移走。
@@ -250,6 +262,14 @@ function Inner({
   useEffect(() => {
     const element = wrapper.current
     if (!element) return
+    /**
+     * 记右键按下的位置（捕获阶段）：右键拖动平移结束后要判断"这是拖了还是单击"。
+     * 用 pointerdown 而不是 contextmenu：前者在按下那一刻就有坐标，
+     * 后者到松手才来，那时已经没法还原起点。
+     */
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.button === 2) rightDown.current = { x: event.clientX, y: event.clientY }
+    }
     const handler = (event: MouseEvent) => {
       const target = event.target as HTMLElement
       // 点在节点上不要弹搜索（那是重命名/编辑的位置）。
@@ -272,7 +292,11 @@ function Inner({
     // stopPropagation，冒泡监听永远收不到（实测：document 上加播放器能收到，
     // 容器上的冒泡监听收不到）。
     element.addEventListener('dblclick', handler, true)
-    return () => element.removeEventListener('dblclick', handler, true)
+    element.addEventListener('pointerdown', onPointerDown, true)
+    return () => {
+      element.removeEventListener('dblclick', handler, true)
+      element.removeEventListener('pointerdown', onPointerDown, true)
+    }
   }, [screenToFlowPosition])
 
   const notify = useCallback((message: string) => {
@@ -325,12 +349,16 @@ function Inner({
   const renameNode = useCallback(
     async (nodeId: string) => {
       const current = nodes.find((node) => node.id === nodeId)
-      const title = window.prompt('节点名称', String(current?.data.title ?? ''))
+      const title = await prompt({
+        title: '重命名节点',
+        defaultValue: String(current?.data.title ?? ''),
+        okText: '保存',
+      })
       if (title === null) return
       await fetch(`${apiBaseUrl}/v1/nodes/${nodeId}`, { method: 'PATCH', headers, body: JSON.stringify({ title }) })
       setNodes((existing) => existing.map((node) => (node.id === nodeId ? { ...node, data: { ...node.data, title } } : node)))
     },
-    [apiBaseUrl, nodes, setNodes, token],
+    [apiBaseUrl, nodes, prompt, setNodes, token],
   )
 
   const runNode = useCallback(
@@ -470,20 +498,20 @@ function Inner({
    * GATE 放行 / 拒绝。
    *
    * 拒绝时必须问理由：无理由的拒绝，上游不知道要改什么（服务端也会拒）。
-   * 这里用 prompt 而不是弹窗组件，是因为拒绝是低频动作，
-   * 为它引入一套 Modal 不值得；但绝不能静默拒绝。
+   * 这里用统一的输入弹窗（不是 window.prompt：Electron 里它直接返回 null）。
    */
   const decideGateNode = useCallback(
     async (nodeId: string, approved: boolean) => {
       let note: string | undefined
       if (!approved) {
-        const input = window.prompt('拒绝的理由（上游据此修改，必填）：')
+        const input = await prompt({
+          title: '拒绝这个闸门',
+          description: '理由必填：上游节点据此知道要改什么。',
+          placeholder: '例如：第 3 张卡的推导不完整',
+          okText: '拒绝',
+        })
         if (input === null) return
-        note = input.trim()
-        if (note.length === 0) {
-          notify('必须填写拒绝理由')
-          return
-        }
+        note = input
       }
       const result = await decideGate(nodeId, note ? { approved, note } : { approved })
       if (!result.ok) {
@@ -497,16 +525,19 @@ function Inner({
         ),
       )
     },
-    [notify, setNodes],
+    [notify, prompt, setNodes],
   )
 
   const openPrompt = useCallback(
     async (nodeId: string) => {
       const bound = skillsByNode.get(nodeId) ?? []
-      const answer = window.prompt(
-        `给这个节点绑定技能（逗号分隔 slug，留空则解绑）\n可选：${skills.map((skill) => skill.slug).join(', ')}`,
-        bound.join(','),
-      )
+      const answer = await prompt({
+        title: '绑定技能',
+        description: `用逗号分隔技能 slug，留空则解绑。可选：${skills.map((skill) => skill.slug).join(', ')}`,
+        defaultValue: bound.join(','),
+        allowEmpty: true,
+        okText: '保存',
+      })
       if (answer === null) return
       const slugs = answer.split(/[,，\s]+/).filter(Boolean)
       const ids = slugs.map((slug) => skills.find((skill) => skill.slug === slug)?.id).filter((id): id is string => Boolean(id))
@@ -520,7 +551,7 @@ function Inner({
       setNodes((current) => current.map((node) => (node.id === nodeId ? { ...node, data: { ...node.data, skills: names } } : node)))
       notify(names.length > 0 ? `已绑定 ${names.join(', ')}（指纹会变，下次执行会重跑）` : '已解绑全部技能')
     },
-    [apiBaseUrl, notify, setNodes, skills, skillsByNode, token],
+    [apiBaseUrl, notify, prompt, setNodes, skills, skillsByNode, token],
   )
 
   /**
@@ -738,7 +769,12 @@ function Inner({
       notify('先在画布上框选至少两个节点')
       return
     }
-    const title = window.prompt('给这个上下文组起个名字', '上下文组')
+    const title = await prompt({
+      title: `打包 ${selected.length} 个节点`,
+      description: '先起个名字，随后 AI 会按内容自动改名。',
+      defaultValue: '上下文组',
+      okText: '打包',
+    })
     if (title === null) return
     const response = await fetch(`${apiBaseUrl}/v1/canvases/${canvasId}/groups`, {
       method: 'POST',
@@ -765,7 +801,7 @@ function Inner({
         notify(`AI 起名：${data.title}`)
       })
       .catch(() => undefined)
-  }, [apiBaseUrl, canvasId, nodes, notify, token])
+  }, [apiBaseUrl, canvasId, nodes, notify, prompt, token])
 
   const moveGroup = useCallback(
     async (group: WorkbenchGroup, x: number, y: number) => {
@@ -883,6 +919,50 @@ function Inner({
             minZoom={0.25}
             maxZoom={2}
             proOptions={{ hideAttribution: true }}
+            /**
+             * ── 鼠标操作方案（用户 2026-11-23 要求）────────────────────────
+             * 左键  ：单击选中 / 空白处拖出选框 / 拖动节点移动
+             * Shift+左键：增选（再点一次取消选中）
+             * 右键拖动：平移画布（右键单击仍弹菜单）
+             * 中键拖动：也可以平移（老习惯，保留）
+             * 滚轮  ：缩放
+             *
+             * 三点说明：
+             *  · `panOnDrag={[1, 2]}`：只允许中键(1)、右键(2)平移。默认是左键平移，
+             *    那样左键拖空白只会移动画布，永远框选不了。
+             *  · `selectionOnDrag`：空白处左键拖动即为框选。
+             *  · `selectionKeyCode` 设成 null：框选不需要按住任何修饰键
+             *    （默认要按 Shift，那是"平移为主"时代的设定）。
+             */
+            panOnDrag={[1, 2]}
+            selectionOnDrag
+            selectionKeyCode={null}
+            multiSelectionKeyCode="Shift"
+            selectNodesOnDrag={false}
+            /**
+             * 删除键：默认行为只是从本地状态里移除，刷新就回来（图上删了库里没删）。
+             * 这里关掉默认、自己接管，逐个走删除接口，并且删之前问一句 ——
+             * 选中一片再按 Backspace 是很容易误触的动作。
+             */
+            deleteKeyCode={null}
+            onKeyDown={(event) => {
+              if (event.key !== 'Backspace' && event.key !== 'Delete') return
+              const target = event.target as HTMLElement
+              if (target.closest('input, textarea, [contenteditable="true"]')) return
+              const selected = nodes.filter((node) => node.selected)
+              if (selected.length === 0) return
+              event.preventDefault()
+              void (async () => {
+                const ok = await confirm({
+                  title: '删除节点',
+                  message: `删除选中的 ${selected.length} 个节点？\n\n连在它们上面的线会一起消失，无法恢复。`,
+                  okText: '删除',
+                  danger: true,
+                })
+                if (!ok) return
+                for (const node of selected) await deleteNode(node.id)
+              })()
+            }}
             onNodeDragStop={async (_event, node) => {
               await fetch(`${apiBaseUrl}/v1/nodes/${node.id}`, {
                 method: 'PATCH',
@@ -893,12 +973,19 @@ function Inner({
             onPaneContextMenu={(event) => {
               event.preventDefault()
               const native = event as unknown as MouseEvent
+              // 右键平移结束时也会走到这里：位移超过阈值就不弹菜单
+              const start = rightDown.current
+              rightDown.current = null
+              if (start && Math.hypot(native.clientX - start.x, native.clientY - start.y) > RIGHT_DRAG_THRESHOLD) return
               const flow = screenToFlowPosition({ x: native.clientX, y: native.clientY })
               setMenu({ x: native.clientX, y: native.clientY, nodeId: null, flowX: flow.x, flowY: flow.y })
             }}
             onNodeContextMenu={(event, node) => {
               event.preventDefault()
               const native = event as unknown as MouseEvent
+              const start = rightDown.current
+              rightDown.current = null
+              if (start && Math.hypot(native.clientX - start.x, native.clientY - start.y) > RIGHT_DRAG_THRESHOLD) return
               setMenu({ x: native.clientX, y: native.clientY, nodeId: node.id, flowX: node.position.x, flowY: node.position.y })
             }}
             onDrop={async (event) => {
@@ -1084,6 +1171,8 @@ function Inner({
           onPackGroup={() => void packGroup()}
         />
       )}
+
+      {dialog}
 
       <AssistantBar
         canvasId={canvasId}

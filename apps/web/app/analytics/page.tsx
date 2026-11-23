@@ -1,5 +1,7 @@
 import Link from 'next/link'
 
+import { BackLink } from '../../components/BackLink'
+
 import { fetchErrorCatalog, fetchErrorTags } from '../../lib/api'
 
 export const dynamic = 'force-dynamic'
@@ -35,10 +37,10 @@ export default async function AnalyticsPage() {
 
   return (
     <main style={{ padding: 32, maxWidth: 820, margin: '0 auto' }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+        <BackLink label="错题看板" />
         <h1 style={{ fontSize: 22, fontWeight: 700 }}>错题看板</h1>
         <span style={{ fontSize: 12, color: '#9ca3af' }}>最近 {stats.range}</span>
-        <Link href="/" style={{ color: '#2563eb', fontSize: 13, marginLeft: 'auto' }}>← 返回画布列表</Link>
       </div>
 
       <p style={{ fontSize: 13, color: '#6b7280', marginBottom: 20 }}>

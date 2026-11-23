@@ -5,6 +5,8 @@ import { useRouter } from 'next/navigation'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { TASK_LABELS, TASK_TYPE_KEYS } from '../../../packages/contracts/src/client'
+import { recordVisit } from '../lib/nav-trail'
+import { usePrompt } from './ui/PromptDialog'
 
 /**
  * 首页画布列表（用户 2026-11-23 要求）。
@@ -64,6 +66,8 @@ export function CanvasList({
   })
   const [models, setModels] = useState<Array<{ credentialId: string; provider: string; modelId: string }>>([])
   const menuRef = useRef<HTMLDivElement>(null)
+  /** 重命名 / 删除确认走应用内弹窗：Electron 没有 window.prompt（返回 null） */
+  const { prompt, confirm, dialog } = usePrompt()
 
   const headers = { 'content-type': 'application/json', authorization: `Bearer ${token}` }
   const notify = useCallback((message: string) => {
@@ -74,6 +78,16 @@ export function CanvasList({
   useEffect(() => {
     setCanvases(initialCanvases)
   }, [initialCanvases])
+
+  /**
+   * 把自己记进访问轨迹。
+   *
+   * 进入画布后点「返回」，要靠这条记录才知道上一页是首页 ——
+   * 没有它，画布页的返回链接只能退化成默认目标。
+   */
+  useEffect(() => {
+    recordVisit({ path: '/', label: '全部画布' })
+  }, [])
 
   // 点别处关菜单（菜单本身不算"别处"）
   useEffect(() => {
@@ -160,13 +174,14 @@ export function CanvasList({
 
   const rename = useCallback(async (id: string) => {
     const current = canvases.find((canvas) => canvas.id === id)
-    const title = window.prompt('画布名称', current?.title ?? '')
-    if (title === null) return
-    const trimmed = title.trim()
-    if (trimmed.length === 0) {
-      notify('名字不能为空')
-      return
-    }
+    const trimmed = await prompt({
+      title: '重命名画布',
+      description: '名字会显示在首页列表和画布页标题上。',
+      defaultValue: current?.title ?? '',
+      placeholder: '例如：高数 第三章 导数',
+      okText: '保存',
+    })
+    if (trimmed === null) return
     const response = await fetch(`${apiBaseUrl}/v1/canvases/${id}`, {
       method: 'PATCH',
       headers,
@@ -178,12 +193,18 @@ export function CanvasList({
     }
     setCanvases((current) => current.map((canvas) => (canvas.id === id ? { ...canvas, title: trimmed } : canvas)))
     notify('已重命名')
-  }, [apiBaseUrl, canvases, headers, notify])
+  }, [apiBaseUrl, canvases, headers, notify, prompt])
 
   const remove = useCallback(async (id: string) => {
     const current = canvases.find((canvas) => canvas.id === id)
     // 删除是不可逆的：必须让用户看清要删的是哪一张
-    if (!window.confirm(`删除画布「${current?.title ?? id}」？\n\n画布上的节点、课件与产物会一并删除，无法恢复。`)) return
+    const ok = await confirm({
+      title: '删除画布',
+      message: `删除画布「${current?.title ?? id}」？\n\n画布上的节点、课件与产物会一并删除，无法恢复。`,
+      okText: '删除',
+      danger: true,
+    })
+    if (!ok) return
     const response = await fetch(`${apiBaseUrl}/v1/canvases/${id}`, { method: 'DELETE', headers })
     if (!response.ok && response.status !== 204) {
       const body = (await response.json().catch(() => null)) as { error?: { message?: string } } | null
@@ -192,7 +213,7 @@ export function CanvasList({
     }
     setCanvases((current) => current.filter((canvas) => canvas.id !== id))
     notify('已删除')
-  }, [apiBaseUrl, canvases, headers, notify])
+  }, [apiBaseUrl, canvases, confirm, headers, notify])
 
   /** 松开鼠标：把拖动的项插到目标位置，然后整表提交顺序 */
   const drop = useCallback(async (targetId: string) => {
@@ -422,6 +443,8 @@ export function CanvasList({
           </div>
         </div>
       )}
+
+      {dialog}
 
       {toast && (
         <div

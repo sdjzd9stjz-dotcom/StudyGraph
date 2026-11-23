@@ -1,5 +1,7 @@
 import Link from 'next/link'
 
+import { BackLink } from '../../components/BackLink'
+
 import { guideToHtml, loadGuide } from '../../lib/guide'
 
 export const dynamic = 'force-dynamic'
@@ -17,9 +19,9 @@ export default function GuidePage() {
 
   return (
     <main style={{ padding: '24px 32px 48px', maxWidth: 900, margin: '0 auto' }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
         <h1 style={{ fontSize: 22, fontWeight: 700 }}>使用教程</h1>
-        <Link href="/" data-testid="guide-home" style={{ color: '#2563eb', fontSize: 13, marginLeft: 'auto' }}>← 返回画布列表</Link>
+        <BackLink label="使用教程" testId="guide-home" />
         <Link href="/settings" style={{ color: '#2563eb', fontSize: 13 }}>
           模型供应商
         </Link>

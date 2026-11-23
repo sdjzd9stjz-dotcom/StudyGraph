@@ -2,6 +2,7 @@ import Link from 'next/link'
 
 import { CanvasWorkbench } from '../../../components/canvas/CanvasWorkbench'
 import { ConceptPanel } from '../../../components/ConceptPanel'
+import { BackLink } from '../../../components/BackLink'
 import { CanvasAiConfig } from '../../../components/canvas/CanvasAiConfig'
 import { SourceUploader } from '../../../components/SourceUploader'
 import { API_BASE_URL, fetchCanvas, fetchCanvasConcepts, fetchCanvasSkills, fetchGroups, serverToken } from '../../../lib/api'
@@ -39,9 +40,8 @@ export default async function CanvasPage({ params }: { params: { canvasId: strin
           background: '#fff',
         }}
       >
-        <Link href="/" style={{ color: '#64748b', fontSize: 13, textDecoration: 'none' }}>
-          ← 全部画布
-        </Link>
+        {/* 名字是这块画布的标题：从题库/复习点回来时，标题就是&quot;返回到哪&quot;的坐标 */}
+        <BackLink label={canvas.title} />
         <h1 style={{ fontSize: 15, fontWeight: 700, margin: 0 }}>{canvas.title}</h1>
         <span style={{ color: '#cbd5e1', fontSize: 11 }}>{canvas.nodes.length} 个节点</span>
 

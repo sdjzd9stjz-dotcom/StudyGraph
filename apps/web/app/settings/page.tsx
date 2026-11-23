@@ -1,5 +1,7 @@
 import Link from 'next/link'
 
+import { BackLink } from '../../components/BackLink'
+
 import { ProviderSettings } from '../../components/ProviderSettings'
 import { API_BASE_URL, fetchProviders, serverToken } from '../../lib/api'
 
@@ -10,9 +12,9 @@ export default async function SettingsPage() {
 
   return (
     <main style={{ padding: 32, maxWidth: 820, margin: '0 auto' }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 20 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
         <h1 style={{ fontSize: 22, fontWeight: 700 }}>模型供应商</h1>
-        <Link href="/" style={{ color: '#2563eb', fontSize: 13, marginLeft: 'auto' }}>← 返回画布列表</Link>
+        <BackLink label="模型供应商" />
       </div>
 
       <p style={{ fontSize: 13, color: '#6b7280', marginBottom: 20 }}>

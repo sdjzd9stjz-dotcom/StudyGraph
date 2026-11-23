@@ -1,5 +1,7 @@
 import Link from 'next/link'
 
+import { BackLink } from '../../components/BackLink'
+
 import { ProblemLibrary } from '../../components/ProblemLibrary'
 import { API_BASE_URL, fetchCanvasList, fetchProblems, serverToken } from '../../lib/api'
 
@@ -18,13 +20,13 @@ export default async function ProblemsPage({ searchParams }: { searchParams: { c
 
   return (
     <main style={{ padding: 32, maxWidth: 900, margin: '0 auto' }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+        <BackLink label="题库" />
         <h1 style={{ fontSize: 22, fontWeight: 700 }}>题库</h1>
         {canvasId && <span style={{ fontSize: 12, color: '#9ca3af' }}>{problems.length} 道题</span>}
         <Link href="/analytics" style={{ color: '#2563eb', fontSize: 13, marginLeft: 'auto' }}>
           错题看板
         </Link>
-        <Link href="/" style={{ color: '#2563eb', fontSize: 13 }}>← 返回画布列表</Link>
       </div>
 
       {canvases.length === 0 ? (
