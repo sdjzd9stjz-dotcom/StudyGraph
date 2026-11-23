@@ -47,6 +47,14 @@ export default async function CanvasPage({ params }: { params: { canvasId: strin
           <Link href="/settings" style={{ color: '#2563eb', fontSize: 12, textDecoration: 'none' }}>
             模型供应商
           </Link>
+          {/* 画布里最需要教程：不知道从哪下手是新手卡住的第一步 */}
+          <Link
+            href="/guide"
+            data-testid="guide-entry-canvas"
+            style={{ color: '#0f766e', fontSize: 12, textDecoration: 'none', fontWeight: 600 }}
+          >
+            📖 教程
+          </Link>
           <Link href="/review" style={{ color: '#2563eb', fontSize: 12, textDecoration: 'none' }}>
             今日到期
           </Link>

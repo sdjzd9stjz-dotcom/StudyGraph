@@ -95,6 +95,111 @@ function extractJsonValue(text: string): string | null {
   return null
 }
 
+/**
+ * 把 SSE 流还原成和非流式一样的响应形状。
+ *
+ * 为什么要支持流式：有的中转站/校园网关**只接受** `stream: true`，
+ * 回 `400 stream_required: This group only accepts streaming requests`。
+ * 对我们来说流式没有任何好处（不需要逐字上屏），但没有它就用不了那个端点。
+ * 所以只在被明确拒绝时降级，不默认开流式 —— 流式解析器多一层出错风险。
+ *
+ * 要拼回去的三样东西：
+ *   · `content`：多个 delta 拼接
+ *   · `tool_calls`：按 index 归组，id/name 只在首个 delta 出现，arguments 逐段拼接
+ *   · `usage`：只有请求了 include_usage 才有，通常在最后一个空 choices 的块里
+ */
+async function readSseAsPayload(response: Response): Promise<{
+  model?: unknown
+  choices?: Array<{
+    message?: {
+      content?: string
+      reasoning_content?: string
+      tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }>
+    }
+    finish_reason?: string
+  }>
+  usage?: unknown
+}> {
+  const text = await response.text()
+  let content = ''
+  let reasoning = ''
+  let finishReason: string | undefined
+  let model: unknown
+  let usage: unknown
+  const calls = new Map<number, { id?: string; name?: string; args: string }>()
+
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line.startsWith('data:')) continue
+    const data = line.slice('data:'.length).trim()
+    if (data.length === 0 || data === '[DONE]') continue
+
+    let chunk: {
+      model?: unknown
+      usage?: unknown
+      choices?: Array<{
+        delta?: {
+          content?: string | null
+          reasoning_content?: string
+          tool_calls?: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }>
+        }
+        finish_reason?: string | null
+      }>
+    }
+    try {
+      chunk = JSON.parse(data)
+    } catch {
+      continue // 心跳/注释行，跳过
+    }
+
+    if (typeof chunk.model === 'string') model = chunk.model
+    if (chunk.usage) usage = chunk.usage
+
+    const choice = chunk.choices?.[0]
+    if (!choice) continue
+    if (typeof choice.finish_reason === 'string') finishReason = choice.finish_reason
+    const delta = choice.delta
+    if (!delta) continue
+    if (typeof delta.content === 'string') content += delta.content
+    if (typeof delta.reasoning_content === 'string') reasoning += delta.reasoning_content
+    for (const call of delta.tool_calls ?? []) {
+      const index = typeof call.index === 'number' ? call.index : 0
+      const slot = calls.get(index) ?? { args: '' }
+      if (call.id) slot.id = call.id
+      if (call.function?.name) slot.name = call.function.name
+      if (call.function?.arguments) slot.args += call.function.arguments
+      calls.set(index, slot)
+    }
+  }
+
+  return {
+    model,
+    usage,
+    choices: [
+      {
+        finish_reason: finishReason,
+        message: {
+          content,
+          ...(reasoning.length > 0 ? { reasoning_content: reasoning } : {}),
+          ...(calls.size > 0
+            ? {
+                tool_calls: [...calls.entries()]
+                  .sort(([a], [b]) => a - b)
+                  .map(([, call], index) => ({
+                    id: call.id ?? `call_${index}`,
+                    function: { name: call.name ?? '', arguments: call.args || '{}' },
+                  })),
+              }
+            : {}),
+        },
+      },
+    ],
+  }
+}
+
+/** 这个错误是不是"必须流式" */
+const needsStream = (text: string) => /stream_required|only accepts streaming|stream"?\s*:\s*true/i.test(text)
+
 function parseLooseJson(content: string): unknown {
   const trimmed = content.replace(/^﻿/, '').trim()
   const fenced = /```(?:json|JSON)?\s*([\s\S]*?)```/.exec(trimmed)?.[1]?.trim()
@@ -165,26 +270,48 @@ export function createOpenAICompatibleProvider(config: OpenAICompatibleConfig) {
      * 每一步都必须确认错误确实是 `response_format` 引起的，
      * 401 / 429 重试没有意义，只会多花一次请求。
      */
-    const postWithFormatFallback = async (payload: Record<string, unknown>) => {
-      const first = await post(payload)
-      if (first.ok || !payload.response_format) return first
+    /**
+     * 带两段降级的请求：先降 `response_format`，再降流式。
+     *
+     * 每段都只用"响应里是不是这个原因"来决定要不要降级 ——
+     * 401/429 重试没有意义，只会多花一次请求。
+     */
+    const postAdaptive = async (payload: Record<string, unknown>): Promise<Response> => {
+      let current = payload
+      let streamed = false
 
-      const firstText = await first.clone().text().catch(() => '')
-      if (!/response_format|json_schema|json_object|unavailable/i.test(firstText)) return first
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const response = await post({ ...current, ...(streamed ? { stream: true } : {}) })
+        if (response.ok) return response
 
-      const currentType = (payload.response_format as { type?: string }).type
+        const text = await response.clone().text().catch(() => '')
 
-      if (currentType !== 'json_object') {
-        const second = await post({ ...payload, response_format: { type: 'json_object' } })
-        if (second.ok) return second
+        // 有的端点只认流式（校园网关/中转站）：加 stream 重发，回来自己拼
+        if (needsStream(text) && !streamed) {
+          streamed = true
+          current = {
+            ...current,
+            ...(config.provider === 'deepseek' ? {} : {}),
+            stream_options: { include_usage: true },
+          }
+          continue
+        }
 
-        const secondText = await second.clone().text().catch(() => '')
-        if (!/response_format|json_schema|json_object|unavailable/i.test(secondText)) return second
+        if (!current.response_format) return response
+        if (!/response_format|json_schema|json_object|unavailable/i.test(text)) return response
+
+        const currentType = (current.response_format as { type?: string }).type
+        if (currentType !== 'json_object') {
+          current = { ...current, response_format: { type: 'json_object' } }
+          continue
+        }
+
+        const { response_format: _dropped, ...rest } = current
+        void _dropped
+        current = rest
       }
 
-      const { response_format: _dropped, ...rest } = payload
-      void _dropped
-      return post(rest)
+      return post(current)
     }
 
     let budget = Math.min(Math.max(input.maxTokens ?? DEFAULT_MAX_TOKENS, 512), HARD_MAX_TOKENS)
@@ -212,14 +339,16 @@ export function createOpenAICompatibleProvider(config: OpenAICompatibleConfig) {
         body.prompt_cache_key = input.cachePrefix.key
       }
 
-      const response = await postWithFormatFallback(body)
+      const response = await postAdaptive(body)
 
       if (!response.ok) {
         const text = await response.text()
         throw new Error(`${config.provider} ${response.status}: ${text.slice(0, 400)}`)
       }
 
-      const payload = (await response.json()) as {
+      // 走流式降级时响应是 SSE，先还原成普通响应形状，下游逻辑完全不变
+      const isSse = (response.headers.get('content-type') ?? '').includes('text/event-stream')
+      const payload = (isSse ? await readSseAsPayload(response) : await response.json()) as {
         model?: unknown
         choices?: Array<{
           message?: { content?: string; reasoning_content?: string }
@@ -366,18 +495,34 @@ export function createOpenAICompatibleAgent(config: OpenAICompatibleConfig) {
         tool_choice: 'auto',
       }
 
-      const response = await doFetch(`${config.baseUrl}/chat/completions`, {
+      /**
+       * 与普通调用同一套降级：有的端点（校园网关/中转站）只接受流式，
+       * 会回 400 stream_required。工具调用同样必须能走这条路，
+       * 否则"能聊天但不能改画布"—— 半残比不能更让人困惑。
+       */
+      let response = await doFetch(`${config.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${config.apiKey}` },
         body: JSON.stringify(body),
       })
 
       if (!response.ok) {
-        const text = await response.text()
-        throw new Error(`${config.provider} ${response.status}: ${text.slice(0, 400)}`)
+        const text = await response.clone().text().catch(() => '')
+        if (needsStream(text)) {
+          response = await doFetch(`${config.baseUrl}/chat/completions`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${config.apiKey}` },
+            body: JSON.stringify({ ...body, stream: true, stream_options: { include_usage: true } }),
+          })
+        }
+        if (!response.ok) {
+          const failure = await response.text()
+          throw new Error(`${config.provider} ${response.status}: ${failure.slice(0, 400)}`)
+        }
       }
 
-      const payload = (await response.json()) as {
+      const isSse = (response.headers.get('content-type') ?? '').includes('text/event-stream')
+      const payload = (isSse ? await readSseAsPayload(response) : await response.json()) as {
         model?: unknown
         choices?: Array<{
           message?: {

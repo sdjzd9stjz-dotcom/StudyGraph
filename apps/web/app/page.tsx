@@ -32,6 +32,9 @@ export default async function HomePage() {
         <Link href="/settings" style={{ color: '#2563eb', fontSize: 13 }}>
           模型供应商
         </Link>
+        <Link href="/guide" data-testid="guide-entry" style={{ color: '#0f766e', fontSize: 13, fontWeight: 600 }}>
+          使用教程
+        </Link>
       </div>
 
       <ul style={{ listStyle: 'none', padding: 0, display: 'grid', gap: 8 }}>

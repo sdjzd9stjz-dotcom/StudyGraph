@@ -78,6 +78,23 @@ writeFileSync(
   `${JSON.stringify({ name: 'studygraph', version: '0.0.0', main: 'main.cjs' }, null, 2)}\n`,
 )
 
+// ── 2.4 使用说明书（应用内「使用教程」页读它，不复制内容以免分叉）─────────
+step('复制使用说明书')
+const guideDirs = [
+  path.join(appBuild, 'apps', 'web', 'docs'),
+  path.join(appBuild, 'docs'),
+]
+for (const dir of guideDirs) {
+  mkdirSync(dir, { recursive: true })
+  copyFileSync(path.join(root, 'docs', '使用说明书.md'), path.join(dir, '使用说明书.md'))
+}
+if (existsSync(path.join(root, 'docs', '使用说明书.pdf'))) {
+  for (const dir of guideDirs) {
+    copyFileSync(path.join(root, 'docs', '使用说明书.pdf'), path.join(dir, '使用说明书.pdf'))
+  }
+}
+console.log('说明书已复制到', guideDirs.map((dir) => path.relative(appBuild, dir)).join(' / '))
+
 // ── 2.5 内置 PostgreSQL 运行时 ─────────────────────────────────────────────
 step('复制内置 PostgreSQL')
 const pgRuntime = path.join(root, 'vendor', 'pg16')

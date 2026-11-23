@@ -67,6 +67,14 @@ export interface SgNodeData {
 export function SgNode({ id, data }: NodeProps) {
   const d = data as SgNodeData
   const [hover, setHover] = useState(false)
+  /**
+   * 面板钉住：光标进了输入框就锁定展开，离开面板才解除。
+   *
+   * 之前只认 mouseenter/mouseleave：光标一离开节点边框（比如点到输入框里
+   * 但鼠标划出去、或者节点的重排让位置变了），面板立刻收起，
+   * 正在输入的内容被藏起来，继续打字就打到别处 —— 用户实际遇到的现象。
+   */
+  const [pinned, setPinned] = useState(false)
   const [hoverPort, setHoverPort] = useState<{ side: 'in' | 'out'; name: string; type: string; top: number } | null>(null)
   const color = nodeColor(d.nodeType)
 
@@ -91,7 +99,13 @@ export function SgNode({ id, data }: NodeProps) {
       data-status={d.status}
       data-connect-highlight={d.connectHighlight ?? undefined}
       onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
+      onMouseLeave={() => {
+        setHover(false)
+        if (!pinned) return
+        // 钉住状态下把焦点收回，让面板能合上（否则光标走了它就再也关不掉了）
+        const active = typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null
+        if (active && active !== document.body) active.blur()
+      }}
       style={{
         position: 'relative',
         width: 232,
@@ -311,14 +325,21 @@ export function SgNode({ id, data }: NodeProps) {
       {/* 提示词窗：悬停才展开 */}
       <div
         data-testid="prompt-panel"
-        data-expanded={hover ? 'true' : 'false'}
+        data-expanded={hover || pinned ? 'true' : 'false'}
+        onFocusCapture={() => setPinned(true)}
+        onBlurCapture={(event) => {
+          // 焦点还在面板内部（从一个输入框切到另一个）时不解除
+          const next = event.relatedTarget as Node | null
+          if (!next || !event.currentTarget.contains(next)) setPinned(false)
+        }}
+        onPointerDownCapture={() => setPinned(true)}
         style={{
           // 有参数要填的节点给更高的展开高度：题目原文是多行的，128px 装不下
-          maxHeight: hover ? (fields.length > 0 ? 300 : 128) : 0,
-          opacity: hover ? 1 : 0,
+          maxHeight: hover || pinned ? (fields.length > 0 ? 300 : 128) : 0,
+          opacity: hover || pinned ? 1 : 0,
           overflow: 'hidden',
           transition: 'max-height .16s ease, opacity .12s',
-          borderBottom: hover ? '1px solid #e5e7eb' : 'none',
+          borderBottom: hover || pinned ? '1px solid #e5e7eb' : 'none',
           background: '#f8fafc',
         }}
       >
