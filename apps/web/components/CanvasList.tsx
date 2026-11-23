@@ -4,6 +4,8 @@ import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
+import { TASK_LABELS, TASK_TYPE_KEYS } from '../../../packages/contracts/src/client'
+
 /**
  * 首页画布列表（用户 2026-11-23 要求）。
  *
@@ -49,7 +51,17 @@ export function CanvasList({
   const [dragId, setDragId] = useState<string | null>(null)
   const [overId, setOverId] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
-  const [draft, setDraft] = useState({ title: '', model: '', credentialId: '' })
+  /**
+   * 新建画布时的 AI 配置：**按功能分别选择**（用户 2026-11-23 要求）。
+   *
+   * 之前只能给"底部对话"选一个模型，等于这一项配置没有对齐全局的能力 ——
+   * 全局那边每个功能都能单独指定，这里也必须是同一套粒度。
+   * 空字符串 = 该功能跟随全局。
+   */
+  const [draft, setDraft] = useState<{ title: string; prefs: Record<string, string> }>({
+    title: '',
+    prefs: {},
+  })
   const [models, setModels] = useState<Array<{ credentialId: string; provider: string; modelId: string }>>([])
   const menuRef = useRef<HTMLDivElement>(null)
 
@@ -76,7 +88,7 @@ export function CanvasList({
   /** 打开新建对话框时拉一次可用模型，供"画布 AI 配置"下拉使用 */
   const openCreate = useCallback(async () => {
     setCreating(true)
-    setDraft({ title: '', model: '', credentialId: '' })
+    setDraft({ title: '', prefs: {} })
     try {
       const response = await fetch(`${apiBaseUrl}/v1/providers`, { headers: { authorization: `Bearer ${token}` } })
       if (!response.ok) return
@@ -117,13 +129,26 @@ export function CanvasList({
       }
       const canvas = (await response.json()) as { id: string }
 
-      // 选了模型就写成这块画布自己的配置（用户要求 AI 配置每块画布独立）
-      if (draft.credentialId && draft.model) {
-        await fetch(`${apiBaseUrl}/v1/canvases/${canvas.id}/model-prefs/assistant`, {
+      /**
+       * 整批提交这块画布的配置。
+       *
+       * 用批量接口而不是逐条 PUT：8 个功能就是 8 次往返，
+       * 中途失败还会留下"配了一半"的画布。批量接口整批校验、整批写入。
+       */
+      const prefs = Object.entries(draft.prefs)
+        .filter(([, value]) => value.length > 0)
+        .map(([taskType, value]) => {
+          const [credentialId, modelId] = value.split('::')
+          return { taskType, credentialId: credentialId ?? '', modelId: modelId ?? '' }
+        })
+      if (prefs.length > 0) {
+        const saved = await fetch(`${apiBaseUrl}/v1/canvases/${canvas.id}/model-prefs`, {
           method: 'PUT',
           headers,
-          body: JSON.stringify({ credentialId: draft.credentialId, modelId: draft.model }),
-        }).catch(() => undefined)
+          body: JSON.stringify({ prefs }),
+        }).catch(() => null)
+        // 配置失败不该阻止进入画布：画布已经建好，配置可以稍后补
+        if (!saved || !saved.ok) notify('画布已创建，但 AI 配置没保存成功，可以进去后再配')
       }
 
       setCreating(false)
@@ -349,30 +374,38 @@ export function CanvasList({
               style={{ width: '100%', border: '1px solid #cbd5e1', borderRadius: 8, padding: '8px 10px', fontSize: 13, marginBottom: 14 }}
             />
 
-            <label style={{ display: 'block', fontSize: 12, color: '#475569', marginBottom: 4 }}>
-              这块画布使用的模型（可留空，之后再配）
-            </label>
-            <select
-              data-testid="create-canvas-model"
-              value={draft.credentialId && draft.model ? `${draft.credentialId}::${draft.model}` : ''}
-              onChange={(event) => {
-                const value = event.target.value
-                if (!value) {
-                  setDraft((current) => ({ ...current, credentialId: '', model: '' }))
-                  return
-                }
-                const [credentialId, model] = value.split('::')
-                setDraft((current) => ({ ...current, credentialId: credentialId ?? '', model: model ?? '' }))
-              }}
-              style={{ width: '100%', border: '1px solid #cbd5e1', borderRadius: 8, padding: '8px 10px', fontSize: 13, marginBottom: 18 }}
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 6 }}>
+              <label style={{ fontSize: 12, color: '#475569' }}>这块画布使用的模型</label>
+              <span style={{ fontSize: 11, color: '#94a3b8' }}>每个功能可以不同；留空则跟随全局</span>
+            </div>
+            <div
+              data-testid="create-canvas-prefs"
+              style={{ maxHeight: 216, overflowY: 'auto', border: '1px solid #e2e8f0', borderRadius: 8, padding: '8px 10px', marginBottom: 18, display: 'grid', gap: 7 }}
             >
-              <option value="">使用全局默认</option>
-              {models.map((option) => (
-                <option key={`${option.credentialId}::${option.modelId}`} value={`${option.credentialId}::${option.modelId}`}>
-                  {option.provider} · {option.modelId}
-                </option>
+              {TASK_TYPE_KEYS.map((taskType) => (
+                <div key={taskType} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ width: 132, fontSize: 12, color: '#475569' }}>{TASK_LABELS[taskType] ?? taskType}</span>
+                  <select
+                    data-testid={`create-canvas-model-${taskType}`}
+                    value={draft.prefs[taskType] ?? ''}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        prefs: { ...current.prefs, [taskType]: event.target.value },
+                      }))
+                    }
+                    style={{ flex: 1, border: '1px solid #cbd5e1', borderRadius: 7, padding: '5px 8px', fontSize: 12 }}
+                  >
+                    <option value="">跟随全局</option>
+                    {models.map((option) => (
+                      <option key={`${option.credentialId}::${option.modelId}`} value={`${option.credentialId}::${option.modelId}`}>
+                        {option.provider} · {option.modelId}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               ))}
-            </select>
+            </div>
 
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
               <button type="button" onClick={() => setCreating(false)} style={miniButton}>取消</button>

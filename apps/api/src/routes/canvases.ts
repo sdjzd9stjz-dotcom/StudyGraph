@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 
+import { REQUIRED_CAPABILITY, isTaskType } from '../../../../packages/contracts/src/index.ts'
 import type { PrismaClient } from '../../../../packages/db/src/index.ts'
 import { summarizeArtifact } from '../domain/artifact-text.ts'
 import { computeLayout } from '../domain/layout.ts'
@@ -145,15 +146,40 @@ export function registerCanvasRoutes(app: FastifyInstance, deps: CanvasRouteDeps
   app.put('/v1/canvases/:id/model-prefs/:taskType', { preHandler: guard('CANVAS_WRITE') }, async (request, reply) => {
     const auth = getAuth(request)
     const { id, taskType } = request.params as { id: string; taskType: string }
+
+    /**
+     * 与全局配置同一套规则：任务类型必须已知、模型能力必须满足。
+     * 画布配置如果放宽校验，就会出现"全局存不进去的模型，在这块画布里能存"，
+     * 然后跑节点时才发现不支持 JSON —— 用户会以为是画布配置的锅。
+     */
+    if (!isTaskType(taskType)) throw new AppError(400, 'TASK_TYPE_UNKNOWN', `未知任务类型：${taskType}`)
+
     const body = parse(z.object({ credentialId: z.string().min(1), modelId: z.string().min(1).max(120) }), request.body)
     await requireCanvasWrite(prisma, id, auth.user.id)
 
     // 凭据必须属于本人且有效：否则等于允许把别人的密钥挂到自己画布上
     const credential = await prisma.userCredential.findFirst({
       where: { id: body.credentialId, userId: auth.user.id, isActive: true },
-      select: { id: true },
+      include: { provider: true },
     })
     if (!credential) throw new AppError(404, 'PROVIDER_CREDENTIAL_NOT_FOUND', '凭据不存在')
+
+    const model = await prisma.providerModel.findUnique({
+      where: { providerId_modelId: { providerId: credential.providerId, modelId: body.modelId } },
+    })
+    const needed = REQUIRED_CAPABILITY[taskType]
+    if (needed && model) {
+      const caps = (model.capabilities ?? {}) as Record<string, unknown>
+      const declared = Object.keys(caps).length > 0
+      if (declared && caps[needed] !== true) {
+        throw new AppError(
+          400,
+          'MODEL_CAPABILITY_MISMATCH',
+          `该任务需要 ${needed} 能力，而 ${model.displayName} 未声明支持`,
+          { required: needed, model: body.modelId },
+        )
+      }
+    }
 
     const pref = await prisma.canvasModelPref.upsert({
       where: { canvasId_taskType: { canvasId: id, taskType } },
@@ -161,6 +187,69 @@ export function registerCanvasRoutes(app: FastifyInstance, deps: CanvasRouteDeps
       update: { credentialId: body.credentialId, modelId: body.modelId },
     })
     return reply.status(201).send({ taskType: pref.taskType, credentialId: pref.credentialId, modelId: pref.modelId })
+  })
+
+  /**
+   * 批量设置画布配置（新建画布对话框用）。
+   *
+   * 为什么要有它：对话框里可以一次给 8 个功能各选模型，逐条 PUT 会有
+   * 两个问题 —— 8 次往返，以及中途失败时画布处于"配了一半"的状态。
+   * 这里整批校验、整批写入，要么全成要么全不成。
+   */
+  app.put('/v1/canvases/:id/model-prefs', { preHandler: guard('CANVAS_WRITE') }, async (request, reply) => {
+    const auth = getAuth(request)
+    const { id } = request.params as { id: string }
+    const body = parse(
+      z.object({
+        prefs: z
+          .array(z.object({ taskType: z.string().min(1), credentialId: z.string().min(1), modelId: z.string().min(1).max(120) }))
+          .max(20),
+      }),
+      request.body,
+    )
+    await requireCanvasWrite(prisma, id, auth.user.id)
+
+    const credentialIds = [...new Set(body.prefs.map((pref) => pref.credentialId))]
+    const credentials = await prisma.userCredential.findMany({
+      where: { id: { in: credentialIds }, userId: auth.user.id, isActive: true },
+      include: { provider: true },
+    })
+    const byId = new Map(credentials.map((credential) => [credential.id, credential]))
+
+    for (const pref of body.prefs) {
+      if (!isTaskType(pref.taskType)) {
+        throw new AppError(400, 'TASK_TYPE_UNKNOWN', `未知任务类型：${pref.taskType}`)
+      }
+      const credential = byId.get(pref.credentialId)
+      if (!credential) throw new AppError(404, 'PROVIDER_CREDENTIAL_NOT_FOUND', `凭据不存在：${pref.credentialId}`)
+
+      const model = await prisma.providerModel.findUnique({
+        where: { providerId_modelId: { providerId: credential.providerId, modelId: pref.modelId } },
+      })
+      const needed = REQUIRED_CAPABILITY[pref.taskType]
+      if (needed && model) {
+        const caps = (model.capabilities ?? {}) as Record<string, unknown>
+        if (Object.keys(caps).length > 0 && caps[needed] !== true) {
+          throw new AppError(
+            400,
+            'MODEL_CAPABILITY_MISMATCH',
+            `${pref.taskType} 需要 ${needed} 能力，而 ${model.displayName} 未声明支持`,
+            { taskType: pref.taskType, model: pref.modelId },
+          )
+        }
+      }
+    }
+
+    await prisma.$transaction(
+      body.prefs.map((pref) =>
+        prisma.canvasModelPref.upsert({
+          where: { canvasId_taskType: { canvasId: id, taskType: pref.taskType } },
+          create: { canvasId: id, taskType: pref.taskType, credentialId: pref.credentialId, modelId: pref.modelId },
+          update: { credentialId: pref.credentialId, modelId: pref.modelId },
+        }),
+      ),
+    )
+    return reply.status(201).send({ saved: body.prefs.length })
   })
 
   app.delete('/v1/canvases/:id/model-prefs/:taskType', { preHandler: guard('CANVAS_WRITE') }, async (request, reply) => {

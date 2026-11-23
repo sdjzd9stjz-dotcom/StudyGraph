@@ -16,6 +16,8 @@ export type {
 
 export * from './thresholds.ts'
 
+export { REQUIRED_CAPABILITY, TASK_TYPE_KEYS, TASK_LABELS, isTaskType } from './task-capabilities.ts'
+
 export { canonicalJson, computeFingerprint, promptVersionOf } from './fingerprint.ts'
 export type { FingerprintInput } from './fingerprint.ts'
 

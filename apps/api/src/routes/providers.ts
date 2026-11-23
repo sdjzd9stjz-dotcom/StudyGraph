@@ -1,6 +1,11 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 
+/**
+ * 能力要求表来自 contracts：全局配置与画布配置共用同一份，
+ * 否则会出现"全局拒绝、画布接受"的不一致。
+ */
+import { REQUIRED_CAPABILITY } from '../../../../packages/contracts/src/index.ts'
 import type { PrismaClient } from '../../../../packages/db/src/index.ts'
 import { decryptSecret, encryptSecret, last4 } from '../llm/byok.ts'
 import { AppError } from '../lib/errors.ts'
@@ -40,21 +45,6 @@ const prefBody = z.object({
   credentialId: z.string().min(1),
   modelId: z.string().min(1).max(120),
 })
-
-/** 每个任务类型需要的能力（规格「三个产品问题」②）。不满足就保存即拒绝。 */
-const REQUIRED_CAPABILITY: Record<string, 'jsonObject' | null> = {
-  extract: 'jsonObject',
-  judge: 'jsonObject',
-  quiz: 'jsonObject',
-  check: 'jsonObject',
-  variant: 'jsonObject',
-  chunk: null,
-  probe: null,
-  method: null,
-  solve: null,
-  // 对话要的是工具调用能力，不是 JSON 输出能力
-  assistant: null,
-}
 
 export interface ProviderRouteDeps {
   readonly prisma: PrismaClient
