@@ -114,6 +114,36 @@ function isWritableDir(dir) {
  * 找一个 ASCII 且可写的数据根基目录。
  * 候选链覆盖中文 Windows：用户名是中文时 %LOCALAPPDATA% 本身就是非 ASCII 的。
  */
+/**
+ * 把"这次到底用了哪个数据目录"记下来。
+ *
+ * 为什么需要：数据目录有三档回退（%LOCALAPPDATA% → %ProgramData% → 系统盘根），
+ * 用户名是中文时会落到后两档。卸载程序只能猜到第一档，于是"保留数据"那一步
+ * 对着一个不存在的路径做完检查就结束了 —— 用户以为保留了，实际数据在别处，
+ * 下次安装会重新 initdb，看起来就是"数据丢了"。
+ *
+ * 记录位置固定用 %LOCALAPPDATA%StudyGraph-data-dir.txt（LOCALAPPDATA 本身
+ * 非 ASCII 时退到 InstallationDir）：卸载程序只读这一个文件，不猜。
+ */
+function recordDataDir(base, log) {
+  const anchor = process.env.LOCALAPPDATA || path.dirname(process.execPath)
+  fs.mkdirSync(anchor, { recursive: true })
+  const target = path.join(anchor, 'StudyGraph-data-dir.txt')
+  try {
+    fs.writeFileSync(target, base + String.fromCharCode(10), 'utf8')
+  } catch (error) {
+    log('写入数据目录标记失败：', error instanceof Error ? error.message : String(error))
+  }
+  // 机器级备份：用户级目录被删也能从这里找回真实位置
+  try {
+    const installDir = path.dirname(process.execPath)
+    if (isAsciiPath(installDir)) fs.writeFileSync(path.join(installDir, 'data-dir.txt'), base + String.fromCharCode(10), 'utf8')
+  } catch {
+    // 安装目录不可写（Program Files）就算了，用户级那份才是主记录
+  }
+  return target
+}
+
 function resolveAsciiBase(log) {
   // 显式指定优先（用户换数据盘、或验收脚本指定隔离目录）
   if (process.env.STUDYGRAPH_DATA_DIR) {
@@ -517,6 +547,7 @@ async function resolveDatabase({ env, bundleDir, migrationsDir, log }) {
   }
 
   const base = resolveAsciiBase(log)
+  recordDataDir(base, log)
   const pgHome = ensureRuntimeDir(bundleDir, base, log)
 
   const vectorControl = path.join(pgHome, 'share', 'extension', 'vector.control')
