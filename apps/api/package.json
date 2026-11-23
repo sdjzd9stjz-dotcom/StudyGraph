@@ -7,7 +7,8 @@
     "dev": "node --watch src/server.ts",
     "start": "node src/server.ts",
     "test:unit": "node test/unit/dag.test.ts && node test/unit/auth.test.ts && node test/unit/spans.test.ts && node test/unit/registry.test.ts && node test/unit/assistant-agent.test.ts",
-    "test:integration": "node test/integration/api.test.ts"
+    "test:integration": "node test/integration/card-review.test.ts && node test/integration/cors-methods.test.ts && node test/integration/downstream-equivalence.test.ts && node test/integration/extract-evidence.test.ts && node test/integration/gate-decision.test.ts && node test/integration/node-prompt-wiring.test.ts && node test/integration/provider-models-visible.test.ts && node test/integration/quiz-grade.test.ts",
+    "test": "node test/unit/dag.test.ts && node test/unit/auth.test.ts && node test/unit/spans.test.ts && node test/unit/registry.test.ts && node test/unit/assistant-agent.test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1171.0",
