@@ -13,9 +13,7 @@ export default async function ReviewPage() {
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 20 }}>
         <h1 style={{ fontSize: 22, fontWeight: 700 }}>今日到期</h1>
         <span style={{ fontSize: 13, color: '#9ca3af' }}>{due.count} 张</span>
-        <Link href="/" style={{ color: '#2563eb', fontSize: 13, marginLeft: 'auto' }}>
-          返回首页
-        </Link>
+        <Link href="/" style={{ color: '#2563eb', fontSize: 13, marginLeft: 'auto' }}>← 返回画布列表</Link>
       </div>
 
       <p style={{ fontSize: 13, color: '#6b7280', marginBottom: 20 }}>

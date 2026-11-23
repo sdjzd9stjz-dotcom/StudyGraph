@@ -24,9 +24,7 @@ export default async function ProblemsPage({ searchParams }: { searchParams: { c
         <Link href="/analytics" style={{ color: '#2563eb', fontSize: 13, marginLeft: 'auto' }}>
           错题看板
         </Link>
-        <Link href="/" style={{ color: '#2563eb', fontSize: 13 }}>
-          返回首页
-        </Link>
+        <Link href="/" style={{ color: '#2563eb', fontSize: 13 }}>← 返回画布列表</Link>
       </div>
 
       {canvases.length === 0 ? (

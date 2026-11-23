@@ -147,6 +147,27 @@ export function createTargetResolver(deps: TargetResolverDeps) {
     user: UserCtx,
     defaultRoute: { provider: string; model: string },
   ): Promise<ResolvedTarget | null> {
+    // 0. 画布级配置优先：这块画布显式指定了模型，就按它来（用户要求 AI 配置每块画布独立）
+    if (user.canvasId) {
+      const canvasPref = await deps.prisma.canvasModelPref.findUnique({
+        where: { canvasId_taskType: { canvasId: user.canvasId, taskType } },
+        include: { credential: { include: { provider: true } } },
+      })
+      if (canvasPref && canvasPref.credential.isActive) {
+        const credential = canvasPref.credential
+        return {
+          apiKey: decrypt(credential.ciphertext),
+          source: 'byok',
+          protocol: credential.provider.protocol as ProviderProtocolName,
+          baseUrl: credential.baseUrlOverride ?? credential.provider.baseUrl,
+          model: canvasPref.modelId,
+          providerSlug: credential.provider.slug,
+          providerName: credential.provider.name,
+          fromPreference: true,
+        }
+      }
+    }
+
     // 1. 用户偏好
     const pref = await deps.prisma.userModelPref.findUnique({
       where: { userId_taskType: { userId: user.id, taskType } },

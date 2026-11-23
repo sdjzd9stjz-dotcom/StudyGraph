@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState } from 'react'
 
+import { ThinkingBubble } from './ThinkingBubble'
+
 export interface CanvasChange {
   kind: 'create-node' | 'update-node' | 'delete-node' | 'create-edge' | 'delete-edge'
   id: string
@@ -14,6 +16,8 @@ export interface AssistantReply {
   source: string
   /** 实际回答的模型标识（来自厂商响应） */
   model?: string | null
+  /** 思考摘要（模型 reasoning 节选） */
+  thinking?: string | null
 }
 
 interface Turn {
@@ -52,6 +56,8 @@ export function AssistantBar({
   const [open, setOpen] = useState(false)
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
+  /** 等待期间的思考摘要（模型 reasoning 节选） */
+  const [thinking, setThinking] = useState<string | null>(null)
   const [thread, setThread] = useState<Turn[]>([])
   const bottomRef = useRef<HTMLDivElement>(null)
 
@@ -91,6 +97,7 @@ export function AssistantBar({
     setOpen(true)
     setBusy(true)
     setInput('')
+    setThinking(null)
 
     // 把最近的几轮一起带上，模型才知道"再"指的是什么
     const history = thread.slice(-6).map((turn) => ({ role: turn.role, text: turn.text }))
@@ -110,6 +117,7 @@ export function AssistantBar({
         ])
         return
       }
+      if (typeof data.thinking === 'string') setThinking(data.thinking)
       const changes = Array.isArray(data.changes) ? data.changes : []
       setThread((prev) => [
         ...prev,
@@ -170,6 +178,7 @@ export function AssistantBar({
               )}
             </div>
           ))}
+          {busy && <ThinkingBubble thinking={thinking} />}
           <div ref={bottomRef} />
         </div>
       )}

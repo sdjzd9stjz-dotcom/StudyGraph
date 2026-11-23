@@ -456,6 +456,8 @@ export interface AgentRunResult {
   readonly reply: string
   readonly changes: readonly CanvasChange[]
   readonly rounds: number
+  /** 思考摘要（模型 reasoning_content 的节选），用来给"正在思考"提供内容 */
+  readonly thinking?: string
   /** 实际回答问题的模型标识（来自厂商响应），用来证明用的是用户自己的模型 */
   readonly model: string | null
 }
@@ -613,6 +615,7 @@ export async function runCanvasAgent(
   const changes: CanvasChange[] = []
   let lastText = ''
   let model: string | null = null
+  let thinking = ''
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     const result = await llm.chatWithTools({
@@ -620,7 +623,7 @@ export async function runCanvasAgent(
       taskType: 'assistant',
       messages,
       tools: CANVAS_TOOLS,
-      user: { id: deps.userId } as never,
+      user: { id: deps.userId, canvasId: deps.canvasId } as never,
       maxTokens: 4096,
     })
 
@@ -639,6 +642,8 @@ export async function runCanvasAgent(
 
     lastText = result.content.trim()
     model = result.modelVersion
+    const turnThinking = (result as { thinking?: string }).thinking
+    if (typeof turnThinking === 'string' && turnThinking.length > 0) thinking = turnThinking
 
     // 没有工具调用 = 模型认为事情办完了
     if (result.toolCalls.length === 0) {
@@ -647,6 +652,7 @@ export async function runCanvasAgent(
         changes,
         rounds: round + 1,
         model,
+        ...(thinking.length > 0 ? { thinking } : {}),
       }
     }
 

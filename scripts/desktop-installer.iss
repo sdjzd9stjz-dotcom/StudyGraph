@@ -34,6 +34,9 @@ WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#AppExe}
+; 安装包与快捷方式用产品图标（来自宣传片的紫/蓝/绿三节点）
+SetupIconFile=icon.ico
+IconFilename=icon.ico
 UninstallDisplayName={#AppName}
 ; 按用户安装：不要求管理员权限，学生机器上通常也没有管理员
 PrivilegesRequired=lowest

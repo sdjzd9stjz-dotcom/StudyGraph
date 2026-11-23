@@ -392,6 +392,9 @@ model Canvas {
   forkCount        Int      @default(0)
   originAuthorName String?
 
+  /// 首页列表里的手工排序（越小越靠前）。用户能拖动改变顺序，null 表示没排过
+  sortOrder Int?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -409,6 +412,8 @@ model Canvas {
   webhooks     WebhookEndpoint[]
   drafts       GraphDraft[]
   nodeGroups   NodeGroup[]
+  /// 这块画布自己的模型选择（覆盖用户的全局"按任务指定模型"）
+  modelPrefs   CanvasModelPref[]
 
   @@index([ownerId])
   @@index([visibility, isTemplate])
@@ -1238,13 +1243,33 @@ model UserCredential {
   isActive        Boolean          @default(true)
   createdAt       DateTime         @default(now())
 
-  modelPrefs UserModelPref[]
+  modelPrefs       UserModelPref[]
+  canvasModelPrefs CanvasModelPref[]
 
   @@unique([userId, providerId, label])
   @@index([userId])
 }
 
 /// 按任务类型的模型偏好（可选，不配则走默认路由）
+/// 画布级模型配置（用户 2026-11-23 要求：AI 配置成为每块画布独立的）。
+///
+/// 与 UserModelPref 的关系是"覆盖"：这块画布配了就用它的，
+/// 没配才回落到用户全局的那张表，再没有就走内置默认路由。
+/// 独立成表而不是给 UserModelPref 加 canvasId 可空列：
+/// 后者会让唯一约束变成三态（user+canvas+task 有四种组合），查询永远要判空。
+model CanvasModelPref {
+  id           String         @id @default(cuid())
+  canvasId     String
+  canvas       Canvas         @relation(fields: [canvasId], references: [id], onDelete: Cascade)
+  taskType     String
+  credentialId String
+  credential   UserCredential @relation(fields: [credentialId], references: [id], onDelete: Cascade)
+  modelId      String
+
+  @@unique([canvasId, taskType])
+  @@index([canvasId])
+}
+
 model UserModelPref {
   id           String         @id @default(cuid())
   userId       String

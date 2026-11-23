@@ -34,10 +34,17 @@ export function computeLayout(
   edges: readonly LayoutEdge[],
   options: LayoutOptions = {},
 ): Map<string, { x: number; y: number }> {
-  const columnGap = options.columnGap ?? 340
-  const rowGap = options.rowGap ?? 200
-  const originX = options.originX ?? 40
-  const originY = options.originY ?? 40
+  /**
+   * 间距取值（用户 2026-11-23：「整理得开阔一些，让人看着舒服而不用更规整」）。
+   *
+   * 之前 340×200 只比节点本身（232 宽）宽一点点，连线和输出卡片挤在一起；
+   * 开阔的关键不是"排得整齐"，而是**留白**：列间距 460 让箭头有呼吸空间，
+   * 行间距 260 让节点下沿的输出卡片互不遮挡。
+   */
+  const columnGap = options.columnGap ?? 460
+  const rowGap = options.rowGap ?? 260
+  const originX = options.originX ?? 80
+  const originY = options.originY ?? 80
 
   const ids = nodes.map((node) => node.id)
   const known = new Set(ids)

@@ -17,6 +17,7 @@ const crypto = require('node:crypto')
 const path = require('node:path')
 const fs = require('node:fs')
 const { resolveDatabase, freePort } = require('./pg.cjs')
+const { pathToFileURL } = require('node:url')
 
 const ROOT = path.resolve(__dirname, '..', '..')
 const IS_PACKAGED = app.isPackaged
@@ -165,10 +166,12 @@ function ensureByokKey(baseDir) {
 }
 
 async function boot() {
+  splashStage('正在读取配置', 8)
   const env = readEnvFile()
 
   // 内置 PostgreSQL：安装目录里带一份官方 PG16 + pgvector，数据落在用户数据目录。
   // .env 里显式给了 DATABASE_URL 就用外部库（开发期连 Docker PG 时走这条）。
+  splashStage('正在启动内置数据库', 22)
   database = await resolveDatabase({
     env,
     bundleDir: IS_PACKAGED ? path.join(process.resourcesPath, 'pgsql') : path.join(ROOT, 'vendor', 'pg16'),
@@ -176,6 +179,7 @@ async function boot() {
     log,
   })
   log(`数据库模式：${database.mode}`)
+  splashStage('数据库就绪，正在启动服务', 55)
 
   const apiPort = await freePort()
   const webPort = await freePort()
@@ -245,11 +249,100 @@ ipcMain.handle('studygraph:save-pdf', async (_event, html, suggestedName) => {
   }
 })
 
+/**
+ * 启动画面（用户 2026-11-23 要求：启动时显示加载进度）。
+ *
+ * 为什么必须有：内置 PostgreSQL 首次初始化要十几秒，这段时间窗口一片空白，
+ * 用户会以为没启动成功而反复双击（实际会遇到"两个实例抢同一个数据目录"）。
+ * 有了进度条和阶段文字，"正在初始化数据库"和"卡死了"就能区分开。
+ *
+ * 图片轮换：startup/slide-*.png 存在就轮播，不存在就只显示图标 ——
+ * 不因为缺图而阻塞启动。
+ */
+let splash = null
+let splashTimer = null
+
+function splashStages() {
+  const dir = IS_PACKAGED ? path.join(process.resourcesPath, 'app', 'startup') : path.join(ROOT, 'apps', 'desktop', 'startup')
+  try {
+    return fs.readdirSync(dir).filter((name) => /^slide-.*.(png|jpg)$/i.test(name)).sort().map((name) => path.join(dir, name))
+  } catch {
+    return []
+  }
+}
+
+function createSplash() {
+  const icon = IS_PACKAGED ? path.join(process.resourcesPath, 'app', 'icon.ico') : path.join(ROOT, 'apps', 'desktop', 'icon.ico')
+  splash = new BrowserWindow({
+    width: 560,
+    height: 380,
+    frame: false,
+    resizable: false,
+    center: true,
+    show: true,
+    backgroundColor: '#ffffff',
+    webPreferences: { contextIsolation: true, nodeIntegration: false },
+  })
+  const slides = splashStages()
+  const slideTags = slides
+    .map((file, index) => '<img src="' + pathToFileURL(file).href + '" data-i="' + index + '" class="slide' + (index === 0 ? ' on' : '') + '" />')
+    .join('')
+  const iconUrl = fs.existsSync(icon) ? pathToFileURL(icon).href : ''
+  const html =
+    '<html><head><meta charset="utf-8"><style>' +
+    'body{margin:0;font-family:"Microsoft YaHei",sans-serif;background:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;color:#0f172a}' +
+    '.logo{width:72px;height:72px;margin-bottom:14px;object-fit:contain}' +
+    '.title{font-size:20px;font-weight:700;letter-spacing:.5px}' +
+    '.sub{font-size:12px;color:#94a3b8;margin-top:4px}' +
+    '.bar{width:300px;height:5px;background:#e2e8f0;border-radius:99px;margin-top:26px;overflow:hidden}' +
+    '.fill{height:100%;width:4%;background:linear-gradient(90deg,#7c3aed,#3b82f6,#10b981);border-radius:99px;transition:width .4s ease}' +
+    '.stage{font-size:12px;color:#64748b;margin-top:12px;min-height:16px}' +
+    '.slides{position:relative;width:100%;height:110px;margin-top:20px}' +
+    '.slide{position:absolute;inset:0;margin:auto;max-height:104px;max-width:92%;object-fit:contain;opacity:0;transition:opacity .6s ease}' +
+    '.slide.on{opacity:1}' +
+    '</style></head><body>' +
+    (iconUrl ? '<img class="logo" src="' + iconUrl + '" />' : '') +
+    '<div class="title">StudyGraph</div>' +
+    '<div class="sub">节点式 AI 学习工作流</div>' +
+    '<div class="bar"><div class="fill" id="fill"></div></div>' +
+    '<div class="stage" id="stage">正在启动…</div>' +
+    (slideTags ? '<div class="slides">' + slideTags + '</div>' : '') +
+    '<script>' +
+    'let idx=0;const imgs=document.querySelectorAll(".slide");' +
+    'setInterval(()=>{if(imgs.length<2)return;imgs[idx].classList.remove("on");idx=(idx+1)%imgs.length;imgs[idx].classList.add("on")},1800);' +
+    'window.setStage=(text,pct)=>{document.getElementById("stage").textContent=text;document.getElementById("fill").style.width=Math.max(4,pct)+"%"};' +
+    '</script></body></html>'
+
+  const tmp = path.join(app.getPath('temp'), 'studygraph-splash.html')
+  fs.writeFileSync(tmp, html, 'utf8')
+  splash.loadFile(tmp)
+  splash.on('closed', () => { splash = null })
+  return splash
+}
+
+/** 更新启动进度：主进程只往页面里塞一行状态，不重建窗口 */
+function splashStage(text, percent) {
+  if (!splash || splash.isDestroyed()) return
+  splash.webContents.executeJavaScript('window.setStage(' + JSON.stringify(text) + ',' + percent + ')').catch(() => undefined)
+}
+
+/** 启动画面至少停留一会儿：一闪而过比没有更让人困惑 */
+function closeSplash(minMs = 900) {
+  const finish = () => {
+    if (splash && !splash.isDestroyed()) splash.close()
+    splash = null
+  }
+  if (splashTimer) clearTimeout(splashTimer)
+  splashTimer = setTimeout(finish, minMs)
+}
+
 function createWindow(url) {
   const window = new BrowserWindow({
     width: 1440,
     height: 900,
     title: 'StudyGraph',
+    // 窗口与任务栏图标：打包后 resources/app/icon.ico，开发态 apps/desktop/icon.ico
+    icon: IS_PACKAGED ? path.join(process.resourcesPath, 'app', 'icon.ico') : path.join(ROOT, 'apps', 'desktop', 'icon.ico'),
     backgroundColor: '#ffffff',
     webPreferences: {
       contextIsolation: true,
@@ -313,7 +406,11 @@ if (!gotLock) {
 
 app.whenReady().then(async () => {
   try {
-    createWindow(await boot())
+    createSplash()
+    const url = await boot()
+    splashStage('正在打开界面', 92)
+    createWindow(url)
+    closeSplash(600)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     log('启动失败：', message)

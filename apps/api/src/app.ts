@@ -221,7 +221,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   registerEdgeRoutes(app, { prisma, guard })
   registerDraftRoutes(app, { prisma, guard, llm })
   registerGraphRoutes(app, { prisma, guard })
-  registerGroupRoutes(app, { prisma, guard })
+  registerGroupRoutes(app, { prisma, guard, llm })
   registerAssistantRoutes(app, { prisma, guard, llm })
   registerRunRoutes(app, { prisma, guard, objectStore, llm })
   registerRunEventRoutes(app, { prisma, guard })

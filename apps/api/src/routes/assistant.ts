@@ -127,7 +127,7 @@ function registerNodeChat(app: FastifyInstance, deps: AssistantRouteDeps): void 
           },
           ...history.map((turn) => ({ role: turn.role as 'user' | 'assistant', content: turn.content })),
         ],
-        user: auth.user,
+        user: { ...auth.user, canvasId: node.canvasId },
       })
 
       await prisma.usageRecord.create({
@@ -144,14 +144,16 @@ function registerNodeChat(app: FastifyInstance, deps: AssistantRouteDeps): void 
       })
 
       // 不传 jsonSchema 时适配器返回纯文本（{ text }）—— 对话不该被 JSON 解析拖累
-      const text = (result.data as { reply?: string; text?: string } | undefined)?.reply
-        ?? (result.data as { text?: string } | undefined)?.text
+      const payload = result.data as { reply?: string; text?: string; thinking?: string } | undefined
+      const text = payload?.reply ?? payload?.text
       const replyText = typeof text === 'string' && text.trim().length > 0 ? text : '模型没有返回内容，换个问法再试一次。'
       await prisma.nodeMessage.create({ data: { nodeId: id, role: 'assistant', content: replyText } })
       return reply.status(200).send({
         reply: replyText,
         output: card,
         source: 'model',
+        // 思考摘要：界面在"正在思考"气泡里显示，让等待有内容可看
+        ...(typeof payload?.thinking === 'string' ? { thinking: payload.thinking } : {}),
       })
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error)
@@ -223,6 +225,7 @@ export function registerAssistantRoutes(app: FastifyInstance, deps: AssistantRou
       rounds: result.rounds,
       // 让界面能显示"这次是哪个模型答的"——证明走的是用户自己的模型
       model: result.model,
+      ...(result.thinking ? { thinking: result.thinking } : {}),
     })
   })
 }

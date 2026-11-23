@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 
 import type { PrismaClient } from '../../../../packages/db/src/index.ts'
+import { summarizeArtifact } from '../domain/artifact-text.ts'
 import { requireCanvasWrite } from '../lib/access.ts'
 import { AppError } from '../lib/errors.ts'
 import { parse } from '../lib/validate.ts'
@@ -32,6 +33,7 @@ const linkBody = z.object({ nodeId: z.string().min(1) })
 export interface GroupRouteDeps {
   readonly prisma: PrismaClient
   readonly guard: Guard
+  readonly llm: import('../llm/types.ts').LLMGateway
 }
 
 export function registerGroupRoutes(app: FastifyInstance, deps: GroupRouteDeps): void {
@@ -74,6 +76,80 @@ export function registerGroupRoutes(app: FastifyInstance, deps: GroupRouteDeps):
     })
 
     return reply.status(201).send(group)
+  })
+
+  /**
+   * AI 给打包组起名（用户 2026-11-23 要求：可以默认由 AI 总结命名）。
+   *
+   * 用什么命名：成员的标题 + 各自产物的摘要。不能用整份产物 ——
+   * 起一个 6 字的名字，把 2 万字塞进上下文既慢又贵，还会让模型跑偏。
+   * 失败不影响使用：返回 ok:false，界面保留原来的名字让用户自己改。
+   */
+  app.post('/v1/groups/:id/auto-name', { preHandler: guard('CANVAS_WRITE') }, async (request) => {
+    const auth = getAuth(request)
+    const { id } = request.params as { id: string }
+    const group = await prisma.nodeGroup.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        canvasId: true,
+        members: {
+          select: {
+            node: {
+              select: {
+                id: true,
+                type: true,
+                title: true,
+                artifacts: { orderBy: { createdAt: 'desc' }, take: 1, select: { kind: true, structured: true } },
+              },
+            },
+          },
+        },
+      },
+    })
+    if (!group) throw new AppError(404, 'NODE_NOT_FOUND', '分组不存在', { groupId: id })
+    await requireCanvasWrite(prisma, group.canvasId, auth.user.id)
+
+    const material = group.members
+      .map((member) => {
+        const node = member.node
+        const artifact = node.artifacts[0]
+        const summary = artifact ? summarizeArtifact(artifact.kind, artifact.structured).slice(0, 300) : ''
+        return '-' + (node.title ?? node.type) + '（' + node.type + '）' + (summary ? '：' + summary.split('\n').slice(0, 3).join(' ') : '')
+      })
+      .join('\n')
+
+    try {
+      const result = await deps.llm.complete({
+        taskType: 'method',
+        messages: [
+          {
+            role: 'system',
+            content:
+              '你给一组学习节点起名字。输出一个 JSON：{"title":"..."}。\n' +
+              '要求：6–12 个汉字，概括这几个节点合起来在做什么；不要引号、不要书名号、不要标点结尾。',
+          },
+          { role: 'user', content: material },
+        ],
+        jsonSchema: {
+          type: 'object',
+          properties: { title: { type: 'string' } },
+          required: ['title'],
+          additionalProperties: false,
+        },
+        user: { ...auth.user, canvasId: group.canvasId },
+      })
+
+      const raw = (result.data as { title?: unknown } | undefined)?.title
+      const title = typeof raw === 'string' ? raw.trim().replace(/^["「『]|["」』]$/g, '').slice(0, 40) : ''
+      if (title.length === 0) return { ok: false, title: null, reason: '模型没有给出名字' }
+
+      await prisma.nodeGroup.update({ where: { id }, data: { title } })
+      return { ok: true, title }
+    } catch (error) {
+      // 没配密钥、模型报错：都不该让"打包"这一步失败，让用户自己填名字即可
+      return { ok: false, title: null, reason: error instanceof Error ? error.message : String(error) }
+    }
   })
 
   /** 列出画布上的组，带成员与"被谁引用"。 */

@@ -73,6 +73,13 @@ copyFileSync(path.join(root, 'apps', 'desktop', 'main.cjs'), path.join(resources
 copyFileSync(path.join(root, 'apps', 'desktop', 'pg.cjs'), path.join(resources, 'app', 'pg.cjs'))
 // preload：讲义 PDF 的唯一桥，漏复制会让打印按钮静默失效
 copyFileSync(path.join(root, 'apps', 'desktop', 'preload.cjs'), path.join(resources, 'app', 'preload.cjs'))
+// 应用图标（与宣传片一致：紫/蓝/绿三节点）
+copyFileSync(path.join(root, 'apps', 'desktop', 'icon.ico'), path.join(resources, 'app', 'icon.ico'))
+// 启动页轮播图：主进程按文件名通配读取，缺了只是不轮播，不会阻塞启动
+if (existsSync(path.join(root, 'apps', 'desktop', 'startup'))) {
+  cpSync(path.join(root, 'apps', 'desktop', 'startup'), path.join(resources, 'app', 'startup'), { recursive: true })
+  console.log('启动页轮播图已复制')
+}
 writeFileSync(
   path.join(resources, 'app', 'package.json'),
   `${JSON.stringify({ name: 'studygraph', version: '0.0.0', main: 'main.cjs' }, null, 2)}\n`,

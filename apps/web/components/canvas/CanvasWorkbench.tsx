@@ -10,6 +10,7 @@ import {
   useEdgesState,
   useNodesState,
   useReactFlow,
+  useViewport,
 } from '@xyflow/react'
 import type { Connection, Edge as FlowEdge, Node as FlowNode } from '@xyflow/react'
 import { useRouter } from 'next/navigation'
@@ -205,9 +206,36 @@ function Inner({
     portsByType: Map<NodeType, string[]>
   } | null>(null)
   const [toast, setToast] = useState<string | null>(null)
+  /**
+   * 收起的打包组（用户 2026-11-23 要求：点「展开」按节点铺开，收起时看不到内部）。
+   *
+   * 收起组内成员**真的从画布上隐藏**，而不是只画一个框：
+   * 之前收起只是把框画窄，里面的节点还露在外面，看起来像"框和内容对不上"。
+   */
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const hiddenNodeIds = useMemo(() => {
+    const ids = new Set<string>()
+    for (const group of groups) {
+      if (!collapsed.has(group.id)) continue
+      for (const memberId of group.memberIds) ids.add(memberId)
+    }
+    return ids
+  }, [groups, collapsed])
   const wrapper = useRef<HTMLDivElement>(null)
   const { screenToFlowPosition, getViewport } = useReactFlow()
+  /**
+   * 分组框要跟着画布缩放/平移走。
+   *
+   * 分组框是叠在 ReactFlow 之上的普通 DOM（因为它要可点击、要能超出节点层），
+   * 不订阅视口的话，用户一缩放，框就和节点错位。
+   * 用 useViewport 而不是监听 onMove：前者是订阅，拖动时自动重渲，不会漏帧。
+   */
+  const viewport = useViewport()
+  /** 把流程坐标换算成覆盖层用的像素坐标 */
+  const toScreen = useCallback(
+    (x: number, y: number) => ({ x: x * viewport.zoom + viewport.x, y: y * viewport.zoom + viewport.y }),
+    [viewport.x, viewport.y, viewport.zoom],
+  )
 
   const headers = { 'content-type': 'application/json', authorization: `Bearer ${token}` }
   const router = useRouter()
@@ -724,6 +752,19 @@ function Inner({
     const group = (await response.json()) as { id: string; title: string; posX: number; posY: number; color: string }
     setGroups((current) => [...current, { ...group, memberIds: selected.map((node) => node.id), usedBy: [] }])
     notify(`已打包 ${selected.length} 个节点：${group.title}`)
+
+    /**
+     * 让 AI 补一个名字（用户要求：也可以默认由 AI 总结命名）。
+     * 失败不打扰用户：名字还是刚才填的那个，人随时能改。
+     */
+    fetch(`${apiBaseUrl}/v1/groups/${group.id}/auto-name`, { method: 'POST', headers })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { ok?: boolean; title?: string } | null) => {
+        if (!data?.ok || !data.title) return
+        setGroups((current) => current.map((item) => (item.id === group.id ? { ...item, title: data.title! } : item)))
+        notify(`AI 起名：${data.title}`)
+      })
+      .catch(() => undefined)
   }, [apiBaseUrl, canvasId, nodes, notify, token])
 
   const moveGroup = useCallback(
@@ -791,7 +832,7 @@ function Inner({
             />
           )}
           <ReactFlow
-            nodes={nodesWithHandlers}
+            nodes={nodesWithHandlers.filter((node) => !hiddenNodeIds.has(node.id))}
             edges={edges}
             nodeTypes={nodeTypes}
             onNodesChange={onNodesChange}
@@ -889,15 +930,49 @@ function Inner({
             {groups.map((group) => {
               const isCollapsed = collapsed.has(group.id)
               const members = nodes.filter((node) => group.memberIds.includes(node.id))
+
+              /**
+               * 展开时：框 = 所有成员的包围盒（不是按节点数猜宽度）。
+               * 用户要求"展开后整个打包的所有节点被一个虚线框框住" ——
+               * 框必须真的包住内容，否则它只是个装饰。
+               */
+              const bounds = (() => {
+                if (isCollapsed) {
+                  const topLeft = toScreen(group.posX, group.posY)
+                  return { left: topLeft.x, top: topLeft.y, width: 208, height: 0 }
+                }
+                if (members.length === 0) {
+                  const topLeft = toScreen(group.posX, group.posY)
+                  return { left: topLeft.x, top: topLeft.y, width: 240, height: 0 }
+                }
+                const pad = 34
+                const xs = members.map((node) => node.position.x)
+                const ys = members.map((node) => node.position.y)
+                const left = Math.min(...xs) - pad
+                const top = Math.min(...ys) - pad - 16
+                // 节点宽度由内容自适应（232–320），高度未知：按 220 估，多留一点
+                const right = Math.max(...xs) + 320 + pad
+                const bottom = Math.max(...ys) + 220 + pad
+                const topLeft = toScreen(left, top)
+                return {
+                  left: topLeft.x,
+                  top: topLeft.y,
+                  width: (right - left) * viewport.zoom,
+                  height: (bottom - top) * viewport.zoom,
+                }
+              })()
+
               return (
                 <div
                   key={group.id}
                   data-testid={`group-card-${group.id}`}
                   style={{
                     position: 'absolute',
-                    left: group.posX,
-                    top: group.posY,
-                    width: isCollapsed ? 208 : Math.max(240, members.length * 70),
+                    left: bounds.left,
+                    top: bounds.top,
+                    width: bounds.width,
+                    minWidth: isCollapsed ? 208 : undefined,
+                    height: isCollapsed ? undefined : bounds.height,
                     pointerEvents: 'auto',
                     background: isCollapsed ? `${group.color}14` : 'transparent',
                     border: `1.5px dashed ${group.color}`,
@@ -912,8 +987,31 @@ function Inner({
                       data-testid={`toggle-group-${group.id}`}
                       onClick={() => {
                         const next = new Set(collapsed)
-                        if (isCollapsed) next.delete(group.id)
-                        else next.add(group.id)
+                        if (isCollapsed) {
+                          next.delete(group.id)
+                          /**
+                           * 展开时把成员排回组内网格（用户要求：展开后不杂乱）。
+                           * 只调整这一组的成员，不碰画布上其它节点 —— 调别人的位置很讨厌。
+                           * 以分组框左上角为原点，每行 3 个，间距与一键整理保持一致。
+                           */
+                          const originX = group.posX + 20
+                          const originY = group.posY + 46
+                          setNodes((current) =>
+                            current.map((node) => {
+                              const index = group.memberIds.indexOf(node.id)
+                              if (index < 0) return node
+                              return {
+                                ...node,
+                                position: {
+                                  x: originX + (index % 3) * 300,
+                                  y: originY + Math.floor(index / 3) * 260,
+                                },
+                              }
+                            }),
+                          )
+                        } else {
+                          next.add(group.id)
+                        }
                         setCollapsed(next)
                       }}
                       style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: group.color, fontSize: 11 }}

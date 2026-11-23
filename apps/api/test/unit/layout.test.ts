@@ -59,5 +59,5 @@ test('画布成环也不会卡死，环里的节点被放到最后一列', () =>
 
 test('指向画布外的边被忽略，不影响布局', () => {
   const positions = computeLayout([node('a')], [{ from: 'ghost', to: 'a' }])
-  assert.equal(positions.get('a')!.x, 40)
+  assert.equal(positions.get('a')!.x, 80)
 })

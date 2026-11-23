@@ -13,6 +13,8 @@ const GRADES = [
   { value: 'EASY', label: '太简单', hint: '一看就会', color: '#2563eb' },
 ] as const
 
+const GRADE_LABELS: Record<string, string> = Object.fromEntries(GRADES.map((grade) => [grade.value, grade.label]))
+
 /**
  * 复习会话：一张一张过，评完立刻排下一次。
  *
@@ -25,8 +27,25 @@ export function ReviewSession({ items, apiBaseUrl, token }: { items: DueItem[]; 
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState<Array<{ name: string; grade: string; days: number }>>([])
+  /**
+   * 上一张的复习间隔反馈（用户要求：评完要看到"下次复习 N 天后"）。
+   * 接口本来就返回 scheduledDays，只是界面没显示 —— 学生评完不知道系统记住了什么。
+   */
+  const [lastResult, setLastResult] = useState<{ name: string; grade: string; days: number } | null>(null)
 
   const current = items[index]
+
+  /**
+   * 间隔说人话：0 天 = 一会儿再来，1 天 = 明天，30 天以上换成月。
+   * 直接显示"30 天后"对长期记忆的卡不够直观。
+   */
+  function formatDays(days: number): string {
+    if (!Number.isFinite(days) || days <= 0) return '几分钟'
+    if (days === 1) return '1 天'
+    if (days < 30) return `${days} 天`
+    const months = Math.round(days / 30)
+    return months >= 12 ? `${Math.round(months / 12)} 年` : `${months} 个月`
+  }
 
   async function grade(value: string) {
     if (!current) return
@@ -45,7 +64,9 @@ export function ReviewSession({ items, apiBaseUrl, token }: { items: DueItem[]; 
         setError(body?.error?.message ?? `HTTP ${response.status}`)
         return
       }
-      setDone((prev) => [...prev, { name: current.name, grade: value, days: body?.scheduledDays ?? 0 }])
+      const entry = { name: current.name, grade: value, days: body?.scheduledDays ?? 0 }
+      setDone((prev) => [...prev, entry])
+      setLastResult(entry)
       setIndex((prev) => prev + 1)
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught))
@@ -93,6 +114,25 @@ export function ReviewSession({ items, apiBaseUrl, token }: { items: DueItem[]; 
 
   return (
     <div data-testid="review-card" style={{ border: '1px solid #e5e7eb', borderRadius: 8, padding: 24 }}>
+      {/* 上一张的结果：学生要知道"我刚才那一下"被系统记成了什么 */}
+      {lastResult && (
+        <div
+          data-testid="review-last-result"
+          style={{
+            marginBottom: 14,
+            padding: '7px 11px',
+            borderRadius: 8,
+            background: '#f0fdf4',
+            border: '1px solid #bbf7d0',
+            fontSize: 12,
+            color: '#166534',
+          }}
+        >
+          上一张「{lastResult.name}」已记为 {GRADE_LABELS[lastResult.grade] ?? lastResult.grade} ·{' '}
+          <strong>下次复习：{formatDays(lastResult.days)}后</strong>
+        </div>
+      )}
+
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
         <span style={{ fontSize: 12, color: '#9ca3af' }}>
           {index + 1} / {items.length}

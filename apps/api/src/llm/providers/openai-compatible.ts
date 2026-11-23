@@ -200,6 +200,17 @@ async function readSseAsPayload(response: Response): Promise<{
 /** 这个错误是不是"必须流式" */
 const needsStream = (text: string) => /stream_required|only accepts streaming|stream"?\s*:\s*true/i.test(text)
 
+/**
+ * 把模型的思考正文压成一段给用户看的摘要。
+ *
+ * 做法很朴素：去掉空行、取前几句。不做"总结思考"那种二次调用 ——
+ * 那要多花一次钱、多等一轮，而用户要的只是"它在干嘛"的即时反馈。
+ */
+export function clipThinking(text: string, limit = 800): string {
+  const flat = text.replace(/\n{2,}/g, '\n').trim()
+  return flat.length > limit ? flat.slice(0, limit) + '…' : flat
+}
+
 function parseLooseJson(content: string): unknown {
   const trimmed = content.replace(/^﻿/, '').trim()
   const fenced = /```(?:json|JSON)?\s*([\s\S]*?)```/.exec(trimmed)?.[1]?.trim()
@@ -414,8 +425,25 @@ export function createOpenAICompatibleProvider(config: OpenAICompatibleConfig) {
        * 以前这里无条件 JSON.parse，于是一段正常的解释文字被判成
        * "返回的内容不是合法 JSON" —— 错的是解析方，不是模型。
        */
+      /**
+       * 思考过程（DeepSeek 的 reasoning_content）一并带回。
+       *
+       * 用户要求对话时给出"精简思维链 + 正在思考"的反馈：模型先思考、后回答，
+       * 思考阶段界面只能干等。把思考正文截一段带回去，界面就能显示它正在想什么，
+       * 而不是一个转圈动画。截断到 800 字：这是给用户看的摘要，不是日志。
+       */
+      const reasoning =
+        typeof choice?.message?.reasoning_content === 'string' ? choice.message.reasoning_content.trim() : ''
+
       if (!input.jsonSchema) {
-        return { data: { text: content.trim() }, usage, modelVersion }
+        return {
+          data: {
+            text: content.trim(),
+            ...(reasoning.length > 0 ? { thinking: clipThinking(reasoning) } : {}),
+          },
+          usage,
+          modelVersion,
+        }
       }
 
       let data: unknown
@@ -576,7 +604,16 @@ export function createOpenAICompatibleAgent(config: OpenAICompatibleConfig) {
         return { tokensIn: raw.prompt_tokens, tokensOut: raw.completion_tokens, cachedTokens: details?.cached_tokens }
       })
 
-      return { content, toolCalls, usage, modelVersion, provider: config.provider }
+      const agentReasoning =
+        typeof choice?.message?.reasoning_content === 'string' ? choice.message.reasoning_content.trim() : ''
+      return {
+        content,
+        toolCalls,
+        usage,
+        modelVersion,
+        provider: config.provider,
+        ...(agentReasoning.length > 0 ? { thinking: clipThinking(agentReasoning) } : {}),
+      }
     }
   }
 }

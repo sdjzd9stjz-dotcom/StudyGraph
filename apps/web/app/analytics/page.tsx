@@ -38,9 +38,7 @@ export default async function AnalyticsPage() {
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 8 }}>
         <h1 style={{ fontSize: 22, fontWeight: 700 }}>错题看板</h1>
         <span style={{ fontSize: 12, color: '#9ca3af' }}>最近 {stats.range}</span>
-        <Link href="/" style={{ color: '#2563eb', fontSize: 13, marginLeft: 'auto' }}>
-          返回首页
-        </Link>
+        <Link href="/" style={{ color: '#2563eb', fontSize: 13, marginLeft: 'auto' }}>← 返回画布列表</Link>
       </div>
 
       <p style={{ fontSize: 13, color: '#6b7280', marginBottom: 20 }}>

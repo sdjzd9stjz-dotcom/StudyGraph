@@ -2,7 +2,7 @@
 
 import { Handle, Position } from '@xyflow/react'
 import type { NodeProps } from '@xyflow/react'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 
 import { NODE_PORTS, validateConnection } from '../../../../packages/contracts/src/client'
 import type { NodeType } from '../../../../packages/contracts/src/client'
@@ -75,6 +75,7 @@ export function SgNode({ id, data }: NodeProps) {
    * 正在输入的内容被藏起来，继续打字就打到别处 —— 用户实际遇到的现象。
    */
   const [pinned, setPinned] = useState(false)
+  const rootRef = useRef<HTMLDivElement | null>(null)
   const [hoverPort, setHoverPort] = useState<{ side: 'in' | 'out'; name: string; type: string; top: number } | null>(null)
   const color = nodeColor(d.nodeType)
 
@@ -89,6 +90,25 @@ export function SgNode({ id, data }: NodeProps) {
   // 提示词对每个节点都开放；类型专属参数排在后面
   const fields = [PROMPT_FIELD, ...paramFieldsFor(d.nodeType)]
   const connectionInputs = d.inputs.filter((port) => !port.external)
+
+  /**
+   * 缩略态自适应（用户 2026-11-23 要求）。
+   *
+   * 之前是死宽 232 + 死高 168 + 滚动条：内容一多就得拖滑轨才能看全，
+   * 一屏也看不出"这张卡在讲什么"。现在按内容量估一个尺寸：
+   *   · 行数少 → 窄一点，省画布空间
+   *   · 行数多 → 先加宽（最多 320，再宽就横跨半屏），再加高（最多 420）
+   * 超过上限才滚动 —— 极长产物不可能无限撑开，否则画布没法看。
+   */
+  const summary = d.outputSummary ?? ''
+  const lines = summary.length === 0 ? [] : summary.split('\n')
+  const longest = lines.reduce((max, line) => Math.max(max, line.length), 0)
+  // 每行约 15 个汉字宽；长行给更宽的卡片，短行保持紧凑
+  const nodeWidth = lines.length === 0 ? 232 : longest > 34 ? 320 : longest > 22 ? 276 : 232
+  // 232 宽时一行约 15 字，宽卡片约 21 字 —— 换行后行数会变多，粗略换算
+  const charsPerLine = Math.round(nodeWidth / 15)
+  const wrappedLines = lines.reduce((total, line) => total + Math.max(1, Math.ceil(line.length / charsPerLine)), 0)
+  const outputMaxHeight = Math.min(420, Math.max(120, wrappedLines * 19 + 18))
   const compatible = d.connectHighlight === 'compatible'
   const incompatible = d.connectHighlight === 'incompatible'
 
@@ -98,17 +118,29 @@ export function SgNode({ id, data }: NodeProps) {
       data-node-type={d.nodeType}
       data-status={d.status}
       data-connect-highlight={d.connectHighlight ?? undefined}
+      ref={rootRef}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => {
         setHover(false)
-        if (!pinned) return
-        // 钉住状态下把焦点收回，让面板能合上（否则光标走了它就再也关不掉了）
-        const active = typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null
-        if (active && active !== document.body) active.blur()
+        /**
+         * 光标离开了，但只要面板里还有焦点（正在打字）就保持展开；
+         * 否则收起。用"焦点是否还在本节点内"判断，而不是只看 pinned ——
+         * 之前 pinned 一旦为真、焦点又落回 body（点过保存按钮就会），
+         * 就再也没有代码把它设回 false，面板永远不收起（真实反馈）。
+         */
+        window.setTimeout(() => {
+          const root = rootRef.current
+          const active = document.activeElement as HTMLElement | null
+          const inside = Boolean(root && active && active !== document.body && root.contains(active))
+          if (!inside) {
+            if (active && active !== document.body) active.blur()
+            setPinned(false)
+          }
+        }, 0)
       }}
       style={{
         position: 'relative',
-        width: 232,
+        width: nodeWidth,
         background: '#fff',
         borderRadius: 10,
         border: `2px solid ${d.running ? '#f59e0b' : compatible ? '#22c55e' : color}`,
@@ -449,8 +481,8 @@ export function SgNode({ id, data }: NodeProps) {
             fontSize: 11,
             lineHeight: 1.6,
             whiteSpace: 'pre-wrap',
-            // 产物可能很长：给一个可滚动的固定高度，节点之间才排得开、看得成一张图
-            maxHeight: d.outputSummary ? 168 : undefined,
+            // 自适应高度：内容少就矮，内容多先加高到 420 再滚动
+            maxHeight: d.outputSummary ? outputMaxHeight : undefined,
             overflowY: d.outputSummary ? 'auto' : undefined,
             background: d.outputSummary ? '#f8fafc' : 'transparent',
             border: d.outputSummary ? '1px solid #e2e8f0' : 'none',

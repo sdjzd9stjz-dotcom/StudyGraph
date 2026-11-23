@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState } from 'react'
 
+import { ThinkingBubble } from './ThinkingBubble'
+
 /**
  * 单个节点的对话面板。
  *
@@ -37,6 +39,8 @@ export function NodeChat({
   const [turns, setTurns] = useState<Turn[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
+  /** 这一轮的思考摘要（模型返回的 reasoning 节选），等待时就能看 */
+  const [thinking, setThinking] = useState<string | null>(null)
   const bottom = useRef<HTMLDivElement>(null)
 
   /**
@@ -102,6 +106,7 @@ export function NodeChat({
     if (!message || busy) return
     setBusy(true)
     setInput('')
+    setThinking(null)
     setTurns((prev) => [...prev, { role: 'user', text: message }])
     try {
       // 历史由服务端从库里取：客户端再传一份只会和真正用于下游的版本分叉
@@ -110,7 +115,8 @@ export function NodeChat({
         headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
         body: JSON.stringify({ message }),
       })
-      const data = (await response.json()) as { reply?: string; error?: { message?: string } }
+      const data = (await response.json()) as { reply?: string; thinking?: string; error?: { message?: string } }
+      if (typeof data.thinking === 'string') setThinking(data.thinking)
       setTurns((prev) => [
         ...prev,
         { role: 'assistant', text: data.reply ?? data.error?.message ?? `请求失败：HTTP ${response.status}` },
@@ -164,6 +170,7 @@ export function NodeChat({
             <br />· 帮我把这段整理成卡片上的一句话。
           </p>
         )}
+        {busy && <ThinkingBubble thinking={thinking} />}
         {turns.map((turn, index) => (
           <div
             key={index}

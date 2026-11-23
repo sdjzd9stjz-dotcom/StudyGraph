@@ -4,7 +4,8 @@ import { z } from 'zod'
 import type { PrismaClient } from '../../../../packages/db/src/index.ts'
 import { summarizeArtifact } from '../domain/artifact-text.ts'
 import { computeLayout } from '../domain/layout.ts'
-import { findCanvasForUser, requireCanvasOwner } from '../lib/access.ts'
+import { findCanvasForUser, requireCanvasOwner, requireCanvasWrite } from '../lib/access.ts'
+import { AppError } from '../lib/errors.ts'
 import { parse } from '../lib/validate.ts'
 import { getAuth } from '../plugins/auth.ts'
 import type { Guard } from '../plugins/auth.ts'
@@ -33,6 +34,8 @@ export function registerCanvasRoutes(app: FastifyInstance, deps: CanvasRouteDeps
         ownerId: auth.user.id, // ownerId 只从 token 取，不接受 body（否则能替别人建画布）
         title: body.title,
         description: body.description ?? null,
+        // 新建的排最前：用户刚创建的画布一定想立刻看到
+        sortOrder: -1,
       },
       select: { id: true, title: true, ownerId: true, createdAt: true },
     })
@@ -46,10 +49,127 @@ export function registerCanvasRoutes(app: FastifyInstance, deps: CanvasRouteDeps
       where: {
         OR: [{ ownerId: auth.user.id }, { members: { some: { userId: auth.user.id } } }],
       },
-      orderBy: { createdAt: 'desc' },
+      /**
+       * 顺序：用户手工排的在前（sortOrder 升序），没排过的按创建时间倒序。
+       * Prisma 里 null 的排序位置各库不同，所以先按 sortOrder 再按 createdAt 兜底，
+       * 新建画布的 sortOrder 为 -1，永远排在最前。
+       */
+      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }],
       select: { id: true, title: true, ownerId: true, createdAt: true, updatedAt: true },
     })
     return { canvases }
+  })
+
+  /**
+   * 重命名 / 改描述（用户 2026-11-23 要求：首页右键可重命名）。
+   *
+   * 只接受 owner 或 EDITOR：`CANVAS_WRITE` 守卫管作用域，
+   * 画布级权限交给 requireCanvasWrite —— 两者不是一回事。
+   */
+  app.patch('/v1/canvases/:id', { preHandler: guard('CANVAS_WRITE') }, async (request) => {
+    const auth = getAuth(request)
+    const { id } = request.params as { id: string }
+    const body = parse(
+      z.object({
+        title: z.string().trim().min(1).max(200).optional(),
+        description: z.string().max(2000).nullable().optional(),
+      }),
+      request.body,
+    )
+    await requireCanvasWrite(prisma, id, auth.user.id)
+
+    const canvas = await prisma.canvas.update({
+      where: { id },
+      data: {
+        ...(body.title !== undefined ? { title: body.title } : {}),
+        ...(body.description !== undefined ? { description: body.description } : {}),
+      },
+      select: { id: true, title: true, description: true },
+    })
+    return canvas
+  })
+
+  /**
+   * 重排画布（用户 2026-11-23 要求：拖动改变上下顺序）。
+   *
+   * 传**完整的有序 id 列表**而不是"把 A 移到 B 前面"：
+   * 后者在并发下会产生中间态（两个人同时拖，结果互相覆盖成半截顺序）。
+   * 整表覆盖是幂等的，重放一次结果相同。
+   */
+  app.put('/v1/canvases/order', { preHandler: guard('CANVAS_WRITE') }, async (request) => {
+    const auth = getAuth(request)
+    const body = parse(z.object({ ids: z.array(z.string().min(1)).max(500) }), request.body)
+
+    // 只能排自己的画布：别人的 id 混进来就整批拒绝（不静默跳过）
+    const owned = await prisma.canvas.findMany({
+      where: { id: { in: body.ids }, ownerId: auth.user.id },
+      select: { id: true },
+    })
+    if (owned.length !== body.ids.length) {
+      throw new AppError(403, 'FORBIDDEN', '只能调整自己拥有的画布顺序', {
+        requested: body.ids.length,
+        owned: owned.length,
+      })
+    }
+
+    await prisma.$transaction(
+      body.ids.map((id, index) => prisma.canvas.update({ where: { id }, data: { sortOrder: index } })),
+    )
+    return { updated: body.ids.length }
+  })
+
+  /**
+   * 画布级模型配置（用户 2026-11-23 要求：AI 配置每块画布独立）。
+   *
+   * 覆盖顺序：这块画布的偏好 → 用户全局偏好 → 内置默认路由。
+   * 返回 merge 后的结果，界面才能显示"这块画布实际在用哪个模型"。
+   */
+  app.get('/v1/canvases/:id/model-prefs', { preHandler: guard('CANVAS_READ') }, async (request) => {
+    const auth = getAuth(request)
+    const { id } = request.params as { id: string }
+    await requireCanvasWrite(prisma, id, auth.user.id)
+
+    const [canvasPrefs, globalPrefs] = await Promise.all([
+      prisma.canvasModelPref.findMany({
+        where: { canvasId: id },
+        select: { taskType: true, credentialId: true, modelId: true },
+      }),
+      prisma.userModelPref.findMany({
+        where: { userId: auth.user.id },
+        select: { taskType: true, credentialId: true, modelId: true },
+      }),
+    ])
+    return { canvasPrefs, globalPrefs }
+  })
+
+  app.put('/v1/canvases/:id/model-prefs/:taskType', { preHandler: guard('CANVAS_WRITE') }, async (request, reply) => {
+    const auth = getAuth(request)
+    const { id, taskType } = request.params as { id: string; taskType: string }
+    const body = parse(z.object({ credentialId: z.string().min(1), modelId: z.string().min(1).max(120) }), request.body)
+    await requireCanvasWrite(prisma, id, auth.user.id)
+
+    // 凭据必须属于本人且有效：否则等于允许把别人的密钥挂到自己画布上
+    const credential = await prisma.userCredential.findFirst({
+      where: { id: body.credentialId, userId: auth.user.id, isActive: true },
+      select: { id: true },
+    })
+    if (!credential) throw new AppError(404, 'PROVIDER_CREDENTIAL_NOT_FOUND', '凭据不存在')
+
+    const pref = await prisma.canvasModelPref.upsert({
+      where: { canvasId_taskType: { canvasId: id, taskType } },
+      create: { canvasId: id, taskType, credentialId: body.credentialId, modelId: body.modelId },
+      update: { credentialId: body.credentialId, modelId: body.modelId },
+    })
+    return reply.status(201).send({ taskType: pref.taskType, credentialId: pref.credentialId, modelId: pref.modelId })
+  })
+
+  app.delete('/v1/canvases/:id/model-prefs/:taskType', { preHandler: guard('CANVAS_WRITE') }, async (request, reply) => {
+    const auth = getAuth(request)
+    const { id, taskType } = request.params as { id: string; taskType: string }
+    await requireCanvasWrite(prisma, id, auth.user.id)
+    // 删掉 = 回落到全局偏好，不是"不配置"
+    await prisma.canvasModelPref.deleteMany({ where: { canvasId: id, taskType } })
+    return reply.status(204).send()
   })
 
   app.get('/v1/canvases/:id', { preHandler: guard('CANVAS_READ') }, async (request) => {
