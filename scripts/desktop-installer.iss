@@ -34,9 +34,8 @@ WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#AppExe}
-; 安装包与快捷方式用产品图标（来自宣传片的紫/蓝/绿三节点）
+; 安装包自身用产品图标（来自宣传片的紫/蓝/绿三节点）
 SetupIconFile=icon.ico
-IconFilename=icon.ico
 UninstallDisplayName={#AppName}
 ; 按用户安装：不要求管理员权限，学生机器上通常也没有管理员
 PrivilegesRequired=lowest
@@ -51,9 +50,10 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"
-Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
+; IconFilename 属于 [Icons] 而不是 [Setup]：它决定快捷方式显示哪个图标
+Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"; IconFilename: "{app}\resources\app\icon.ico"
+Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"; IconFilename: "{app}\resources\app\icon.ico"
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; IconFilename: "{app}\resources\app\icon.ico"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent

@@ -274,8 +274,9 @@ function splashStages() {
 function createSplash() {
   const icon = IS_PACKAGED ? path.join(process.resourcesPath, 'app', 'icon.ico') : path.join(ROOT, 'apps', 'desktop', 'icon.ico')
   splash = new BrowserWindow({
-    width: 560,
-    height: 380,
+    // 轮播图是 900×302 的宣传页裁切：窗口按图宽留边，否则图会被缩得看不清
+    width: 720,
+    height: 520,
     frame: false,
     resizable: false,
     center: true,
@@ -297,8 +298,8 @@ function createSplash() {
     '.bar{width:300px;height:5px;background:#e2e8f0;border-radius:99px;margin-top:26px;overflow:hidden}' +
     '.fill{height:100%;width:4%;background:linear-gradient(90deg,#7c3aed,#3b82f6,#10b981);border-radius:99px;transition:width .4s ease}' +
     '.stage{font-size:12px;color:#64748b;margin-top:12px;min-height:16px}' +
-    '.slides{position:relative;width:100%;height:110px;margin-top:20px}' +
-    '.slide{position:absolute;inset:0;margin:auto;max-height:104px;max-width:92%;object-fit:contain;opacity:0;transition:opacity .6s ease}' +
+    '.slides{position:relative;width:100%;height:232px;margin-top:18px;display:flex;align-items:center}' +
+    '.slide{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:88%;max-height:226px;object-fit:contain;opacity:0;transition:opacity .8s ease;border-radius:10px}' +
     '.slide.on{opacity:1}' +
     '</style></head><body>' +
     (iconUrl ? '<img class="logo" src="' + iconUrl + '" />' : '') +
