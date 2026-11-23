@@ -38,6 +38,9 @@ const SYSTEM_PROMPT = `你是一位数学命题老师，根据给定的概念卡
   CONCEPT_GAP（概念没懂）/ METHOD_MISMATCH（用错方法）/ CONDITION_MISSED（漏条件）/
   COMPUTE_SLIP（算错）/ READING_SLIP（看错题）/ CHECK_OMITTED（没检查）
 - 答案必须唯一且可判定。能算的题就给最终值，不要写"略"
+- **说明里限定了题型时，只能出限定的题型**。要证明题就出证明题，
+  不要因为"证明题不好出"就换成计算题或选择题 —— 换掉等于没按要求做
+- 证明题的 answer 写完整论证要点，每行一条，便于按要点判分
 - 不要出考查死记硬背的题；考"是否真的理解了"
 - 凑不出符合要求的题就少出，**不要拿不合格的题凑数**`
 
@@ -123,6 +126,44 @@ function dedupeBySpan(
   return [...bySpan.entries()].map(([spanId, names]) => ({ spanId, names }))
 }
 
+/**
+ * 从提示词里读题型要求。
+ *
+ * 用户写"要求是证明题""只要计算题""出选择题"这类话，都应当变成题型约束。
+ * 只认关键词，不做语义理解：宁可漏判（退化成不限制），也不要把
+ * "不要出选择题"这种否定句误判成"只要选择题"。
+ */
+export function typesFromPrompt(prompt: string): string[] {
+  const text = prompt.trim()
+  if (text.length === 0) return []
+
+  const patterns: Array<{ type: (typeof PROBLEM_TYPES)[number]; pattern: RegExp }> = [
+    { type: 'PROOF', pattern: /证明题|证明|证明其|证一下/ },
+    // "选择题"不带多选字样时按单选处理：多选必须先说明，否则默认单选更安全
+    { type: 'SINGLE_CHOICE', pattern: /单选题|单项选择|单选|选择题/ },
+    { type: 'MULTI_CHOICE', pattern: /多选题|多项选择|多选/ },
+    { type: 'TRUE_FALSE', pattern: /判断题|是非题/ },
+    { type: 'FILL_BLANK', pattern: /填空题/ },
+    { type: 'NUMERIC', pattern: /数值题|计算结果/ },
+    { type: 'COMPUTATION', pattern: /计算题|求解题|算一算/ },
+    { type: 'SHORT_ANSWER', pattern: /简答题|问答/ },
+  ]
+
+  /**
+   * 先按小句切开再判否定：整段匹配会让"不要出证明题，出计算题"里的
+   * "不要"一直管到后面的"计算题"，把真正的肯定要求也吃掉。
+   * 以逗号/分号/句号/换行为界，一个子句只影响它自己。
+   */
+  const clauses = text.split(/[，,。；;\n]/).map((clause) => clause.trim()).filter(Boolean)
+
+  const hits: Array<(typeof PROBLEM_TYPES)[number]> = []
+  for (const { type, pattern } of patterns) {
+    const positive = clauses.some((clause) => pattern.test(clause) && !/^(不要|别|避免|不用|无需)/.test(clause))
+    if (positive) hits.push(type)
+  }
+  return hits
+}
+
 interface RawProblem {
   type?: unknown
   stem?: unknown
@@ -138,7 +179,7 @@ interface RawProblem {
 export const quizExecutor: NodeExecutor<QuizParams> = {
   type: 'QUIZ',
   artifactKind: 'PROBLEM_DRAFT',
-  promptVersion: 'quiz-v1',
+  promptVersion: 'quiz-v2',
   inputs: {
     type: 'object',
     properties: {
@@ -200,8 +241,23 @@ export const quizExecutor: NodeExecutor<QuizParams> = {
       .map((concept, index) => `${index + 1}. ${concept.name}：${concept.definition}`)
       .join('\n')
 
-    const typeHint = Array.isArray(ctx.params?.types) && ctx.params.types.length > 0
-      ? `\n限定题型：${ctx.params.types.join(' / ')}`
+    /**
+     * 题型约束有两个来源，缺一不可：
+     *   1. 结构化参数 `params.types`（界面上"限定题型"那一栏）
+     *   2. 节点提示词里写明的题型（"要求是证明题"）
+     *
+     * 只认第一种时，用户在提示词里写"只要证明题"毫无强制力 ——
+     * 模型照样返回计算题，代码也照样收下（真实反馈：要求证明题，出了 5 道计算题）。
+     * 提示词是用户的直接要求，优先级不低于参数栏。
+     */
+    const declaredTypes = Array.isArray(ctx.params?.types)
+      ? (ctx.params.types as string[]).filter((type) => (PROBLEM_TYPES as readonly string[]).includes(type))
+      : []
+    const promptedTypes = typesFromPrompt(String((ctx.params as { prompt?: unknown } | null)?.prompt ?? ''))
+    const allowedTypes = declaredTypes.length > 0 ? declaredTypes : promptedTypes
+
+    const typeHint = allowedTypes.length > 0
+      ? `\n限定题型：只允许 ${allowedTypes.join(' / ')}。不要输出其它题型。`
       : ''
     const difficultyHint = ctx.params?.difficulty ? `\n目标难度：${ctx.params.difficulty}（1–5）` : ''
 
@@ -236,12 +292,34 @@ export const quizExecutor: NodeExecutor<QuizParams> = {
         continue
       }
 
-      const type = typeof item.type === 'string' && (PROBLEM_TYPES as readonly string[]).includes(item.type)
+      const declared = typeof item.type === 'string' && (PROBLEM_TYPES as readonly string[]).includes(item.type)
         ? item.type
         : 'SHORT_ANSWER'
-      const judgeRule = typeof item.judgeRule === 'string' && (JUDGE_RULES as readonly string[]).includes(item.judgeRule)
-        ? item.judgeRule
-        : CHOICE_TYPES.has(type) ? 'CHOICE' : 'EXACT'
+
+      /**
+       * 题型必须落在允许范围内。
+       * 之前只把用户的"限定题型"当提示词写进请求，模型返回什么都照收 ——
+       * 界面上写着"只要证明题"，出来的是计算题，用户看到的就是"不符合要求"。
+       */
+      if (allowedTypes.length > 0 && !allowedTypes.includes(declared)) {
+        dropped.push({ stem: stem.slice(0, 40), reason: `题型 ${declared} 不在限定范围（${allowedTypes.join('/')}）` })
+        continue
+      }
+      const type = declared
+
+      /**
+       * 证明题/简答题不能被判成 EXACT。
+       *
+       * 一道证明题的答案是整段论证，用"字符串完全相等"去判必然永远判错，
+       * 学生写对了也算错 —— 比没有这道题更糟。这两类必须走 RUBRIC（要点判分），
+       * 并把参考要点从答案里拆出来，否则判分规则等于没写。
+       */
+      const rubricType = type === 'PROOF' || type === 'SHORT_ANSWER'
+      const judgeRule = rubricType
+        ? 'RUBRIC'
+        : typeof item.judgeRule === 'string' && (JUDGE_RULES as readonly string[]).includes(item.judgeRule)
+          ? item.judgeRule
+          : CHOICE_TYPES.has(type) ? 'CHOICE' : 'EXACT'
       const bloom = typeof item.bloom === 'string' && (BLOOM_LEVELS as readonly string[]).includes(item.bloom)
         ? item.bloom
         : 'APPLY'
@@ -294,9 +372,27 @@ export const quizExecutor: NodeExecutor<QuizParams> = {
         continue
       }
 
-      const judgeSpec = judgeRule === 'NUMERIC_TOL'
-        ? { tolerance: typeof item.tolerance === 'number' && item.tolerance >= 0 ? item.tolerance : 0 }
-        : undefined
+      /**
+       * RUBRIC 的判分依据。
+       *
+       * 证明题的答案本身就是"应该出现在论证里的要点"。把它按行/分号拆成要点列表，
+       * 判分时逐条对照，学生写对几条给几条的分 —— 这比让它判 EXACT 全对或全错合理得多。
+       * 拆不出要点时保留整段作为单条要点，不编造额外要求。
+       */
+      const rubricPoints = rubricType
+        ? answer
+            .split(/\n+|；|;/)
+            .map((point) => point.replace(/^\s*[-*•\d.、)）]+\s*/, '').trim())
+            .filter((point) => point.length >= 4)
+            .slice(0, 12)
+        : []
+
+      const judgeSpec =
+        judgeRule === 'NUMERIC_TOL'
+          ? { tolerance: typeof item.tolerance === 'number' && item.tolerance >= 0 ? item.tolerance : 0 }
+          : judgeRule === 'RUBRIC'
+            ? { points: rubricPoints.length > 0 ? rubricPoints : [answer] }
+            : undefined
 
       const problem = await ctx.prisma.problem.create({
         data: {
@@ -330,6 +426,14 @@ export const quizExecutor: NodeExecutor<QuizParams> = {
       created.push({ id: problem.id, type: problem.type, stem: problem.stemMd, difficulty: problem.difficulty, status: problem.status })
     }
 
+    /**
+     * 缺口要能解释清楚。
+     *
+     * 只报 requested/actual 的话，用户看到"要 5 道、出了 3 道"完全不知道原因；
+     * 按丢弃理由归类后，最可能的一句就是"题型限制把其余的筛掉了"。
+     */
+    const dropReasons = [...new Set(dropped.map((item) => item.reason))].slice(0, 5)
+
     return {
       outputs: {
         created,
@@ -337,6 +441,8 @@ export const quizExecutor: NodeExecutor<QuizParams> = {
         // 不足就明说：requested 5 / actual 3 是可见的缺口，不静默补齐
         actual: created.length,
         dropped,
+        dropReasons,
+        ...(allowedTypes.length > 0 ? { allowedTypes } : {}),
       },
       usage: result.usage,
       usageRecords: [{ provider: result.provider, model: result.modelVersion, ...result.usage }],

@@ -184,3 +184,16 @@ test('LECTURE 接受多种上游：知识卡、题目、抽取结果、深入理
     assert.equal(check.ok, true, `${fromType} 应该能连到 LECTURE`)
   }
 })
+
+test('复习能连知识卡（真实反馈：复习无法连接知识点卡片）', () => {
+  const fromCard = validateConnection({ fromType: 'CARD', fromPort: 'out', toType: 'REVIEW', toPort: 'in' })
+  assert.equal(fromCard.ok, true, '知识卡 → 复习 必须允许')
+
+  // 判分结果仍然能连（用来补充"哪些题错了"的信号）
+  const fromGrade = validateConnection({ fromType: 'GRADE', fromPort: 'out', toType: 'REVIEW', toPort: 'in' })
+  assert.equal(fromGrade.ok, true)
+
+  // 不相关的类型仍然拒绝，不能因为放宽而全放开
+  const fromSource = validateConnection({ fromType: 'SOURCE', fromPort: 'out', toType: 'REVIEW', toPort: 'in' })
+  assert.equal(fromSource.ok, false)
+})

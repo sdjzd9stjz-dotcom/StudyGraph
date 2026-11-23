@@ -76,7 +76,25 @@ export const NODE_PORTS: Readonly<Record<NodeType, NodePorts>> = {
     inputs: [{ name: 'in', type: 'AnswerRecord', external: true }],
     outputs: [{ name: 'out', type: 'GradeResult' }],
   },
-  REVIEW: { inputs: [{ name: 'in', type: 'GradeResult' }], outputs: [{ name: 'out', type: 'ReviewPlan' }] },
+  /**
+   * 复习调度。
+   *
+   * 它真正需要的是**知识卡**：执行器直接按 canvasId 查 VERIFIED 概念排复习计划，
+   * 判分结果只是"哪些题错了"的补充信号。之前输入端口写死 GradeResult，
+   * 于是用户从知识卡拖一条线过来必然被端口校验拒绝 —— 复习和卡片彻底连不上，
+   * 而这恰恰是最常见的用法。现在两种都能接，且允许不连（只按画布概念排）。
+   */
+  REVIEW: {
+    /**
+     * 复习不需要连线也能工作（执行器直接按 canvasId 排），但设计上它应当吃概念卡。
+     *
+     * 关键约束：REVIEW 只有这一个输入口。这一点被 CanvasWorkbench 的"容错接线"依赖 ——
+     * 当用户从卡片拖到复习、而两张节点的端口类型对不上时，前端会在这个**单入口**上
+     * 兜底接线，避免出现"图上有线、库里没有"的假节点状态。
+     */
+    inputs: [{ name: 'in', type: 'ConceptCardSet', accepts: ['ConceptCardSet', 'GradeResult'] }],
+    outputs: [{ name: 'out', type: 'ReviewPlan' }],
+  },
   // 人工闸门：通过后原样放行同一批题，不改变数据类型
   GATE: { inputs: [{ name: 'in', type: 'ProblemSet' }], outputs: [{ name: 'out', type: 'ProblemSet' }] },
 

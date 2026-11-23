@@ -310,8 +310,19 @@ function Inner({
       setNodes((current) => current.map((node) => (node.id === nodeId ? { ...node, data: { ...node.data, running: true } } : node)))
       try {
         const response = await fetch(`${apiBaseUrl}/v1/nodes/${nodeId}/run`, { method: 'POST', headers })
-        const body = (await response.json().catch(() => null)) as { status?: string; error?: { message?: string } } | null
+        const body = (await response.json().catch(() => null)) as { status?: string; error?: { message?: string; code?: string } } | null
         if (!response.ok) {
+          /**
+           * 404 = 画布上的这张卡在库里已经没有了（别的窗口删掉了、或克隆/导入留下的残留）。
+           * 直接把这张幽灵卡从画布上移除并说明原因 —— 只弹"节点不存在"会让用户
+           * 对着一个删不掉、点不动的方块反复点（真实反馈）。
+           */
+          if (body?.error?.code === 'NODE_NOT_FOUND' || response.status === 404) {
+            setNodes((current) => current.filter((node) => node.id !== nodeId))
+            setEdges((current) => current.filter((edge) => edge.source !== nodeId && edge.target !== nodeId))
+            notify('这个节点在数据库里已经不存在，已从画布上移除')
+            return
+          }
           notify(body?.error?.message ?? `执行失败：${response.status}`)
         } else {
           notify(`执行${body?.status === 'SUCCEEDED' ? '成功' : `：${body?.status}`}`)
@@ -323,7 +334,7 @@ function Inner({
         setNodes((current) => current.map((node) => (node.id === nodeId ? { ...node, data: { ...node.data, running: false } } : node)))
       }
     },
-    [apiBaseUrl, notify, setNodes, token],
+    [apiBaseUrl, notify, setEdges, setNodes, token],
   )
 
   /**
@@ -656,10 +667,29 @@ function Inner({
   // ── 连线 ────────────────────────────────────────────────────────────────
   const onConnect = useCallback(
     async (connection: Connection) => {
+      /**
+       * 单入口容错。
+       *
+       * 有的节点只有一个输入口（如 REVIEW），用户从卡片拖过去时如果端口类型不完全匹配，
+       * ReactFlow 仍然会画出这条线，但服务端 400 拒绝 —— 结果是**图上有线、库里没有**，
+       * 之后的删除、运行、连线都对着一个不存在的关系操作，看起来就是"节点存在但提示不存在"。
+       * 这里不猜类型，只做一件事：单入口节点隐式使用它唯一的那个口，让连线真实落地或明确失败。
+       */
+      const targetType = nodes.find((node) => node.id === connection.target)?.data?.nodeType as NodeType | undefined
+      const targetPorts = targetType ? NODE_PORTS[targetType] : undefined
+      const targetHandle =
+        connection.targetHandle ??
+        (targetPorts && targetPorts.inputs.length === 1 ? targetPorts.inputs[0]!.name : undefined)
+      const sourceType = nodes.find((node) => node.id === connection.source)?.data?.nodeType as NodeType | undefined
+      const sourcePorts = sourceType ? NODE_PORTS[sourceType] : undefined
+      const sourceHandle =
+        connection.sourceHandle ??
+        (sourcePorts && sourcePorts.outputs.length === 1 ? sourcePorts.outputs[0]!.name : undefined)
+
       const response = await fetch(`${apiBaseUrl}/v1/canvases/${canvasId}/edges`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ fromNodeId: connection.source, toNodeId: connection.target, fromPort: connection.sourceHandle ?? undefined, toPort: connection.targetHandle ?? undefined }),
+        body: JSON.stringify({ fromNodeId: connection.source, toNodeId: connection.target, fromPort: sourceHandle, toPort: targetHandle }),
       })
       const payload = (await response.json().catch(() => null)) as { id?: string; error?: { message?: string; code?: string } } | null
       if (!response.ok) {

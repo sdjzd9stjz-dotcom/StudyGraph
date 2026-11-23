@@ -117,6 +117,36 @@ export function ConceptPanel({ canvasId, apiBaseUrl, token, initialConcepts }: C
     setConcepts(payload.concepts)
   }, [canvasId, token])
 
+  /**
+   * 人工确认一条概念。
+   *
+   * 为什么这个按钮是必需的：出题只从 VERIFIED 概念出题，而卡片跑完一律是
+   * PENDING_REVIEW。界面上没有确认入口时，哪怕概念抽得再好，出题也永远报
+   * "没有通过复核的概念" —— 整条链路在这里断掉，用户却找不到任何可点的地方。
+   */
+  const [reviewing, setReviewing] = useState<string | null>(null)
+  const decide = useCallback(
+    async (conceptId: string, decision: 'ACCEPT' | 'REJECT') => {
+      setReviewing(conceptId)
+      try {
+        const response = await fetch(`${apiBaseUrl}/v1/concepts/${conceptId}/review`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+          body: JSON.stringify({ decision }),
+        })
+        if (!response.ok) {
+          const payload = (await response.json().catch(() => null)) as { error?: { message?: string } } | null
+          setError(payload?.error?.message ?? `确认失败：HTTP ${response.status}`)
+          return
+        }
+        await reload()
+      } finally {
+        setReviewing(null)
+      }
+    },
+    [apiBaseUrl, reload, token],
+  )
+
   return (
     <section data-testid="concept-panel" style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
       <div style={{ flex: 1, minWidth: 0 }}>
@@ -133,6 +163,13 @@ export function ConceptPanel({ canvasId, apiBaseUrl, token, initialConcepts }: C
             刷新
           </button>
         </div>
+
+        {/* 确认/拒绝的错误显示在列表上方：抽屉里的提示只有点开引用才看得到 */}
+        {error && !openSpanId && (
+          <p data-testid="concept-error" style={{ fontSize: 12, color: '#b91c1c', margin: '0 0 8px' }}>
+            {error}
+          </p>
+        )}
 
         {concepts.length === 0 && (
           <p data-testid="concept-empty" style={{ fontSize: 13, color: '#9ca3af' }}>
@@ -160,6 +197,29 @@ export function ConceptPanel({ canvasId, apiBaseUrl, token, initialConcepts }: C
                   </span>
                   {concept.reviewedBy && (
                     <span style={{ fontSize: 11, color: '#6b7280' }}>人工复核</span>
+                  )}
+                  {/* 待复核的给确认/拒绝；已确认的给"撤销"入口（回到待复核才能改判） */}
+                  {concept.status === 'PENDING_REVIEW' && (
+                    <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+                      <button
+                        type="button"
+                        data-testid={`concept-accept-${concept.id}`}
+                        disabled={reviewing === concept.id}
+                        onClick={() => void decide(concept.id, 'ACCEPT')}
+                        style={{ fontSize: 11, border: 'none', background: reviewing === concept.id ? '#86efac' : '#16a34a', color: '#fff', borderRadius: 6, padding: '3px 10px', cursor: 'pointer' }}
+                      >
+                        确认
+                      </button>
+                      <button
+                        type="button"
+                        data-testid={`concept-reject-${concept.id}`}
+                        disabled={reviewing === concept.id}
+                        onClick={() => void decide(concept.id, 'REJECT')}
+                        style={{ fontSize: 11, border: '1px solid #fca5a5', background: '#fff', color: '#dc2626', borderRadius: 6, padding: '3px 10px', cursor: 'pointer' }}
+                      >
+                        拒绝
+                      </button>
+                    </span>
                   )}
                 </div>
                 <p style={{ fontSize: 13, color: '#374151', margin: '6px 0' }}>{concept.definition}</p>

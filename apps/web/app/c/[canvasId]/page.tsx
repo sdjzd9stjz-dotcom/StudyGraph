@@ -1,16 +1,18 @@
 import Link from 'next/link'
 
 import { CanvasWorkbench } from '../../../components/canvas/CanvasWorkbench'
+import { ConceptPanel } from '../../../components/ConceptPanel'
 import { SourceUploader } from '../../../components/SourceUploader'
-import { API_BASE_URL, fetchCanvas, fetchCanvasSkills, fetchGroups, serverToken } from '../../../lib/api'
+import { API_BASE_URL, fetchCanvas, fetchCanvasConcepts, fetchCanvasSkills, fetchGroups, serverToken } from '../../../lib/api'
 
 export const dynamic = 'force-dynamic'
 
 export default async function CanvasPage({ params }: { params: { canvasId: string } }) {
-  const [canvas, groupsPayload, skillsPayload] = await Promise.all([
+  const [canvas, groupsPayload, skillsPayload, concepts] = await Promise.all([
     fetchCanvas(params.canvasId),
     fetchGroups(params.canvasId),
     fetchCanvasSkills(params.canvasId),
+    fetchCanvasConcepts(params.canvasId),
   ])
 
   if (!canvas) {
@@ -86,6 +88,25 @@ export default async function CanvasPage({ params }: { params: { canvasId: strin
         skills={skillsPayload.skills}
         nodeSkills={skillsPayload.nodeSkills}
       />
+
+      {/**
+        * 概念卡面板（含人工确认）。
+        * 放在画布下方而不是侧栏：确认概念是"出题之前"的一次性动作，
+        * 不需要常驻视线，但找不到就会卡住整条链路（真实反馈：出题一直失败）。
+        */}
+      <details data-testid="concept-panel-wrapper" style={{ borderTop: '1px solid #e2e8f0', background: '#fff' }}>
+        <summary style={{ cursor: 'pointer', padding: '8px 16px', fontSize: 13, color: '#334155' }}>
+          概念卡（{concepts.length}）—— 出题前需要在这里确认
+        </summary>
+        <div style={{ padding: '0 16px 16px' }}>
+          <ConceptPanel
+            canvasId={canvas.id}
+            apiBaseUrl={API_BASE_URL}
+            token={serverToken()}
+            initialConcepts={concepts}
+          />
+        </div>
+      </details>
     </main>
   )
 }
