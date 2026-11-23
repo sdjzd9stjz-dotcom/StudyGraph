@@ -405,6 +405,13 @@ if (!gotLock) {
   })
 }
 
+/**
+ * 任务栏图标分组标识。
+ * 不设这个，Windows 会把窗口按 exe 名归到 Electron 的默认分组，
+ * 右键任务栏显示的图标和分组名都不对。
+ */
+if (process.platform === 'win32') app.setAppUserModelId('com.studygraph.desktop')
+
 app.whenReady().then(async () => {
   try {
     createSplash()

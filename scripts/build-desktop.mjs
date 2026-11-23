@@ -65,6 +65,28 @@ const electronExe = path.join(appDir, 'electron.exe')
 const appExe = path.join(appDir, 'StudyGraph.exe')
 cpSync(electronExe, appExe)
 rmSync(electronExe, { force: true })
+
+/**
+ * 改写 exe 内嵌图标。
+ *
+ * 为什么必须单独做这一步：Electron 的 `app.setAppUserModelId` / BrowserWindow 的 `icon`
+ * 只影响运行时窗口；资源管理器里看到的 exe 图标、固定到任务栏的图标、
+ * Alt-Tab 缩略图的图标，全都来自 **exe 文件自身的资源段**。
+ * 不打这一步，用户装完看到的还是 Electron 默认那个深色圆圈（真实反馈）。
+ */
+const rcedit = path.join(root, 'scripts', 'bin', 'rcedit.exe')
+const iconFile = path.join(root, 'apps', 'desktop', 'icon.ico')
+if (existsSync(rcedit) && existsSync(iconFile)) {
+  const stamped = spawnSync(rcedit, [appExe, '--set-icon', iconFile], { encoding: 'utf8' })
+  if (stamped.status === 0) {
+    console.log('exe 图标已写入')
+  } else {
+    // 写不进去不该让整个打包失败：窗口图标仍然正确，只是资源管理器里显示旧的
+    console.warn('exe 图标写入失败（不影响运行）：', (stamped.stderr || stamped.stdout || '').slice(0, 200))
+  }
+} else {
+  console.warn('跳过 exe 图标：找不到', rcedit, '或', iconFile)
+}
 // Electron 需要 resources/default_app.asar 之外的 app 目录；改名后的 exe 仍然读取 resources/app
 console.log('Electron 已复制 →', appDir)
 
