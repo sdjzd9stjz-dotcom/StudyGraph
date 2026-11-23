@@ -20,8 +20,7 @@
 
 ## 当前状态
 
-**可安装的桌面应用，版本 0.22.1。** 19 个节点全部有执行器，前后端 63 个接口，
-26 个单元测试文件 + 8 个集成测试 + 2 个契约测试全绿。
+**Windows 桌面版，当前本地安装包版本为 0.22.3。** 画布提供 19 种可运行的节点，覆盖课件解析、知识卡制作、练习、组卷和复习。
 
 | 已交付 | 路径 |
 | --- | --- |
@@ -50,7 +49,13 @@
 4. 每个节点点 ▶ 运行；点 💬 就这个节点的内容提问
 5. 底部对话框直接说人话：`把课件做成知识卡并出题`、`把概念拆成知识卡`、`帮我整理一下`
 
-完整说明见应用内 **📖 教程**，或 `docs/使用说明书.pdf`。
+### 用知识卡出题和复习
+
+1. 依次运行「文件解析 → 语义切片 → 概念抽取 → 概念卡」。展开画布下方的「概念卡」面板，对照原文检查待复核的概念，内容正确时点「确认」。
+2. 把知识卡连到出题节点。要练某类题，可在参数栏选择题型；参数栏留空时，也可以在提示词里写「只出证明题」。运行后只保留符合限定题型的题目，证明题和简答题按要点评分。
+3. 把知识卡直接连到复习节点，点 ▶ 为当前画布已确认的概念生成复习计划。复习节点也接受判分结果。
+
+详细操作见应用内「教程」，或打开[在线说明书](docs/使用说明书.md)和 [PDF 版](docs/使用说明书.pdf)。
 
 ---
 
@@ -71,11 +76,11 @@ pnpm db:deploy                  # 应用迁移（需要 DATABASE_URL）
 # 契约测试（无依赖）
 node packages/contracts/test/ports.test.ts
 
-# 单元测试（无依赖，可逐条跑）
-cd apps/api && node test/unit/assistant-agent.test.ts
+# 出题题型约束（使用模拟模型，在仓库根目录运行）
+node --test apps/api/test/unit/quiz-type-constraint.test.ts apps/api/test/unit/quiz-executor-constraint.test.ts
 
-# 集成测试需要真实 PostgreSQL（$DATABASE_URL 指向可用的库）
-node test/integration/downstream-equivalence.test.ts
+# 集成测试需要真实 PostgreSQL（DATABASE_URL 指向可用的测试库）
+pnpm --filter @studygraph/api test:integration
 ```
 
 打包桌面版：
@@ -134,7 +139,7 @@ studygraph/
    任一失败标 `REJECTED` 并附理由，不得入库。
 5. **每个干扰项必须诊断一个错因** —— 错误选项绑定 `ErrorTag`，禁止凑数选项。
 
-另有一条关于 AI 的边界：**底部 agent 的工具集是写死的 7 个画布操作**
+另有一条关于 AI 的边界：**底部 agent 提供 9 个画布工具**
 （查画布、读产出、建/改/删节点、建/删连线、拆卡、整理），
 没有文件、网络、命令，也不能执行节点。
 
