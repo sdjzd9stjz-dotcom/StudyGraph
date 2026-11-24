@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 
+import { GROUP_LINK_TARGETS, canLinkGroupTo } from '../../../../packages/contracts/src/index.ts'
 import type { PrismaClient } from '../../../../packages/db/src/index.ts'
 import { summarizeArtifact } from '../domain/artifact-text.ts'
 import { requireCanvasWrite } from '../lib/access.ts'
@@ -100,6 +101,8 @@ export function registerGroupRoutes(app: FastifyInstance, deps: GroupRouteDeps):
         /** 组卡片在画布上的位置（组现在是真实节点，可以被拖动） */
         posX: z.number().finite().optional(),
         posY: z.number().finite().optional(),
+        /** 收起/展开状态：存库，重进画布时恢复 */
+        collapsed: z.boolean().optional(),
       }),
       request.body,
     )
@@ -114,8 +117,9 @@ export function registerGroupRoutes(app: FastifyInstance, deps: GroupRouteDeps):
         ...(body.title !== undefined ? { title: body.title } : {}),
         ...(body.posX !== undefined ? { posX: Math.round(body.posX) } : {}),
         ...(body.posY !== undefined ? { posY: Math.round(body.posY) } : {}),
+        ...(body.collapsed !== undefined ? { collapsed: body.collapsed } : {}),
       },
-      select: { id: true, title: true, posX: true, posY: true },
+      select: { id: true, title: true, posX: true, posY: true, collapsed: true },
     })
     return updated
   })
@@ -237,6 +241,7 @@ export function registerGroupRoutes(app: FastifyInstance, deps: GroupRouteDeps):
         posX: true,
         posY: true,
         color: true,
+        collapsed: true,
         summary: true,
         members: { select: { nodeId: true, node: { select: { type: true, title: true, status: true } } } },
         links: { select: { nodeId: true } },
@@ -250,6 +255,7 @@ export function registerGroupRoutes(app: FastifyInstance, deps: GroupRouteDeps):
         posX: group.posX,
         posY: group.posY,
         color: group.color,
+        collapsed: group.collapsed,
         summary: group.summary,
         memberIds: group.members.map((member) => member.nodeId),
         members: group.members.map((member) => ({ nodeId: member.nodeId, ...member.node })),
@@ -273,8 +279,27 @@ export function registerGroupRoutes(app: FastifyInstance, deps: GroupRouteDeps):
       throw new AppError(400, 'GROUP_SELF_REFERENCE', '不能把一个组接回它自己的成员节点')
     }
 
-    const node = await prisma.node.findFirst({ where: { id: body.nodeId, canvasId: group.canvasId }, select: { id: true } })
+    const node = await prisma.node.findFirst({
+      where: { id: body.nodeId, canvasId: group.canvasId },
+      select: { id: true, type: true },
+    })
     if (!node) throw new AppError(400, 'NODE_NOT_IN_CANVAS', '目标节点不在本画布')
+
+    /**
+     * 只允许接到这几类节点（用户 2026-11-24：「为组添加可以接到的节点：复习、深入理解、导出讲义、先修」）。
+     *
+     * 判定用 contracts 的同一张表：界面高亮用的就是它，
+     * 否则会出现"界面亮着能接、松手被拒"这种最让人困惑的状态。
+     * 这四类节点的执行器要么真读 upstreamContext，要么按 groupContext 收窄概念范围 —— 接上去有实际效果。
+     */
+    if (!canLinkGroupTo(node.type)) {
+      throw new AppError(
+        400,
+        'GROUP_LINK_UNSUPPORTED',
+        `组只能接到：${GROUP_LINK_TARGETS.join(' / ')}；当前节点是 ${node.type}`,
+        { targetType: node.type, allowed: [...GROUP_LINK_TARGETS] },
+      )
+    }
 
     const link = await prisma.nodeGroupLink.upsert({
       where: { groupId_nodeId: { groupId: id, nodeId: body.nodeId } },

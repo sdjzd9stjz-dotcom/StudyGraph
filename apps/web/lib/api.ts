@@ -267,6 +267,8 @@ export interface GroupView {
   color: string
   memberIds: string[]
   usedBy: string[]
+  /** 收起状态存在库里：否则重进画布会全部弹开 */
+  collapsed?: boolean
 }
 
 export async function fetchGroups(canvasId: string): Promise<GroupView[]> {

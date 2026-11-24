@@ -66,6 +66,8 @@ export const ERROR_CODES = [
   'DRAFT_INVALID',
   'GROUP_NOT_FOUND',
   'GROUP_SELF_REFERENCE',
+  // 组只能接到复习 / 深入理解 / 导出讲义 / 先修（见 contracts/group-links.ts）
+  'GROUP_LINK_UNSUPPORTED',
   'PROVIDER_CREDENTIAL_NOT_FOUND',
   'BYOK_MASTER_KEY_MISSING',
   // 上传（M2 前门）

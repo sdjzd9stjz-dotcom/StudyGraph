@@ -11,6 +11,7 @@
  * 端口矩阵仍然只有一份（`./ports.ts`），**不许为了打包方便复制第二份**。
  */
 export { REQUIRED_CAPABILITY, TASK_TYPE_KEYS, TASK_LABELS, isTaskType } from './task-capabilities.ts'
+export { GROUP_LINK_TARGETS, GROUP_LINK_HINT, canLinkGroupTo } from './group-links.ts'
 
 export { NODE_TYPES, NODE_BATCH, isNodeType } from './node-types.ts'
 export type { NodeType } from './node-types.ts'

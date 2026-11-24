@@ -26,6 +26,8 @@ export interface SgGroupData {
   memberCount: number
   collapsed: boolean
   usedBy: number
+  /** 拖线中的高亮态：与普通节点同一套语义 */
+  connectHighlight?: 'origin' | 'compatible' | 'incompatible' | null
   /** 展开态的框尺寸（画布坐标，由成员的包围盒算出） */
   frameWidth: number
   frameHeight: number
@@ -37,12 +39,25 @@ export function SgGroupNode({ data }: NodeProps) {
   const d = data as unknown as SgGroupData
   const color = d.color || '#6366f1'
 
+  /**
+   * 拖线高亮（用户 2026-11-24：「同时更新一下高亮的显示」）。
+   *
+   * 和普通节点用同一套语义，避免"有的亮、有的不亮"：
+   *   compatible   组能接在当前拖线的落点上 → 绿色描边 + 外发光
+   *   incompatible 接不上 → 压暗到 0.4，但仍可见
+   *   origin       这根线就是从组拉出来的 → 保持不变
+   */
+  const highlight = d.connectHighlight ?? null
+  const accent = highlight === 'compatible' ? '#22c55e' : highlight === 'origin' ? color : color
+  const dimmed = highlight === 'incompatible'
+
   /* ── 收起：叠放卡片 ─────────────────────────────────────────────── */
   if (d.collapsed) {
     return (
       <div
         data-testid={`group-node-${d.groupId}`}
         data-collapsed="true"
+        data-connect-highlight={highlight ?? undefined}
         style={{
           position: 'relative',
           width: 208,
@@ -52,8 +67,13 @@ export function SgGroupNode({ data }: NodeProps) {
            * 背后两层错位的边框 = "这里叠着东西"。
            * 比一个纯色方块更能说明里面不是空的。
            */
-          boxShadow: `3px 3px 0 -1px #fff, 3px 3px 0 0 ${color}66, 6px 6px 0 -1px #fff, 6px 6px 0 0 ${color}33, 0 2px 8px rgba(15,23,42,0.12)`,
-          border: `1.5px solid ${color}`,
+          boxShadow:
+            highlight === 'compatible'
+              ? `0 0 0 3px rgba(34,197,94,0.35), 3px 3px 0 -1px #fff, 3px 3px 0 0 ${color}66, 0 2px 8px rgba(15,23,42,0.12)`
+              : `3px 3px 0 -1px #fff, 3px 3px 0 0 ${color}66, 6px 6px 0 -1px #fff, 6px 6px 0 0 ${color}33, 0 2px 8px rgba(15,23,42,0.12)`,
+          border: `1.5px solid ${accent}`,
+          opacity: dimmed ? 0.4 : 1,
+          transition: 'box-shadow .12s, opacity .12s, border-color .12s',
           fontFamily: 'inherit',
           fontSize: 11,
           color,
@@ -88,11 +108,16 @@ export function SgGroupNode({ data }: NodeProps) {
         event.stopPropagation()
         d.onOpenMenu?.(d.groupId, event.clientX, event.clientY)
       }}
+      data-connect-highlight={highlight ?? undefined}
       style={{
         position: 'relative',
         width: d.frameWidth,
         height: d.frameHeight,
-        border: `1.5px dashed ${color}`,
+        // 能接上时描边转绿并加一圈内发光：虚线框本身很淡，只改颜色不够醒目
+        border: highlight === 'compatible' ? '1.5px dashed #22c55e' : `1.5px dashed ${color}`,
+        boxShadow: highlight === 'compatible' ? 'inset 0 0 0 3px rgba(34,197,94,0.12)' : undefined,
+        opacity: dimmed ? 0.4 : 1,
+        transition: 'border-color .12s, box-shadow .12s, opacity .12s',
         borderRadius: 10,
         /**
          * 框内部**不接收**鼠标事件：否则它会把成员的点击、框选、拖拽全吃掉

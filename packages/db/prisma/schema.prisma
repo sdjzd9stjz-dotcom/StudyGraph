@@ -1411,6 +1411,8 @@ model NodeGroup {
   posX   Float @default(0)
   posY   Float @default(0)
   color  String @default("#6366f1")
+  /// 是否处于收起状态。存库而不是只放前端 state —— 否则重进画布会全部弹开
+  collapsed Boolean @default(false)
   /// 打包后的上下文摘要：展开时用于给下游节点做输入
   summary Json?
 

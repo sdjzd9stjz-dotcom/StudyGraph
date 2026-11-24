@@ -73,8 +73,10 @@ test('深入理解：把卡片与题目的对话收敛成核心观点，并带�
 
   const result = await deepenExecutor.run(ctx)
 
-  assert.equal(result.outputs.points.length, 2)
-  assert.equal(result.outputs.summary.includes('确界'), true)
+  // outputs 在 ExecutorResult 里是 Record<string, unknown>：这里显式收窄，别用 any 糊过去
+  const outputs = result.outputs as { points: unknown[]; summary: string }
+  assert.equal(outputs.points.length, 2)
+  assert.equal(outputs.summary.includes('确界'), true)
   // 上游对话必须真的进了提示词：这正是"连线 = 对话总结作为上下文"的落点
   const userMessage = calls[0].messages.find((message: any) => message.role === 'user').content as string
   assert.match(userMessage, /为什么 ε 要取任意正数/)

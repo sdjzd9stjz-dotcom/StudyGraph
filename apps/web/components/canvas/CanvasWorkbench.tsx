@@ -16,7 +16,7 @@ import type { Connection, Edge as FlowEdge, Node as FlowNode } from '@xyflow/rea
 import { useRouter } from 'next/navigation'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import { NODE_PORTS, validateConnection } from '../../../../packages/contracts/src/client'
+import { NODE_PORTS, canLinkGroupTo, validateConnection } from '../../../../packages/contracts/src/client'
 import type { NodeType } from '../../../../packages/contracts/src/client'
 import { ADVANCED_NODES, PRIMARY_NODES, nodeLabel, nodeColor } from '../../lib/canvas-meta'
 import { renderLectureHtml } from '../../lib/lecture-html'
@@ -80,6 +80,8 @@ export interface WorkbenchGroup {
   color: string
   memberIds: string[]
   usedBy: string[]
+  /** 收起状态存在库里：否则重进画布会全部弹开 */
+  collapsed?: boolean
 }
 
 function toFlowNode(node: WorkbenchNode, skillsByNode: Map<string, string[]>): FlowNode {
@@ -248,6 +250,8 @@ function Inner({
     allowed: Set<NodeType>
     /** 节点类型 → 能接上的具体端口名 */
     portsByType: Map<NodeType, string[]>
+    /** 拖线起点的节点类型（组节点为 null）：组节点据此判断自己能不能被接上 */
+    fromType: NodeType | null
   } | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   /** 重命名 / 起名 / 拒绝理由：Electron 没有 window.prompt，统一用应用内弹窗 */
@@ -258,7 +262,13 @@ function Inner({
    * 收起组内成员**真的从画布上隐藏**，而不是只画一个框：
    * 之前收起只是把框画窄，里面的节点还露在外面，看起来像"框和内容对不上"。
    */
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  /**
+   * 收起状态从**服务端**初始化（用户报「重进画布打包组自动解包/虚线框消失」）。
+   * 之前是空集合，每次进画布全部当展开；现在的真值在 NodeGroup.collapsed。
+   */
+  const [collapsed, setCollapsed] = useState<Set<string>>(
+    () => new Set(initialGroups.filter((group) => group.collapsed).map((group) => group.id)),
+  )
   /** 分组右键菜单位置（组没有节点 id，单独一份状态） */
   const [groupMenu, setGroupMenu] = useState<{ groupId: string; x: number; y: number } | null>(null)
   /**
@@ -305,11 +315,23 @@ function Inner({
           .map((node) => ({ x: node.position.x - anchor.x, y: node.position.y - anchor.y }))
         const size = frameSize(memberPoints)
 
+        const isCollapsed = collapsed.has(group.id)
+
         return {
           id: groupNodeId(group.id),
           type: 'sgGroup',
-          measured: group.measured,
-          style: collapsed.has(group.id) ? undefined : { pointerEvents: 'none' },
+          /**
+           * 显式给宽高（用户报「重进画布虚线框消失」）。
+           *
+           * React Flow 渲染节点时判定 `measured.width ? visible : hidden`，
+           * 而 `measured` 要等它测量完才回填。首帧没有宽度 → 直接 hidden；
+           * 组节点又是从 groups 派生的，若测量结果没写回，就一直是 hidden。
+           * 这里直接给出尺寸（收起卡片 208 宽、展开按成员包围盒），
+           * 首帧就有宽度，不再依赖"测量回来"这个时序。
+           */
+          width: isCollapsed ? 208 : size.width,
+          height: isCollapsed ? 64 : size.height,
+          style: isCollapsed ? undefined : { pointerEvents: 'none' },
           position: anchor,
           draggable: true,
           selectable: true,
@@ -329,10 +351,25 @@ function Inner({
             onOpenMenu: (groupId: string, clientX: number, clientY: number) => {
               setGroupMenu({ groupId, x: clientX, y: clientY })
             },
+            /**
+             * 拖线高亮（用户 2026-11-24：「同时更新一下高亮的显示」）。
+             *
+             * 之前只有普通节点参与高亮，组节点在拖线时毫无反应 ——
+             * 从组拖出来时看不出哪些节点能接，从节点拖出来时也看不出组能不能当上游。
+             */
+            connectHighlight: (() => {
+              if (!connectDraft) return null
+              if (connectDraft.originNodeId === groupNodeId(group.id)) return 'origin'
+              // 组的唯一用途是当上游给别人喂上下文：只有"往组里拖"才可能接上
+              return connectDraft.originHandleType === 'target' &&
+                canLinkGroupTo(connectDraft.fromType ?? '')
+                ? 'compatible'
+                : 'incompatible'
+            })(),
           } satisfies SgGroupData,
         }
       }),
-    [groups, collapsed, nodes],
+    [groups, collapsed, nodes, connectDraft],
   )
   /**
    * 收起前每个成员的位置。
@@ -811,6 +848,26 @@ function Inner({
       const fromNode = nodes.find((node) => node.id === origin.nodeId)
       const fromType = String(fromNode?.data?.nodeType ?? '') as NodeType
       const allowed = new Set<NodeType>()
+
+      /**
+       * 从**组节点**拖出（用户 2026-11-24：「为组添加可以接到的节点」）。
+       *
+       * 组不是普通节点：它没有端口类型，连的是 NodeGroupLink。
+       * 能接的范围由 contracts 的 GROUP_LINK_TARGETS 决定（复习/深入理解/讲义/先修），
+       * 这里只负责把高亮画出来 —— 口径必须与服务端一致，否则会出现
+       * "界面亮着能接、松手被 400 拒绝"。
+       */
+      if (isGroupNodeId(origin.nodeId)) {
+        const portsByType = new Map<NodeType, string[]>()
+        for (const candidate of [...PRIMARY_NODES, ...ADVANCED_NODES]) {
+          if (!canLinkGroupTo(candidate.type)) continue
+          allowed.add(candidate.type)
+          // 组给的是"一整批节点的摘要"，落到目标节点的第一个非外部输入口上
+          const input = (NODE_PORTS[candidate.type]?.inputs ?? []).find((port) => !port.external)
+          if (input) portsByType.set(candidate.type, [input.name])
+        }
+        return { allowed, portsByType, reason: '组可以接：复习 / 深入理解 / 导出讲义 / 先修' }
+      }
       /**
        * 节点类型 → 该类型上**具体哪几根端口**能接上。
        *
@@ -1225,6 +1282,12 @@ function Inner({
              * 顺序反了会看到卡片早早出现、节点还在往它里面飞。
              */
             setCollapsed((current) => new Set(current).add(group.id))
+            // 收起状态存库：重进画布时要保持收起，而不是自己弹开
+            void fetch(apiBaseUrl + '/v1/groups/' + group.id, {
+              method: 'PATCH',
+              headers,
+              body: JSON.stringify({ collapsed: true }),
+            }).catch(() => undefined)
             /**
              * 尺寸从"虚线框"变成"折叠卡片"，之前记下的 measured 已经不适用。
              * 不清掉的话，画布会继续用旧宽高做连线锚点与包围盒计算，
@@ -1262,6 +1325,12 @@ function Inner({
         next.delete(group.id)
         return next
       })
+      // 展开同样写库，否则下次进来还是收起的
+      void fetch(apiBaseUrl + '/v1/groups/' + group.id, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ collapsed: false }),
+      }).catch(() => undefined)
       // 从"折叠卡片"变回"虚线框"：旧的 measured 是卡片尺寸，必须清掉重新测量
       setGroups((current) => current.map((item) => (item.id === group.id ? { ...item, measured: undefined } : item)))
       setAnimating({ groupId: group.id, to: 'expanded' })
@@ -1512,6 +1581,10 @@ function Inner({
                 originHandleType: origin.handleType,
                 allowed: plan.allowed,
                 portsByType: plan.portsByType,
+                // 组节点没有普通类型：置 null，由组自己的分支判断
+                fromType: isGroupNodeId(origin.nodeId)
+                  ? null
+                  : ((nodes.find((node) => node.id === origin.nodeId)?.data?.nodeType ?? null) as NodeType | null),
               })
             }}
             onConnectEnd={(event, state) => {
