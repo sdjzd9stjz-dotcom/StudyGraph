@@ -10,6 +10,7 @@ import {
   useEdgesState,
   useNodesState,
   useReactFlow,
+  useUpdateNodeInternals,
   useViewport,
 } from '@xyflow/react'
 import type { Connection, Edge as FlowEdge, Node as FlowNode } from '@xyflow/react'
@@ -33,8 +34,10 @@ import { NodeChat } from './NodeChat'
 import { NodeSearch } from './NodeSearch'
 import { Sidebar } from './Sidebar'
 import type { SkillView } from './Sidebar'
-import { buildFrames, frameSize, restoreTargets, stackTargets } from '../../lib/group-motion'
+import { buildFrames, frameBox, frameSize, restoreTargets, stackTargets } from '../../lib/group-motion'
 import { orderByDependency } from '../../lib/run-order'
+import { ConnectDraftContext } from './connect-draft'
+import { changedPositions } from '../../lib/save-state'
 import { selectionForContextMenu, toggleSelection } from '../../lib/selection'
 import { usePrompt } from '../ui/PromptDialog'
 
@@ -313,7 +316,8 @@ function Inner({
         const memberPoints = nodes
           .filter((node) => group.memberIds.includes(node.id))
           .map((node) => ({ x: node.position.x - anchor.x, y: node.position.y - anchor.y }))
-        const size = frameSize(memberPoints)
+        const box = frameBox(memberPoints)
+        const size = { width: box.width, height: box.height }
 
         const isCollapsed = collapsed.has(group.id)
 
@@ -340,7 +344,11 @@ function Inner({
            * CSS 允许子元素在 none 的父元素里恢复命中，所以它们仍然可拖。
            */
           style: isCollapsed ? undefined : { pointerEvents: 'none' },
-          position: anchor,
+          /**
+           * 成员被拖到组的左/上方时，框要跟着挪过去，否则框不住它们。
+           * 收起态永远贴在锚点上（折叠卡片就是锚点本身）。
+           */
+          position: isCollapsed ? anchor : { x: anchor.x + box.dx, y: anchor.y + box.dy },
           draggable: true,
           selectable: true,
           data: {
@@ -360,30 +368,17 @@ function Inner({
               setGroupMenu({ groupId, x: clientX, y: clientY })
             },
             /**
-             * 拖线高亮（用户 2026-11-24：「同时更新一下高亮的显示」）。
+             * 拖线高亮**不放在 data 里**（用户 2026-11-24：「右侧出点依然拉不出线」）。
              *
-             * 之前只有普通节点参与高亮，组节点在拖线时毫无反应 ——
-             * 从组拖出来时看不出哪些节点能接，从节点拖出来时也看不出组能不能当上游。
+             * 放进 data 就得让 groupNodes 依赖 connectDraft，一按下出点整组节点被重建，
+             * React Flow 的端口量测随之作废 —— 按得下去、线却拉不出来。
+             * 改由 ConnectDraftContext 下发，组节点对象在此期间保持稳定。
              */
-            connectHighlight: (() => {
-              if (!connectDraft) return null
-              if (connectDraft.originNodeId === groupNodeId(group.id)) return 'origin'
-              /**
-               * 两个方向都算"能接"：
-               *   · 组出点 → 节点输入口：组当上游（只有四类节点收）
-               *   · 节点输出口 → 组入点：把这个节点并进组（任何节点都行）
-               * 之前只认后者的一半，从普通节点拖出来时整块框被压暗，
-               * 看起来就是"连不上"（用户 2026-11-24 报的）。
-               */
-              if (connectDraft.originHandleType === 'target') {
-                return canLinkGroupTo(connectDraft.fromType ?? '') ? 'compatible' : 'incompatible'
-              }
-              return 'compatible'
-            })(),
           } satisfies SgGroupData,
         }
       }),
-    [groups, collapsed, nodes, connectDraft],
+    // 刻意不依赖 connectDraft：高亮走 context，拖线期间组节点必须保持同一批对象
+    [groups, collapsed, nodes],
   )
   /**
    * 组 → 节点的连线**显示**。
@@ -469,6 +464,7 @@ function Inner({
   const shiftDown = useRef<{ nodeId: string; selectedIds: string[] } | null>(null)
   const RIGHT_DRAG_THRESHOLD = 4
   const { screenToFlowPosition, getViewport } = useReactFlow()
+  const updateNodeInternals = useUpdateNodeInternals()
   /**
    * 分组框要跟着画布缩放/平移走。
    *
@@ -477,6 +473,46 @@ function Inner({
    * 用 useViewport 而不是监听 onMove：前者是订阅，拖动时自动重渲，不会漏帧。
    */
   const viewport = useViewport()
+  /**
+   * 拖线高亮的判定（通过 context 下发给组节点，见 connect-draft.tsx）。
+   *
+   * 两个方向都算"能接"：
+   *   · 组出点 → 节点输入口：组当上游（只有四类节点收）
+   *   · 节点输出口 → 组入点：把这个节点并进组（任何节点都行）
+   */
+  const connectDraftValue = useMemo(
+    () => ({
+      isOrigin: (groupId: string) => connectDraft?.originNodeId === groupNodeId(groupId),
+      highlightFor: (groupId: string): 'origin' | 'compatible' | 'incompatible' | null => {
+        if (!connectDraft) return null
+        if (connectDraft.originNodeId === groupNodeId(groupId)) return 'origin'
+        if (connectDraft.originHandleType === 'target') {
+          return canLinkGroupTo(connectDraft.fromType ?? '') ? 'compatible' : 'incompatible'
+        }
+        return 'compatible'
+      },
+    }),
+    [connectDraft],
+  )
+  /**
+   * 组节点的端口量测。
+   *
+   * 用户 2026-11-24 报「右侧出点依然拉不出线」，在真实浏览器里复现出的差别是：
+   * 页面刚加载时能拖，拖一次之后就不行了。原因是 setConnectDraft 导致重渲染，
+   * 组节点是每帧重新构造的对象（不是来自 useNodesState 的稳定引用），
+   * React Flow 内部缓存的端口位置（handleBounds）随之作废；
+   * 尺寸没变，ResizeObserver 也不会再触发一次，于是出点拖出来算不出起点、画不出线。
+   *
+   * 这里在"组的形态变化"和"拖线高亮变化"之后主动要求重新测量一次。
+   * 放在 rAF 里是因为要等这一帧的 DOM 落定（宽高/端口都渲染出来）再量。
+   */
+  useEffect(() => {
+    if (groupNodes.length === 0) return
+    const handle = window.requestAnimationFrame(() => {
+      updateNodeInternals(groupNodes.map((node) => node.id))
+    })
+    return () => window.cancelAnimationFrame(handle)
+  }, [groupNodes, updateNodeInternals])
 
   const headers = { 'content-type': 'application/json', authorization: `Bearer ${token}` }
   const router = useRouter()
@@ -1498,6 +1534,104 @@ function Inner({
     [apiBaseUrl, headers, nodes, notify, token],
   )
 
+  /**
+   * 退出画布前把"坐标类"的改动一次性落库（用户 2026-11-24 要求）。
+   *
+   * 为什么需要它：拖节点、拖动组在松手时就写接口了，但有两种情况会漏 ——
+   *   1. 多选后按方向键平移 / 拖动其中一个，其余节点的坐标不经过 onNodeDragStop；
+   *   2. 操作完立刻点返回或关窗口，最后几个 PATCH 还没发出去。
+   *
+   * 只提交**与上次已保存值不同**的条目：全量重写一次就是几十个请求，
+   * 退出时反而更容易被浏览器截断。
+   */
+  const savedPositions = useRef<Record<string, { x: number; y: number }>>({})
+  // 首次渲染时把服务端给的坐标记成"已保存"，后面的差异才有意义
+  if (Object.keys(savedPositions.current).length === 0) {
+    for (const node of initialNodes) savedPositions.current[node.id] = { x: node.posX, y: node.posY }
+    for (const group of initialGroups) savedPositions.current[group.id] = { x: group.posX, y: group.posY }
+  }
+  const [savePhase, setSavePhase] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  const saveTimer = useRef<number | null>(null)
+
+  const saveAll = useCallback(
+    async (reason: 'manual' | 'leave') => {
+      const nodeChanges = changedPositions(
+        nodes.map((node) => ({ id: node.id, x: node.position.x, y: node.position.y })),
+        savedPositions.current,
+      ).filter((item) => !isGroupNodeId(item.id))
+      const groupChanges = changedPositions(
+        groups.map((group) => ({ id: group.id, x: group.posX, y: group.posY })),
+        savedPositions.current,
+      )
+      const total = nodeChanges.length + groupChanges.length
+      if (total === 0 && reason === 'manual') {
+        notify('画布已经是最新的')
+        return
+      }
+      if (total === 0) return
+
+      setSavePhase('saving')
+      const tasks: Array<Promise<Response>> = [
+        ...nodeChanges.map((item) =>
+          fetch(`${apiBaseUrl}/v1/nodes/${item.id}`, {
+            method: 'PATCH',
+            headers,
+            body: JSON.stringify({ posX: Math.round(item.x), posY: Math.round(item.y) }),
+            // 离开页面时浏览器会取消未完成的请求；keepalive 让它跑完
+            keepalive: reason === 'leave',
+          }),
+        ),
+        ...groupChanges.map((item) =>
+          fetch(`${apiBaseUrl}/v1/groups/${item.id}`, {
+            method: 'PATCH',
+            headers,
+            body: JSON.stringify({ posX: Math.round(item.x), posY: Math.round(item.y) }),
+            keepalive: reason === 'leave',
+          }),
+        ),
+      ]
+      try {
+        const results = await Promise.all(tasks)
+        if (results.some((response) => !response.ok && response.status !== 404)) {
+          setSavePhase('error')
+          return
+        }
+        for (const item of [...nodeChanges, ...groupChanges]) {
+          savedPositions.current[item.id] = { x: item.x, y: item.y }
+        }
+        setSavePhase('saved')
+        if (saveTimer.current) window.clearTimeout(saveTimer.current)
+        saveTimer.current = window.setTimeout(() => setSavePhase('idle'), 1600)
+      } catch {
+        setSavePhase('error')
+      }
+    },
+    [apiBaseUrl, groups, headers, nodes, notify, token],
+  )
+
+  /**
+   * 离开画布（关窗口、切页面、点返回）时兜底保存一次。
+   *
+   * `pagehide` 比 `beforeunload` 可靠：Electron 窗口关闭、Alt+F4 时前者一定会到。
+   * 两个都挂上，`saveAll` 会按差异去重，重复调用无害。
+   *
+   * **客户端跳转另算**（用户 2026-11-24：「做完操作后直接退出，返回时还是操作前的样子」）：
+   * 点「← 返回」是 Next 的软导航，不触发 pagehide/beforeunload，组件只是被卸载。
+   * 所以清理函数里也要存一次 —— 那时 saveAll 还是旧闭包，正好是要保存的那份状态。
+   */
+  useEffect(() => {
+    const handler = () => {
+      void saveAll('leave')
+    }
+    window.addEventListener('pagehide', handler)
+    window.addEventListener('beforeunload', handler)
+    return () => {
+      window.removeEventListener('pagehide', handler)
+      window.removeEventListener('beforeunload', handler)
+      void saveAll('leave')
+    }
+  }, [saveAll])
+
   const onConnect = useCallback(
     async (connection: Connection) => {
       /**
@@ -1641,6 +1775,8 @@ function Inner({
               onClose={() => setChatTarget(null)}
             />
           )}
+          {/* 拖线高亮走 context：组节点在拖动期间保持同一批对象，端口量测不会被作废 */}
+          <ConnectDraftContext.Provider value={connectDraftValue}>
           <ReactFlow
             nodes={[
               ...nodesWithHandlers.filter((node) => !hiddenNodeIds.has(node.id)),
@@ -1976,6 +2112,55 @@ function Inner({
               nodeColor={(node) => nodeColor(String(node.data?.nodeType ?? ''))}
             />
           </ReactFlow>
+          </ConnectDraftContext.Provider>
+
+          {/**
+            * 保存状态（用户 2026-11-24：「加入保存动画，让用户知道现在正在保存」）。
+            * 固定在右上角：不挡底部的 AI 对话，也不和底部 toast 抢位置。
+            * saving 用 CSS 转圈；saved 打勾后自动淡出，不需要用户点确认。
+            */}
+          {savePhase !== 'idle' && (
+            <div
+              data-testid="save-indicator"
+              data-phase={savePhase}
+              style={{
+                position: 'absolute',
+                right: 14,
+                top: 12,
+                zIndex: 6,
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 7,
+                padding: '5px 11px',
+                borderRadius: 999,
+                fontSize: 12,
+                background: savePhase === 'error' ? '#fef2f2' : '#fff',
+                color: savePhase === 'error' ? '#b91c1c' : savePhase === 'saving' ? '#334155' : '#15803d',
+                border: `1px solid ${savePhase === 'error' ? '#fecaca' : savePhase === 'saving' ? '#e2e8f0' : '#bbf7d0'}`,
+                boxShadow: '0 2px 8px rgba(15,23,42,0.08)',
+                transition: 'background .2s, color .2s, border-color .2s',
+              }}
+            >
+              {savePhase === 'saving' && (
+                <span
+                  aria-hidden
+                  style={{
+                    width: 12,
+                    height: 12,
+                    borderRadius: '50%',
+                    border: '2px solid #cbd5e1',
+                    borderTopColor: '#6366f1',
+                    display: 'inline-block',
+                    animation: 'sg-spin .7s linear infinite',
+                  }}
+                />
+              )}
+              {savePhase === 'saved' && <span aria-hidden>✓</span>}
+              <span data-testid="save-label">
+                {savePhase === 'saving' ? '正在保存…' : savePhase === 'saved' ? '已保存' : '保存失败'}
+              </span>
+            </div>
+          )}
 
           {toast && (
             <div

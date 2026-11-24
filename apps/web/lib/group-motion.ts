@@ -49,6 +49,21 @@ export function frameSize(
   members: readonly Point[],
   options?: { nodeWidth?: number; nodeHeight?: number; pad?: number; minWidth?: number; minHeight?: number; topInset?: number },
 ): { width: number; height: number } {
+  const { width, height } = frameBox(members, options)
+  return { width, height }
+}
+
+/**
+ * 展开态框的位置与尺寸（含"成员跑到了锚点左上方"的处理）。
+ *
+ * 之前只按"最远成员的右下边"算尺寸，锚点固定不动 ——
+ * 成员一旦被拖到组的左上方，框就框不住它了（用户 2026-11-24 反馈）。
+ * 这里同时算出新的左上角偏移（dx/dy）：锚点 + 偏移 = 框真正该在的位置。
+ */
+export function frameBox(
+  members: readonly Point[],
+  options?: { nodeWidth?: number; nodeHeight?: number; pad?: number; minWidth?: number; minHeight?: number; topInset?: number },
+): { width: number; height: number; dx: number; dy: number } {
   const nodeWidth = options?.nodeWidth ?? 320
   const nodeHeight = options?.nodeHeight ?? 220
   const pad = options?.pad ?? 26
@@ -57,13 +72,21 @@ export function frameSize(
   // 左上角的标题条压在框内，成员不能盖住它
   const topInset = options?.topInset ?? 34
 
-  if (members.length === 0) return { width: minWidth, height: minHeight }
+  if (members.length === 0) return { width: minWidth, height: minHeight, dx: 0, dy: 0 }
 
-  const right = Math.max(...members.map((point) => point.x + nodeWidth))
-  const bottom = Math.max(...members.map((point) => point.y + nodeHeight))
+  // 成员可能落在锚点的左/上方：取最小偏移当作新的左上角
+  const minX = Math.min(...members.map((point) => point.x))
+  const minY = Math.min(...members.map((point) => point.y))
+  const dx = minX < 0 ? minX - pad : 0
+  const dy = minY < 0 ? minY - topInset : 0
+
+  const right = Math.max(...members.map((point) => point.x + nodeWidth)) - dx
+  const bottom = Math.max(...members.map((point) => point.y + nodeHeight)) - dy
   return {
     width: Math.max(right + pad, minWidth),
     height: Math.max(bottom + pad, minHeight + topInset),
+    dx,
+    dy,
   }
 }
 
