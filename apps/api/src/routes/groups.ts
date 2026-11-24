@@ -94,7 +94,15 @@ export function registerGroupRoutes(app: FastifyInstance, deps: GroupRouteDeps):
   app.patch('/v1/groups/:id', { preHandler: guard('CANVAS_WRITE') }, async (request) => {
     const auth = getAuth(request)
     const { id } = request.params as { id: string }
-    const body = parse(z.object({ title: z.string().trim().min(1).max(120) }), request.body)
+    const body = parse(
+      z.object({
+        title: z.string().trim().min(1).max(120).optional(),
+        /** 组卡片在画布上的位置（组现在是真实节点，可以被拖动） */
+        posX: z.number().finite().optional(),
+        posY: z.number().finite().optional(),
+      }),
+      request.body,
+    )
 
     const group = await prisma.nodeGroup.findUnique({ where: { id }, select: { canvasId: true } })
     if (!group) throw new AppError(404, 'GROUP_NOT_FOUND', '分组不存在')
@@ -102,10 +110,49 @@ export function registerGroupRoutes(app: FastifyInstance, deps: GroupRouteDeps):
 
     const updated = await prisma.nodeGroup.update({
       where: { id },
-      data: { title: body.title },
-      select: { id: true, title: true },
+      data: {
+        ...(body.title !== undefined ? { title: body.title } : {}),
+        ...(body.posX !== undefined ? { posX: Math.round(body.posX) } : {}),
+        ...(body.posY !== undefined ? { posY: Math.round(body.posY) } : {}),
+      },
+      select: { id: true, title: true, posX: true, posY: true },
     })
     return updated
+  })
+
+  /**
+   * 建组前的连线检测（用户 2026-11-24 要求）。
+   *
+   * 为什么要先查：组里有节点连到组外时，那条边在收起后就成了"看不见的线"，
+   * 执行顺序和上下游关系都变得不可理解。建组前把相连节点一并纳入，
+   * 组才是封闭的。这里只做**一跳**检测：纳入后再查一次由前端循环调用，
+   * 服务端不替用户决定"扩到多大"。
+   */
+  app.get('/v1/canvases/:canvasId/groups/closure', { preHandler: guard('CANVAS_READ') }, async (request) => {
+    const auth = getAuth(request)
+    const { canvasId } = request.params as { canvasId: string }
+    const ids = String((request.query as { ids?: string }).ids ?? '')
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean)
+    await requireCanvasWrite(prisma, canvasId, auth.user.id)
+
+    if (ids.length === 0) return { outside: [] as string[], links: [] as Array<{ from: string; to: string }> }
+
+    const inside = new Set(ids)
+    const edges = await prisma.edge.findMany({
+      where: { canvasId, OR: [{ fromNodeId: { in: [...inside] } }, { toNodeId: { in: [...inside] } }] },
+      select: { fromNodeId: true, toNodeId: true },
+    })
+
+    // 只要有一条端点在组外，就是"跨组边"
+    const crossing = edges.filter(
+      (edge) => inside.has(edge.fromNodeId) !== inside.has(edge.toNodeId),
+    )
+    const outside = [
+      ...new Set(crossing.flatMap((edge) => [edge.fromNodeId, edge.toNodeId]).filter((id) => !inside.has(id))),
+    ]
+    return { outside, links: crossing.map((edge) => ({ from: edge.fromNodeId, to: edge.toNodeId })) }
   })
 
   app.post('/v1/groups/:id/auto-name', { preHandler: guard('CANVAS_WRITE') }, async (request) => {

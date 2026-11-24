@@ -24,17 +24,31 @@ import { decideGate } from '../../lib/api'
 import { AssistantBar } from './AssistantBar'
 import { ContextMenu } from './ContextMenu'
 import type { MenuContext } from './ContextMenu'
+import { SgGroupNode } from './SgGroupNode'
+import type { SgGroupData } from './SgGroupNode'
 import { SgNode } from './SgNode'
 import type { SgNodeData } from './SgNode'
 import { NodeChat } from './NodeChat'
 import { NodeSearch } from './NodeSearch'
 import { Sidebar } from './Sidebar'
 import type { SkillView } from './Sidebar'
+import { buildFrames, restoreTargets, stackTargets } from '../../lib/group-motion'
 import { orderByDependency } from '../../lib/run-order'
 import { selectionForContextMenu, toggleSelection } from '../../lib/selection'
 import { usePrompt } from '../ui/PromptDialog'
 
-const nodeTypes = { sg: SgNode }
+const nodeTypes = { sg: SgNode, sgGroup: SgGroupNode }
+
+/**
+ * 组的节点 id 前缀。
+ *
+ * 组不是数据库里的 Node，但必须参与画布的缩放/拖动/连线 ——
+ * 所以给它一个合成 id 放进同一个 nodes 数组，靠前缀区分。
+ * 凡是把 id 发回 /v1/nodes/<id> 的地方都要先判断它是不是组（否则会 404）。
+ */
+const GROUP_ID_PREFIX = '__group__'
+const isGroupNodeId = (id: string): boolean => id.startsWith(GROUP_ID_PREFIX)
+const groupNodeId = (groupId: string): string => GROUP_ID_PREFIX + groupId
 
 export interface WorkbenchNode {
   id: string
@@ -254,13 +268,56 @@ function Inner({
    * duration 必须和 style 里的 transition 一致，否则会出现"卡一下再跳"。
    */
   const [animating, setAnimating] = useState<{ groupId: string; to: 'collapsed' | 'expanded' } | null>(null)
-  /** 从分组右侧输出点拖出来的连线（松手落在哪个节点上，就接到哪个节点） */
-  const [groupDrag, setGroupDrag] = useState<{
-    groupId: string
-    x: number
-    y: number
-    overNodeId: string | null
-  } | null>(null)
+  /**
+   * 组的真实画布节点。
+   *
+   * 之前组是绝对定位的覆盖层，三个问题都由它而来：缩放不跟随、拖不动、
+   * 输出点被裁掉一半点不中。做成真正的节点后，这三件事交给画布统一处理。
+   * 单独放在一个 state 里而不是混进 `nodes`：`nodes` 参与选中/删除/保存坐标，
+   * 混进去后每个遍历点都要额外判断"这个是不是真节点"。
+   */
+  const groupNodes = useMemo<FlowNode[]>(
+    () =>
+      groups.map((group) => ({
+        id: groupNodeId(group.id),
+        type: 'sgGroup',
+        // 位置就是组卡片的位置：拖动时直接改它，和普通节点一样保存
+        position: { x: group.posX, y: group.posY },
+        // 收起时它就是画布上唯一代表这一组的东西；展开时它是标题条
+        draggable: true,
+        selectable: true,
+        data: {
+          groupId: group.id,
+          title: group.title,
+          color: group.color,
+          memberCount: group.memberIds.length,
+          collapsed: collapsed.has(group.id),
+          usedBy: group.usedBy.length,
+          onToggle: (groupId: string) => {
+            const target = groups.find((item) => item.id === groupId)
+            if (target) toggleGroupRef.current(target)
+          },
+          onOpenMenu: (groupId: string, clientX: number, clientY: number) => {
+            setGroupMenu({ groupId, x: clientX, y: clientY })
+          },
+        } satisfies SgGroupData,
+      })),
+    [groups, collapsed],
+  )
+  /**
+   * 收起前每个成员的位置。
+   *
+   * 用户明确要求：「展开要回到收起前的相对位置，而不是聚在一起」。
+   * 收起时把坐标存下来，展开时按它还原；刷新过页面就没有快照，退回网格排布。
+   */
+  const memberOrigins = useRef<Map<string, Record<string, { x: number; y: number }>>>(new Map())
+  /**
+   * toggleGroup 的引用。
+   *
+   * groupNodes 是本组件里靠前定义的 useMemo，而 toggleGroup 依赖 nodes/setNodes，
+   * 只能定义在后面。用 ref 转一层，避免把两段逻辑互相牵扯（也避免循环依赖）。
+   */
+  const toggleGroupRef = useRef<(group: WorkbenchGroup) => void>(() => {})
   const hiddenNodeIds = useMemo(() => {
     const ids = new Set<string>()
     for (const group of groups) {
@@ -890,6 +947,24 @@ function Inner({
   const onConnect = useCallback(
     async (connection: Connection) => {
       /**
+       * 从组节点拖出来的线：不建 Edge，而是建 NodeGroupLink。
+       * 组不是 Node，Edge 的外键接不上（服务端会 400），
+       * 语义上也不同：组给下游的是"全部成员产物的合并上下文"。
+       */
+      if (isGroupNodeId(connection.source)) {
+        const groupId = connection.source.slice(GROUP_ID_PREFIX.length)
+        if (isGroupNodeId(connection.target)) {
+          notify('组之间不能直接连线')
+          return
+        }
+        await linkGroupTo(groupId, connection.target)
+        return
+      }
+      if (isGroupNodeId(connection.target)) {
+        notify('组只能作为上游（从组右侧的点拖到节点上）')
+        return
+      }
+      /**
        * 单入口容错。
        *
        * 有的节点只有一个输入口（如 REVIEW），用户从卡片拖过去时如果端口类型不完全匹配，
@@ -934,11 +1009,62 @@ function Inner({
    * 于是"框选 4 个 → 右键 → 打包"永远只有 1 个成员、或者直接不出现打包项。
    */
   const packGroup = useCallback(async (ids: string[]) => {
-    const idSet = new Set(ids)
-    const selected = nodes.filter((node) => idSet.has(node.id))
+    let idSet = new Set(ids)
+    let selected = nodes.filter((node) => idSet.has(node.id))
     if (selected.length < 2) {
       notify('至少要选中两个节点才能打包')
       return
+    }
+
+    /**
+     * 建组前检查"跨组边"（用户 2026-11-24 要求）。
+     *
+     * 组里有节点连到组外时，收起后那条线就看不见了 ——
+     * 上下游关系变成隐形的，跑出来的结果没人看得懂。
+     * 做法：算出所有一端在组内、一端在组外的边，问用户要不要把相连节点一并纳入；
+     * 纳入后再算一次（一跳之外还有一跳），直到没有跨组边为止。
+     */
+    const outsideOf = (set: Set<string>): string[] => {
+      const outside = new Set<string>()
+      for (const edge of edges) {
+        const fromIn = set.has(edge.source)
+        const toIn = set.has(edge.target)
+        if (fromIn === toIn) continue
+        outside.add(fromIn ? edge.target : edge.source)
+      }
+      outside.delete('')
+      return [...outside].filter((id) => !set.has(id) && !isGroupNodeId(id))
+    }
+
+    const outside = outsideOf(idSet)
+    if (outside.length > 0) {
+      const names = outside
+        .slice(0, 5)
+        .map((id) => String(nodes.find((node) => node.id === id)?.data?.title ?? id))
+        .join('、')
+      const include = await confirm({
+        title: '这些节点和组外有连线',
+        message:
+          `组里有节点连着组外的 ${outside.length} 个节点：${names}${outside.length > 5 ? ' 等' : ''}。\n\n` +
+          '如果只把现在选中的节点打包，这些连线在收起后会"看不见但还在"，上下游关系会变得难以理解。\n\n' +
+          '「一并纳入」= 把相连的节点一起放进组（会扩展到整条相连的链）。\n' +
+          '「取消」= 不建组。',
+        okText: '一并纳入',
+      })
+      if (!include) {
+        notify('已取消建组：组外还有连线')
+        return
+      }
+      // 扩散到不再有跨组边为止（有环也不会死循环：每次至少新纳入一个节点）
+      let grew = true
+      while (grew) {
+        grew = false
+        for (const id of outsideOf(idSet)) {
+          idSet.add(id)
+          grew = true
+        }
+      }
+      selected = nodes.filter((node) => idSet.has(node.id))
     }
     const title = await prompt({
       title: `打包 ${selected.length} 个节点`,
@@ -982,11 +1108,36 @@ function Inner({
   )
 
   const unpackGroup = useCallback(
-    async (groupId: string) => {
+    async (groupId: string, options?: { skipWarning?: boolean }) => {
+      const group = groups.find((item) => item.id === groupId)
+      /**
+       * 拆组前提醒（用户 2026-11-24 要求）。
+       *
+       * 组被下游当上下文引用过时，拆组会把这些 NodeGroupLink 一起删掉 ——
+       * 结果是下游节点的输入**悄悄少了一大块**，跑出来的内容变少但没有任何报错。
+       * 这类"静默丢上下文"最容易被误认为模型变笨了。
+       */
+      if (!options?.skipWarning && group && group.usedBy.length > 0) {
+        const names = group.usedBy
+          .slice(0, 4)
+          .map((id) => String(nodes.find((node) => node.id === id)?.data?.title ?? id))
+          .join('、')
+        const ok = await confirm({
+          title: '这一组被下游引用了',
+          message:
+            `${group.usedBy.length} 个节点把这一组当作上下文：${names}${group.usedBy.length > 4 ? ' 等' : ''}。\n\n` +
+            '拆组会解除这些"组作为上下文"的关系，下游下次运行时就拿不到这一组的产物了。\n\n' +
+            '节点本身都会保留在画布上，不会被删除。',
+          okText: '仍然拆组',
+          danger: true,
+        })
+        if (!ok) return
+      }
+
       const response = await fetch(`${apiBaseUrl}/v1/groups/${groupId}`, { method: 'DELETE', headers })
-      if (response.ok || response.status === 204) setGroups((current) => current.filter((group) => group.id !== groupId))
+      if (response.ok || response.status === 204) setGroups((current) => current.filter((item) => item.id !== groupId))
     },
-    [apiBaseUrl, token],
+    [apiBaseUrl, confirm, groups, nodes, token],
   )
 
   /**
@@ -999,56 +1150,106 @@ function Inner({
   const toggleGroup = useCallback(
     (group: WorkbenchGroup) => {
       const isCollapsed = collapsed.has(group.id)
+      const memberIds = group.memberIds
+      const FRAME_MS = 16
+      const FRAME_COUNT = 14 // ≈ 220ms：短到不烦人，长到看得出"它们在往一起收"
 
-      /**
-       * 动画编排（用户 2026-11-24 要求：「收起展开应当有动画」）。
-       *
-       * 收起：先把框淡出/缩到最小（140ms），再真正隐藏成员 —— 顺序反过来会看到
-       * 节点先"啪"地消失、框孤零零地留在原地。
-       * 展开：先让成员回到网格位置并立刻可见，框随后展开到新尺寸。
-       * 两种情况下都按 140ms 与 CSS transition 对齐。
-       */
-      const DURATION = 140
-      setAnimating({ groupId: group.id, to: isCollapsed ? 'expanded' : 'collapsed' })
+      if (!isCollapsed) {
+        /**
+         * 收起（用户 2026-11-24 要求）。
+         *
+         * 先把每个成员当前坐标存进 memberOrigins —— 展开要靠它还原，
+         * 不存就只能退回网格，"精心摆好的链被重排"是真实抱怨。
+         * 然后把所有人一起飞向组的右上角（叠放点），逐帧插值；
+         * 动画结束才真正隐藏成员并显示组卡片。
+         */
+        const from = nodes
+          .filter((node) => memberIds.includes(node.id))
+          .map((node) => node.position)
+        if (from.length === 0) return
 
-      if (isCollapsed) {
-        // 展开：位置先就位，成员立即可见（不等到动画结束，否则点开像卡住）
-        const originX = group.posX + 20
-        const originY = group.posY + 46
-        setNodes((current) =>
-          current.map((node) => {
-            const index = group.memberIds.indexOf(node.id)
-            if (index < 0) return node
-            return {
-              ...node,
-              position: {
-                x: originX + (index % 3) * 300,
-                y: originY + Math.floor(index / 3) * 260,
-              },
-            }
-          }),
-        )
-        setCollapsed((current) => {
-          const next = new Set(current)
-          next.delete(group.id)
-          return next
+        const saved: Record<string, { x: number; y: number }> = {}
+        nodes.forEach((node) => {
+          if (memberIds.includes(node.id)) saved[node.id] = { x: node.position.x, y: node.position.y }
         })
-        window.setTimeout(() => setAnimating(null), DURATION)
+        memberOrigins.current.set(group.id, saved)
+
+        const targets = stackTargets({ x: group.posX, y: group.posY }, from.length)
+        const frames = buildFrames(from, targets, FRAME_COUNT)
+        setAnimating({ groupId: group.id, to: 'collapsed' })
+
+        let frame = 0
+        const step = () => {
+          const positions = frames[frame]
+          if (!positions) {
+            setCollapsed((current) => new Set(current).add(group.id))
+            setAnimating(null)
+            return
+          }
+          setNodes((current) => {
+            let index = 0
+            return current.map((node) => {
+              if (!memberIds.includes(node.id)) return node
+              const point = positions[index++]
+              return point ? { ...node, position: point } : node
+            })
+          })
+          frame += 1
+          window.setTimeout(step, FRAME_MS)
+        }
+        step()
         return
       }
 
-      // 收起：等框的淡出走完再隐藏成员
-      window.setTimeout(() => {
-        setCollapsed((current) => {
-          const next = new Set(current)
-          next.add(group.id)
-          return next
-        })
-        setAnimating(null)
-      }, DURATION)
+      /**
+       * 展开：先让成员出现在堆叠点上（不可见状态），下一帧再飞回各自位置。
+       * 这样动画是"从那一叠里散开"，而不是"凭空出现"。
+       */
+      const saved = memberOrigins.current.get(group.id)
+      const restored = restoreTargets(saved, memberIds, { x: group.posX, y: group.posY })
+      const restoreById = new Map(restored.map((item) => [item.id, item.point]))
+
+      setCollapsed((current) => {
+        const next = new Set(current)
+        next.delete(group.id)
+        return next
+      })
+      setAnimating({ groupId: group.id, to: 'expanded' })
+
+      const start = stackTargets({ x: group.posX, y: group.posY }, memberIds.length)
+      const targets = memberIds.map((id) => restoreById.get(id) ?? { x: group.posX, y: group.posY })
+      const frames = buildFrames(start, targets, FRAME_COUNT)
+
+      setNodes((current) =>
+        current.map((node) => {
+          const index = memberIds.indexOf(node.id)
+          return index < 0 ? node : { ...node, position: start[index] ?? node.position }
+        }),
+      )
+
+      let frame = 0
+      const step = () => {
+        const positions = frames[frame]
+        if (!positions) {
+          setAnimating(null)
+          return
+        }
+        setNodes((current) =>
+          current.map((node) => {
+            const index = memberIds.indexOf(node.id)
+            const point = index < 0 ? undefined : positions[index]
+            return point ? { ...node, position: point } : node
+          }),
+        )
+        frame += 1
+        window.setTimeout(step, FRAME_MS)
+      }
+      window.setTimeout(step, FRAME_MS)
     },
-    [collapsed, setNodes],
+    [collapsed, nodes, setNodes],
   )
+  // groupNodes 的 data.onToggle 通过 ref 调用它（见 toggleGroupRef 的说明）
+  toggleGroupRef.current = toggleGroup
 
   const renameGroup = useCallback(
     async (group: WorkbenchGroup) => {
@@ -1081,15 +1282,17 @@ function Inner({
    */
   const deleteGroup = useCallback(
     async (group: WorkbenchGroup) => {
+      const linked = group.usedBy.length > 0 ? `\n另有 ${group.usedBy.length} 个节点把这一组当作上下文，这些引用也会一并解除。` : ''
       const ok = await confirm({
         title: '删除分组',
-        message: `「${group.title}」里的 ${group.memberIds.length} 个节点会一起删除，无法恢复。\n\n只想取消分组、保留节点的话，请用「解组」。`,
+        message: `「${group.title}」里的 ${group.memberIds.length} 个节点会一起删除，无法恢复。${linked}\n\n只想取消分组、保留节点的话，请用「解组」。`,
         okText: '全部删除',
         danger: true,
       })
       if (!ok) return
       for (const nodeId of group.memberIds) await deleteNode(nodeId)
-      await unpackGroup(group.id)
+      // 节点已经全删了，再弹"被下游引用"的提醒没有意义
+      await unpackGroup(group.id, { skipWarning: true })
       notify(`已删除分组「${group.title}」`)
     },
     [confirm, deleteNode, notify, unpackGroup],
@@ -1126,41 +1329,6 @@ function Inner({
     },
     [apiBaseUrl, headers, nodes, notify, token],
   )
-
-  /**
-   * 分组输出点的拖拽：跟着鼠标走，松手时看落在哪个节点上。
-   *
-   * 用 document 上的原生监听而不是 React 的 pointer 事件：
-   * 拖动过程中光标会离开那个小圆点，挂在圆点上的 onPointerMove 收不到事件。
-   */
-  const groupDragRef = useRef(groupDrag)
-  groupDragRef.current = groupDrag
-
-  useEffect(() => {
-    // 只在"开始拖动 / 结束拖动"时注册和注销；中途的坐标变化走 ref，避免每次 move 都重装监听
-    if (!groupDrag) return
-    const move = (event: PointerEvent) => {
-      const target = (event.target as HTMLElement | null)?.closest?.('.react-flow__node') as HTMLElement | null
-      const overNodeId = target?.dataset?.id ?? null
-      setGroupDrag((current) => (current ? { ...current, x: event.clientX, y: event.clientY, overNodeId } : current))
-    }
-    const up = (event: PointerEvent) => {
-      const target = (event.target as HTMLElement | null)?.closest?.('.react-flow__node') as HTMLElement | null
-      const nodeId = target?.dataset?.id ?? null
-      const drag = groupDragRef.current
-      setGroupDrag(null)
-      if (!drag || !nodeId) return
-      void linkGroupTo(drag.groupId, nodeId)
-    }
-    document.addEventListener('pointermove', move)
-    document.addEventListener('pointerup', up)
-    return () => {
-      document.removeEventListener('pointermove', move)
-      document.removeEventListener('pointerup', up)
-    }
-    // groupDrag 只在 null ↔ 非 null 之间切换时重跑；坐标变化不触发
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groupDrag === null, linkGroupTo])
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 66px)' }}>
@@ -1217,7 +1385,10 @@ function Inner({
             />
           )}
           <ReactFlow
-            nodes={nodesWithHandlers.filter((node) => !hiddenNodeIds.has(node.id))}
+            nodes={[
+              ...nodesWithHandlers.filter((node) => !hiddenNodeIds.has(node.id)),
+              ...groupNodes,
+            ]}
             edges={edges}
             nodeTypes={nodeTypes}
             onNodesChange={onNodesChange}
@@ -1332,7 +1503,8 @@ function Inner({
               if (event.key !== 'Backspace' && event.key !== 'Delete') return
               const target = event.target as HTMLElement
               if (target.closest('input, textarea, [contenteditable="true"]')) return
-              const selected = nodes.filter((node) => node.selected)
+              // 组节点也带 selected，但它不是可删除的 Node —— 过滤掉，否则会去删一个不存在的 id
+              const selected = nodes.filter((node) => node.selected && !isGroupNodeId(node.id))
               if (selected.length === 0) return
               event.preventDefault()
               void (async () => {
@@ -1347,10 +1519,28 @@ function Inner({
               })()
             }}
             onNodeDragStop={async (_event, node) => {
+              const position = { x: Math.round(node.position.x), y: Math.round(node.position.y) }
+              /**
+               * 组节点：位置存进 NodeGroup，不能发去 /v1/nodes（那里没有这个 id）。
+               * 这条也是"收起后拖不动"的修法 —— 组现在是真节点，拖动由画布完成，
+               * 松手时把新坐标写回分组记录即可。
+               */
+              if (isGroupNodeId(node.id)) {
+                const groupId = node.id.slice(GROUP_ID_PREFIX.length)
+                await fetch(`${apiBaseUrl}/v1/groups/${groupId}`, {
+                  method: 'PATCH',
+                  headers,
+                  body: JSON.stringify({ posX: position.x, posY: position.y }),
+                })
+                setGroups((current) =>
+                  current.map((item) => (item.id === groupId ? { ...item, posX: position.x, posY: position.y } : item)),
+                )
+                return
+              }
               await fetch(`${apiBaseUrl}/v1/nodes/${node.id}`, {
                 method: 'PATCH',
                 headers,
-                body: JSON.stringify({ posX: Math.round(node.position.x), posY: Math.round(node.position.y) }),
+                body: JSON.stringify({ posX: position.x, posY: position.y }),
               })
             }}
             onPaneContextMenu={(event) => {
@@ -1377,6 +1567,14 @@ function Inner({
               const start = rightDown.current
               rightDown.current = null
               if (start && Math.hypot(native.clientX - start.x, native.clientY - start.y) > RIGHT_DRAG_THRESHOLD) return
+              /**
+               * 右键点在**组节点**上：走分组菜单。
+               * 组没有普通节点的运行/重命名语义 —— 混用会让菜单里的操作对着一个不存在的节点执行。
+               */
+              if (isGroupNodeId(node.id)) {
+                setGroupMenu({ groupId: node.id.slice(GROUP_ID_PREFIX.length), x: native.clientX, y: native.clientY })
+                return
+              }
               /**
                * 节点上右键：如果这个节点本来就在多选里，保留整组选中；
                * 否则只当它是单节点操作（库已经把选中态改成只选它了）。
@@ -1415,187 +1613,42 @@ function Inner({
             />
           </ReactFlow>
 
-          {/* 分组卡片：浮在画布上，可折叠 */}
+          {/*
+            分组：**外观**。组本身已经是画布上的真实节点（见 groupNodes / SgGroupNode），
+            缩放、拖动、输出端口都由画布统一处理；这里只画展开状态下那圈虚线，
+            并且完全不接收鼠标事件 —— 否则又会像以前那样把框里节点的点击吃掉。
+          */}
           <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
             {groups.map((group) => {
-              const isCollapsed = collapsed.has(group.id)
+              // 收起时什么都不画：组节点自己就是那叠卡片
+              if (collapsed.has(group.id)) return null
               const members = nodes.filter((node) => group.memberIds.includes(node.id))
+              if (members.length === 0) return null
 
-              /**
-               * 展开时：框 = 所有成员的包围盒（不是按节点数猜宽度）。
-               * 用户要求"展开后整个打包的所有节点被一个虚线框框住" ——
-               * 框必须真的包住内容，否则它只是个装饰。
-               */
-              const bounds = (() => {
-                if (isCollapsed) {
-                  const topLeft = toScreen(group.posX, group.posY)
-                  return { left: topLeft.x, top: topLeft.y, width: 208, height: 58 }
-                }
-                if (members.length === 0) {
-                  const topLeft = toScreen(group.posX, group.posY)
-                  return { left: topLeft.x, top: topLeft.y, width: 240, height: 58 }
-                }
-                const pad = 34
-                const xs = members.map((node) => node.position.x)
-                const ys = members.map((node) => node.position.y)
-                const left = Math.min(...xs) - pad
-                const top = Math.min(...ys) - pad - 16
-                // 节点宽度由内容自适应（232–320），高度未知：按 220 估，多留一点
-                const right = Math.max(...xs) + 320 + pad
-                const bottom = Math.max(...ys) + 220 + pad
-                const topLeft = toScreen(left, top)
-                return {
-                  left: topLeft.x,
-                  top: topLeft.y,
-                  width: Math.max((right - left) * viewport.zoom, 240),
-                  height: Math.max((bottom - top) * viewport.zoom, 58),
-                }
-              })()
-
-              const isAnimating = animating?.groupId === group.id
-              /** 收起的动画帧里先缩成小卡片，动画结束才隐藏成员 */
-              const showAsCard = isCollapsed || (isAnimating && animating.to === 'collapsed')
-
+              const pad = 34
+              const xs = members.map((node) => node.position.x)
+              const ys = members.map((node) => node.position.y)
+              const left = Math.min(...xs) - pad
+              // 顶部留出 46px：组节点的标题条就摆在成员上方
+              const top = Math.min(...ys) - pad - 46
+              const right = Math.max(...xs) + 320 + pad
+              const bottom = Math.max(...ys) + 220 + pad
+              const topLeft = toScreen(left, top)
               return (
                 <div
                   key={group.id}
-                  data-testid={`group-card-${group.id}`}
-                  data-collapsed={showAsCard ? 'true' : 'false'}
-                  onContextMenu={(event) => {
-                    event.preventDefault()
-                    event.stopPropagation()
-                    setGroupMenu({ groupId: group.id, x: event.clientX, y: event.clientY })
-                  }}
+                  data-testid={'group-frame-' + group.id}
                   style={{
                     position: 'absolute',
-                    left: bounds.left,
-                    top: bounds.top,
-                    width: bounds.width,
-                    minWidth: showAsCard ? 208 : undefined,
-                    height: showAsCard ? 58 : bounds.height,
-                    /**
-                     * 只有标题条能点：整块 `pointerEvents:auto` 会把框内节点的点击全吃掉，
-                     * 表现是"框里的节点选不中、拖不动"。框本身只负责画线。
-                     */
-                    pointerEvents: 'none',
-                    background: showAsCard ? `${group.color}14` : 'transparent',
-                    border: `1.5px dashed ${group.color}`,
+                    left: topLeft.x,
+                    top: topLeft.y,
+                    width: Math.max((right - left) * viewport.zoom, 240),
+                    height: Math.max((bottom - top) * viewport.zoom, 90),
+                    border: '1.5px dashed ' + group.color,
                     borderRadius: 10,
-                    padding: showAsCard ? 8 : 6,
-                    fontFamily: 'inherit',
-                    /**
-                     * 展开/收起动画：尺寸、圆角、背景一起过渡。
-                     * 时间与 toggleGroup 里的 140ms 一致 —— 不一致会看到"先缩完再跳一下"。
-                     */
-                    transition: 'width 140ms ease, height 140ms ease, background-color 140ms ease, opacity 140ms ease',
-                    opacity: isAnimating && animating.to === 'collapsed' ? 0.55 : 1,
-                    overflow: 'hidden',
+                    opacity: 0.55,
                   }}
-                >
-                  {/* 标题条 */}
-                  <div
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 6,
-                      fontSize: 11,
-                      color: group.color,
-                      fontWeight: 600,
-                      pointerEvents: 'auto',
-                      cursor: 'default',
-                      userSelect: 'none',
-                    }}
-                  >
-                    {/*
-                      左上角的快捷开合按钮（用户 2026-11-24 要求）。
-                      做成实心圆角块而不是小三角：它是最常点的东西，
-                      悬停区太小在缩小后的画布上根本点不中。
-                    */}
-                    <button
-                      type="button"
-                      data-testid={`toggle-group-${group.id}`}
-                      title={showAsCard ? '展开这一组' : '收起这一组'}
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        toggleGroup(group)
-                      }}
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        width: 20,
-                        height: 20,
-                        borderRadius: 6,
-                        border: `1px solid ${group.color}`,
-                        background: '#fff',
-                        color: group.color,
-                        cursor: 'pointer',
-                        fontSize: 11,
-                        lineHeight: 1,
-                        padding: 0,
-                        transition: 'background .12s',
-                      }}
-                      onMouseEnter={(event) => { event.currentTarget.style.background = `${group.color}22` }}
-                      onMouseLeave={(event) => { event.currentTarget.style.background = '#fff' }}
-                    >
-                      {showAsCard ? '▸' : '▾'}
-                    </button>
-                    <span style={{ cursor: 'pointer' }} onClick={() => toggleGroup(group)}>
-                      {group.title}
-                    </span>
-                    <span style={{ color: '#94a3b8', fontWeight: 400 }}>{group.memberIds.length} 个节点</span>
-                    <button
-                      type="button"
-                      data-testid={`group-menu-${group.id}`}
-                      title="更多（重命名 / 解组 / 删除）"
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
-                        setGroupMenu({ groupId: group.id, x: rect.right, y: rect.bottom + 2 })
-                      }}
-                      style={{ marginLeft: 'auto', border: 'none', background: 'transparent', cursor: 'pointer', color: '#94a3b8', fontSize: 13, padding: '0 2px', lineHeight: 1 }}
-                    >
-                      ⋯
-                    </button>
-                  </div>
-                  {showAsCard && (
-                    <div style={{ fontSize: 10, color: '#64748b', marginTop: 4, pointerEvents: 'none' }}>
-                      作为上下文：{members.length} 个节点的产物
-                      {group.usedBy.length > 0 && ` · 已被 ${group.usedBy.length} 个节点引用`}
-                    </div>
-                  )}
-
-                  {/*
-                    右侧输出点：拖到某个节点上 = 把这一整组当它的上游上下文。
-                    组不是节点，所以这条线不进 edges，而是走 NodeGroupLink；
-                    用户看不到连线是正常的，执行时由 collectInputs 注入 groupContext。
-                  */}
-                  {!showAsCard && (
-                    <div
-                      data-testid={`group-output-${group.id}`}
-                      title="拖到下游节点上：把这一组当作上下文"
-                      onPointerDown={(event) => {
-                        event.stopPropagation()
-                        event.preventDefault()
-                        setGroupDrag({ groupId: group.id, x: event.clientX, y: event.clientY, overNodeId: null })
-                      }}
-                      style={{
-                        position: 'absolute',
-                        right: -8,
-                        top: 26,
-                        width: 15,
-                        height: 15,
-                        borderRadius: '50%',
-                        background: '#fff',
-                        border: `2px solid ${group.color}`,
-                        boxShadow: '0 1px 4px rgba(15,23,42,0.2)',
-                        cursor: 'crosshair',
-                        pointerEvents: 'auto',
-                        zIndex: 3,
-                      }}
-                    />
-                  )}
-                </div>
+                />
               )
             })}
           </div>
