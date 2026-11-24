@@ -24,6 +24,7 @@ import { decideGate } from '../../lib/api'
 import { AssistantBar } from './AssistantBar'
 import { ContextMenu } from './ContextMenu'
 import type { MenuContext } from './ContextMenu'
+import { GroupCreateDialog } from './GroupCreateDialog'
 import { SgGroupNode } from './SgGroupNode'
 import type { SgGroupData } from './SgGroupNode'
 import { SgNode } from './SgNode'
@@ -268,6 +269,17 @@ function Inner({
    * duration 必须和 style 里的 transition 一致，否则会出现"卡一下再跳"。
    */
   const [animating, setAnimating] = useState<{ groupId: string; to: 'collapsed' | 'expanded' } | null>(null)
+  /**
+   * 建组对话框的草稿。
+   *
+   * 存"选中的 id"和"组外相连的 id"：用户在对话框里勾选是否纳入时，
+   * 不需要重新算一遍连线（画布在弹窗期间还可能变化）。
+   */
+  const [packDraft, setPackDraft] = useState<{
+    ids: string[]
+    outside: string[]
+    outsideNames: string[]
+  } | null>(null)
   /**
    * 组的真实画布节点。
    *
@@ -1017,109 +1029,98 @@ function Inner({
    * 右键按下时库会改写选中态，等菜单点击时再读就只剩被点中的那一个，
    * 于是"框选 4 个 → 右键 → 打包"永远只有 1 个成员、或者直接不出现打包项。
    */
-  const packGroup = useCallback(async (ids: string[]) => {
-    let idSet = new Set(ids)
-    let selected = nodes.filter((node) => idSet.has(node.id))
-    if (selected.length < 2) {
-      notify('至少要选中两个节点才能打包')
-      return
-    }
-
-    /**
-     * 建组前检查"跨组边"（用户 2026-11-24 要求）。
-     *
-     * 组里有节点连到组外时，收起后那条线就看不见了 ——
-     * 上下游关系变成隐形的，跑出来的结果没人看得懂。
-     * 做法：算出所有一端在组内、一端在组外的边，问用户要不要把相连节点一并纳入；
-     * 纳入后再算一次（一跳之外还有一跳），直到没有跨组边为止。
-     */
-    const outsideOf = (set: Set<string>): string[] => {
-      const outside = new Set<string>()
-      for (const edge of edges) {
-        const fromIn = set.has(edge.source)
-        const toIn = set.has(edge.target)
-        if (fromIn === toIn) continue
-        outside.add(fromIn ? edge.target : edge.source)
-      }
-      outside.delete('')
-      return [...outside].filter((id) => !set.has(id) && !isGroupNodeId(id))
-    }
-
-    const outside = outsideOf(idSet)
-    if (outside.length > 0) {
-      const names = outside
-        .slice(0, 5)
-        .map((id) => String(nodes.find((node) => node.id === id)?.data?.title ?? id))
-        .join('、')
-      const include = await confirm({
-        title: '这些节点和组外有连线',
-        message:
-          `组里有节点连着组外的 ${outside.length} 个节点：${names}${outside.length > 5 ? ' 等' : ''}。\n\n` +
-          '如果只把现在选中的节点打包，这些连线在收起后会"看不见但还在"，上下游关系会变得难以理解。\n\n' +
-          '「一并纳入」= 把相连的节点一起放进组（会扩展到整条相连的链）。\n' +
-          '「取消」= 不建组。',
-        okText: '一并纳入',
-      })
-      if (!include) {
-        notify('已取消建组：组外还有连线')
+  /**
+   * 打包成组：**只弹一个对话框**，把组名和"是否纳入相连节点"一次问完。
+   *
+   * 之前是「先 confirm 再 prompt」的两段式：第二次弹窗会覆盖第一次的 Promise，
+   * 表现就是点完没反应、建不出组（用户报的「现在无法建组了」）。
+   * 现在只要一次确认，没有这段时序问题。
+   *
+   * ids 由调用方传入（右键菜单里的快照），不现场读 node.selected ——
+   * 右键按下时库已经改写过选中态。
+   */
+  const packGroup = useCallback(
+    (ids: string[]) => {
+      const idSet = new Set(ids)
+      const selected = nodes.filter((node) => idSet.has(node.id))
+      if (selected.length < 2) {
+        notify('至少要选中两个节点才能打包')
         return
       }
-      // 扩散到不再有跨组边为止（有环也不会死循环：每次至少新纳入一个节点）
-      let grew = true
-      while (grew) {
-        grew = false
-        for (const id of outsideOf(idSet)) {
-          idSet.add(id)
-          grew = true
+
+      /**
+       * 跨组边检测（用户 2026-11-24 要求）：
+       * 组里有节点连到组外时，收起后那条线"看不见但还在"，上下游关系就断了。
+       * 这里算出**一整片**相连的外围节点（含传递闭包），在对话框里让用户勾选是否纳入。
+       */
+      const outside: string[] = []
+      {
+        const set = new Set(idSet)
+        let grew = true
+        while (grew) {
+          grew = false
+          for (const edge of edges) {
+            const fromIn = set.has(edge.source)
+            const toIn = set.has(edge.target)
+            if (fromIn === toIn) continue
+            const outsider = fromIn ? edge.target : edge.source
+            if (!outsider || set.has(outsider) || isGroupNodeId(outsider)) continue
+            set.add(outsider)
+            outside.push(outsider)
+            grew = true
+          }
         }
       }
-      selected = nodes.filter((node) => idSet.has(node.id))
-    }
-    const title = await prompt({
-      title: `打包 ${selected.length} 个节点`,
-      description: '先起个名字，随后 AI 会按内容自动改名。',
-      defaultValue: '上下文组',
-      okText: '打包',
-    })
-    if (title === null) return
-    const response = await fetch(`${apiBaseUrl}/v1/canvases/${canvasId}/groups`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        title,
-        nodeIds: selected.map((node) => node.id),
-        /**
-         * 锚点 = 展开虚线框的左上角 = 折叠卡片的位置（用户 2026-11-24）。
-         *
-         * 取成员的**最左、最上**再往上左让出一点：框要包住节点，
-         * 左上角还得留出标题条的高度。之前取的是 Math.max(x)（最右），
-         * 结果锚点落在成员右边界，框把节点全甩在外面。
-         */
-        posX: Math.round(Math.min(...selected.map((node) => node.position.x)) - 20),
-        posY: Math.round(Math.min(...selected.map((node) => node.position.y)) - 52),
-      }),
-    })
-    if (!response.ok) {
-      notify('打包失败')
-      return
-    }
-    const group = (await response.json()) as { id: string; title: string; posX: number; posY: number; color: string }
-    setGroups((current) => [...current, { ...group, memberIds: selected.map((node) => node.id), usedBy: [] }])
-    notify(`已打包 ${selected.length} 个节点：${group.title}`)
 
-    /**
-     * 让 AI 补一个名字（用户要求：也可以默认由 AI 总结命名）。
-     * 失败不打扰用户：名字还是刚才填的那个，人随时能改。
-     */
-    fetch(`${apiBaseUrl}/v1/groups/${group.id}/auto-name`, { method: 'POST', headers })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: { ok?: boolean; title?: string } | null) => {
-        if (!data?.ok || !data.title) return
-        setGroups((current) => current.map((item) => (item.id === group.id ? { ...item, title: data.title! } : item)))
-        notify(`AI 起名：${data.title}`)
+      const outsideNames = outside.map((id) => String(nodes.find((node) => node.id === id)?.data?.title ?? id))
+      setPackDraft({ ids: [...idSet], outside, outsideNames })
+    },
+    [edges, nodes, notify],
+  )
+
+  /** 对话框确认后真正建组（唯一入口，避免两套逻辑分叉） */
+  const createGroup = useCallback(
+    async (draft: { ids: string[]; outside: string[] }, input: { title: string; includeOutside: boolean }) => {
+      const ids = input.includeOutside ? [...new Set([...draft.ids, ...draft.outside])] : draft.ids
+      const members = nodes.filter((node) => ids.includes(node.id))
+      if (members.length < 2) {
+        notify('至少要两个节点才能成组')
+        return
+      }
+      setPackDraft(null)
+
+      const response = await fetch(`${apiBaseUrl}/v1/canvases/${canvasId}/groups`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          title: input.title,
+          nodeIds: members.map((node) => node.id),
+          // 锚点 = 展开框的左上角 = 折叠卡片的位置：取成员的最左/最上，再让出标题条
+          posX: Math.round(Math.min(...members.map((node) => node.position.x)) - 20),
+          posY: Math.round(Math.min(...members.map((node) => node.position.y)) - 52),
+        }),
       })
-      .catch(() => undefined)
-  }, [apiBaseUrl, canvasId, nodes, notify, prompt, token])
+      if (!response.ok) {
+        const failure = (await response.json().catch(() => null)) as { error?: { message?: string } } | null
+        notify(failure?.error?.message ?? `打包失败：HTTP ${response.status}`)
+        return
+      }
+      const group = (await response.json()) as { id: string; title: string; posX: number; posY: number; color: string }
+      setGroups((current) => [...current, { ...group, memberIds: members.map((node) => node.id), usedBy: [] }])
+      notify(`已打包 ${members.length} 个节点：${group.title}`)
+
+      // AI 补名字：失败不打扰用户，名字还是刚才填的那个
+      fetch(`${apiBaseUrl}/v1/groups/${group.id}/auto-name`, { method: 'POST', headers })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data: { ok?: boolean; title?: string } | null) => {
+          if (!data?.ok || !data.title) return
+          setGroups((current) => current.map((item) => (item.id === group.id ? { ...item, title: data.title! } : item)))
+          notify(`AI 起名：${data.title}`)
+        })
+        .catch(() => undefined)
+    },
+    [apiBaseUrl, canvasId, headers, nodes, notify],
+  )
 
   const moveGroup = useCallback(
     async (group: WorkbenchGroup, x: number, y: number) => {
@@ -1817,6 +1818,11 @@ function Inner({
               }}
             >
               {item(isCollapsed ? '展开这一组' : '收起这一组', () => toggleGroup(group), { testId: 'group-menu-toggle' })}
+              {/*
+                按依赖顺序运行整组：组最常见的用法就是"一条链跑一遍"，
+                逐个点 ▶ 既慢又容易漏序（下游先跑拿到空上游）。
+              */}
+              {item(`按依赖顺序运行这 ${group.memberIds.length} 个节点`, () => void runSelectedInOrder(group.memberIds), { testId: 'group-menu-run' })}
               {item('重命名', () => void renameGroup(group), { testId: 'group-menu-rename' })}
               <div style={{ height: 1, background: '#e2e8f0', margin: '4px 2px' }} />
               {/* 解组只散开分组；删除组会连成员一起删 —— 措辞必须让人一眼分清 */}
@@ -1826,6 +1832,15 @@ function Inner({
           </>
         )
       })()}
+
+      {packDraft && (
+        <GroupCreateDialog
+          memberCount={packDraft.ids.length}
+          outside={packDraft.outsideNames}
+          onCancel={() => setPackDraft(null)}
+          onConfirm={(input) => void createGroup(packDraft, input)}
+        />
+      )}
 
       {dialog}
 

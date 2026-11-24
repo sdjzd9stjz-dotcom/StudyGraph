@@ -31,7 +31,24 @@ interface FakeNode {
   createdAt: number
 }
 
-function makePrisma(seed?: { nodes?: Partial<FakeNode>[]; artifacts?: Array<{ nodeId: string; kind: string; structured: unknown }> }) {
+interface FakeGroup {
+  id: string
+  canvasId: string
+  title: string
+  posX: number
+  posY: number
+  color: string
+  summary: unknown
+  ownerId: string
+  members: Array<{ nodeId: string }>
+  links: Array<{ nodeId: string }>
+}
+
+function makePrisma(seed?: {
+  nodes?: Partial<FakeNode>[]
+  artifacts?: Array<{ nodeId: string; kind: string; structured: unknown }>
+  groups?: Array<Partial<FakeGroup> & { memberIds?: string[]; usedBy?: string[] }>
+}) {
   const nodes: FakeNode[] = (seed?.nodes ?? []).map((node, index) => ({
     id: node.id ?? `n${index + 1}`,
     canvasId: node.canvasId ?? CANVAS,
@@ -44,6 +61,18 @@ function makePrisma(seed?: { nodes?: Partial<FakeNode>[]; artifacts?: Array<{ no
     createdAt: node.createdAt ?? index,
   }))
   const edges: Array<{ id: string; canvasId: string; fromNodeId: string; toNodeId: string; kind: string }> = []
+  const groups: FakeGroup[] = (seed?.groups ?? []).map((group, index) => ({
+    id: group.id ?? `g${index + 1}`,
+    canvasId: group.canvasId ?? CANVAS,
+    title: group.title ?? `组${index + 1}`,
+    posX: group.posX ?? 0,
+    posY: group.posY ?? 0,
+    color: group.color ?? '#6366f1',
+    summary: group.summary ?? null,
+    ownerId: group.ownerId ?? 'user-1',
+    members: (group.memberIds ?? group.members?.map((member) => member.nodeId) ?? []).map((nodeId) => ({ nodeId })),
+    links: (group.usedBy ?? group.links?.map((link) => link.nodeId) ?? []).map((nodeId) => ({ nodeId })),
+  }))
   const artifacts = (seed?.artifacts ?? []).map((artifact) => ({ ...artifact }))
   const usage: unknown[] = []
   let counter = 0
@@ -143,6 +172,52 @@ function makePrisma(seed?: { nodes?: Partial<FakeNode>[]; artifacts?: Array<{ no
     nodeMessage: {
       findMany: async () => [],
     },
+    /**
+     * 分组的最小内存实现。
+     *
+     * 只实现 agent 用到的四个方法（findMany / findFirst / create / update / delete），
+     * 成员与引用直接内联成 id 数组 —— agent 只读它们，不需要关系表的完整语义。
+     */
+    nodeGroup: {
+      findMany: async ({ where, orderBy, select }: any) => {
+        void orderBy
+        const rows = groups.filter((group) => !where?.canvasId || group.canvasId === where.canvasId)
+        return rows.map((row) => pick(row, select))
+      },
+      findFirst: async ({ where, select }: any) => {
+        const row = groups.find(
+          (group) => group.id === where.id && (!where.canvasId || group.canvasId === where.canvasId),
+        )
+        return row ? pick(row, select) : null
+      },
+      create: async ({ data, select }: any) => {
+        counter += 1
+        const memberIds: string[] = (data.members?.create ?? []).map((entry: { nodeId: string }) => entry.nodeId)
+        const row = {
+          id: `g-${counter}`,
+          canvasId: data.canvasId,
+          title: data.title,
+          posX: data.posX ?? 0,
+          posY: data.posY ?? 0,
+          color: '#6366f1',
+          summary: data.summary ?? null,
+          ownerId: data.ownerId,
+          members: memberIds.map((nodeId) => ({ nodeId })),
+          links: [] as Array<{ nodeId: string }>,
+        }
+        groups.push(row)
+        return pick(row, select)
+      },
+      update: async ({ where, data, select }: any) => {
+        const row = groups.find((group) => group.id === where.id)!
+        Object.assign(row, data)
+        return pick(row, select)
+      },
+      delete: async ({ where }: any) => {
+        const index = groups.findIndex((group) => group.id === where.id)
+        return groups.splice(index, 1)[0]
+      },
+    },
     usageRecord: {
       create: async ({ data }: any) => {
         usage.push(data)
@@ -151,7 +226,13 @@ function makePrisma(seed?: { nodes?: Partial<FakeNode>[]; artifacts?: Array<{ no
     },
   }
 
-  return { prisma: prisma as never, state: { nodes, edges, usage } }
+  /** 建一条边：测试里要摆出组内/跨组的连线，直接操作内存数组比走 prisma 更直白 */
+  const prismaEdge = async (fromNodeId: string, toNodeId: string) => {
+    counter += 1
+    edges.push({ id: 'e-' + counter, canvasId: CANVAS, fromNodeId, toNodeId, kind: 'DERIVED_FROM' })
+  }
+
+  return { prisma: prisma as never, prismaEdge, state: { nodes, edges, usage, groups } }
 }
 
 const depsOf = (prisma: unknown, canvasId = CANVAS): AgentDeps => ({ prisma: prisma as never, canvasId, userId: USER })
@@ -168,6 +249,10 @@ test('工具清单只包含画布操作，没有执行节点 / 文件 / 网络',
     'delete_node',
     'create_edge',
     'delete_edge',
+    'list_groups',
+    'create_group',
+    'rename_group',
+    'unpack_group',
   ])
   assert.equal(names.some((name) => /run|exec|shell|file|http|fetch|upload/i.test(name)), false)
 })
@@ -376,4 +461,111 @@ test('工具一直报错时，模型看得到错误、不会无限重试（轮�
   assert.equal(calls, 6, '最多 6 轮，不能无限烧钱')
   assert.equal(result.changes.length, 0)
   assert.match(result.reply, /上限|没有改动/)
+})
+
+/* ── 分组工具（用户 2026-11-24：「给底部 AI 加上组的操作」）───────────────
+ *
+ * 这几条测的不是"能不能建组"，而是**两条拒绝**是否可靠：
+ *   1. 有跨组连线时不许悄悄建组 —— 必须把问题交回给用户
+ *   2. 被下游引用的组不许直接拆 —— 拆掉等于静默丢上下文
+ * 这两处是 AI 最容易"自作主张"的地方，必须由服务端硬拦。
+ */
+
+test('create_group：少于两个节点直接拒绝', async () => {
+  const { prisma, state } = makePrisma({ nodes: [{ id: 'a' }, { id: 'b' }] })
+  const outcome = await executeCanvasTool(
+    depsOf(prisma),
+    'create_group',
+    JSON.stringify({ title: '上下文组', nodeIds: ['a'] }),
+  )
+  assert.equal(outcome.result.ok, false)
+  assert.match(String(outcome.result.error), /至少/)
+  assert.equal(state.groups.length, 0)
+})
+
+test('create_group：有跨组连线时拒绝，并把相连节点交回给模型去问用户', async () => {
+  const { prisma, prismaEdge, state } = makePrisma({ nodes: [{ id: 'a', title: '切片' }, { id: 'b', title: '概念' }, { id: 'c', title: '出题' }] })
+  // a↔b 在组内，b→c 跨到组外
+  await prismaEdge('a', 'b')
+  await prismaEdge('b', 'c')
+
+  const outcome = await executeCanvasTool(
+    depsOf(prisma),
+    'create_group',
+    JSON.stringify({ title: '上下文组', nodeIds: ['a', 'b'] }),
+  )
+  assert.equal(outcome.result.ok, false, '必须拒绝，不能擅自建一个带隐形出口的组')
+  assert.match(String(outcome.result.error), /连线/)
+  assert.match(String(outcome.result.error), /问用户/)
+  assert.equal(state.groups.length, 0, '被拒时不能留下半成品组')
+})
+
+test('create_group：封闭的一组正常建组，锚点在左上角', async () => {
+  const { prisma, prismaEdge, state } = makePrisma({
+    nodes: [
+      { id: 'a', title: '切片', posX: 300, posY: 200 },
+      { id: 'b', title: '概念', posX: 800, posY: 500 },
+    ],
+  })
+  await prismaEdge('a', 'b')
+
+  const outcome = await executeCanvasTool(
+    depsOf(prisma),
+    'create_group',
+    JSON.stringify({ title: '切片链路', nodeIds: ['a', 'b'] }),
+  )
+  assert.equal(outcome.result.ok, true)
+  assert.equal(state.groups.length, 1)
+  const group = state.groups[0]!
+  assert.deepEqual(group.members.map((member) => member.nodeId).sort(), ['a', 'b'])
+  // 锚点取最左/最上再让出标题条 —— 和界面建组一致，否则框包不住节点
+  assert.ok(group.posX < 300, '左上角必须在最左成员之外')
+  assert.ok(group.posY < 200, '左上角必须在最上成员之外')
+})
+
+test('list_groups：返回组名、成员与被引用情况', async () => {
+  const { prisma } = makePrisma({
+    nodes: [{ id: 'a' }, { id: 'b' }, { id: 'z' }],
+    groups: [{ id: 'g1', title: '复习链', memberIds: ['a', 'b'], usedBy: ['z'] }],
+  })
+  const outcome = await executeCanvasTool(depsOf(prisma), 'list_groups', '{}')
+  const groups = (outcome.result as { groups: Array<{ groupId: string; memberIds: string[]; usedByNodeIds: string[] }> }).groups
+  assert.equal(groups.length, 1)
+  assert.equal(groups[0]!.groupId, 'g1')
+  assert.deepEqual(groups[0]!.memberIds.sort(), ['a', 'b'])
+  assert.deepEqual(groups[0]!.usedByNodeIds, ['z'])
+})
+
+test('rename_group：改名成功，未知 groupId 明确拒绝', async () => {
+  const { prisma, state } = makePrisma({ nodes: [{ id: 'a' }, { id: 'b' }], groups: [{ id: 'g1', title: '旧名', memberIds: ['a', 'b'] }] })
+
+  const ok = await executeCanvasTool(depsOf(prisma), 'rename_group', JSON.stringify({ groupId: 'g1', title: '新名' }))
+  assert.equal(ok.result.ok, true)
+  assert.equal(state.groups[0]!.title, '新名')
+
+  const missing = await executeCanvasTool(depsOf(prisma), 'rename_group', JSON.stringify({ groupId: 'nope', title: 'x' }))
+  assert.equal(missing.result.ok, false)
+  assert.match(String(missing.result.error), /没有/)
+})
+
+test('unpack_group：被下游引用时拒绝，并说明"拆了会丢上下文"', async () => {
+  const { prisma, state } = makePrisma({
+    nodes: [{ id: 'a' }, { id: 'b' }, { id: 'z' }],
+    groups: [{ id: 'g1', title: '复习链', memberIds: ['a', 'b'], usedBy: ['z'] }],
+  })
+  const outcome = await executeCanvasTool(depsOf(prisma), 'unpack_group', JSON.stringify({ groupId: 'g1' }))
+  assert.equal(outcome.result.ok, false, '有引用时必须先问用户')
+  assert.match(String(outcome.result.error), /引用/)
+  assert.equal(state.groups.length, 1, '被拒时组必须还在')
+})
+
+test('unpack_group：没人引用时直接解组，成员节点保留', async () => {
+  const { prisma, state } = makePrisma({
+    nodes: [{ id: 'a' }, { id: 'b' }],
+    groups: [{ id: 'g1', title: '复习链', memberIds: ['a', 'b'] }],
+  })
+  const outcome = await executeCanvasTool(depsOf(prisma), 'unpack_group', JSON.stringify({ groupId: 'g1' }))
+  assert.equal(outcome.result.ok, true)
+  assert.equal(state.groups.length, 0)
+  assert.equal(state.nodes.length, 2, '解组绝不能删节点')
 })

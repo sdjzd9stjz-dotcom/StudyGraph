@@ -135,6 +135,52 @@ export const CANVAS_TOOLS: readonly ToolSpec[] = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'list_groups',
+    description: '列出画布上已有的分组（组名、成员 id、被哪些节点当作上下文引用）。建组/改名前先看这个，不要凭记忆编造 groupId。',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'create_group',
+    description:
+      '把一组节点打包成一个组。组可以收起成一张卡片，也可以被下游节点当作上下文。' +
+      '至少 2 个节点。**有跨组连线时必须先问用户**：把相连的节点一并纳入，还是放弃建组 —— ' +
+      '不要擅自替用户扩大范围。',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: '组名（2–20 字，概括这组节点在做什么）' },
+        nodeIds: { type: 'array', items: { type: 'string' }, description: '要打包的节点 id（至少 2 个）' },
+      },
+      required: ['title', 'nodeIds'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'rename_group',
+    description: '给分组改名。',
+    parameters: {
+      type: 'object',
+      properties: {
+        groupId: { type: 'string' },
+        title: { type: 'string', description: '新组名' },
+      },
+      required: ['groupId', 'title'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'unpack_group',
+    description:
+      '解组：取消分组，成员节点全部保留在画布上。' +
+      '**如果这个组正被下游节点当作上下文引用，必须先告知用户「拆组会解除这些引用」，得到同意后再调用。**',
+    parameters: {
+      type: 'object',
+      properties: { groupId: { type: 'string' } },
+      required: ['groupId'],
+      additionalProperties: false,
+    },
+  },
 ]
 
 export type CanvasChangeKind =
@@ -143,6 +189,10 @@ export type CanvasChangeKind =
   | 'delete-node'
   | 'create-edge'
   | 'delete-edge'
+  // 分组：界面靠这几条判断"要重新拉一次组列表"，否则对话里建了组画布看不见
+  | 'create-group'
+  | 'rename-group'
+  | 'unpack-group'
 
 export interface CanvasChange {
   readonly kind: CanvasChangeKind
@@ -477,6 +527,161 @@ export async function executeCanvasTool(
       )
     }
 
+    /* ── 分组 ──────────────────────────────────────────────────────── */
+
+    case 'list_groups': {
+      const groups = await deps.prisma.nodeGroup.findMany({
+        where: { canvasId: deps.canvasId },
+        orderBy: { createdAt: 'asc' },
+        select: {
+          id: true,
+          title: true,
+          members: { select: { nodeId: true } },
+          links: { select: { nodeId: true } },
+        },
+      })
+      return ok({
+        groups: groups.map((group) => ({
+          groupId: group.id,
+          title: group.title,
+          memberIds: group.members.map((member) => member.nodeId),
+          usedByNodeIds: group.links.map((link) => link.nodeId),
+        })),
+        count: groups.length,
+      })
+    }
+
+    case 'create_group': {
+      const title = typeof args.title === 'string' ? args.title.trim().slice(0, 80) : ''
+      if (title.length === 0) return fail('缺少 title')
+
+      const rawIds = Array.isArray(args.nodeIds) ? args.nodeIds : []
+      const nodeIds = [...new Set(rawIds.filter((id): id is string => typeof id === 'string'))]
+      if (nodeIds.length < 2) return fail('至少要两个节点才能成组')
+      if (nodeIds.length > 50) return fail('一次最多打包 50 个节点')
+
+      const nodes = await deps.prisma.node.findMany({
+        where: { id: { in: nodeIds }, canvasId: deps.canvasId },
+        select: { id: true, title: true, type: true, posX: true, posY: true, status: true, artifacts: { orderBy: { createdAt: 'desc' }, take: 1, select: { kind: true } } },
+      })
+      if (nodes.length !== nodeIds.length) return fail('有节点不存在，或不属于这张画布')
+
+      const inside = new Set(nodeIds)
+
+      /**
+       * 跨组连线：**拒绝并在错误里说明**，让模型去问用户。
+       *
+       * 不自动扩大范围，也不静默建一个"带隐形出口"的组 ——
+       * 这两种做法都会让用户事后发现组和自己想的不一样。
+       */
+      const edges = await deps.prisma.edge.findMany({
+        where: {
+          canvasId: deps.canvasId,
+          OR: [{ fromNodeId: { in: nodeIds } }, { toNodeId: { in: nodeIds } }],
+        },
+        select: { fromNodeId: true, toNodeId: true },
+      })
+      const outside = [
+        ...new Set(
+          edges
+            .filter((edge) => inside.has(edge.fromNodeId) !== inside.has(edge.toNodeId))
+            .flatMap((edge) => [edge.fromNodeId, edge.toNodeId])
+            .filter((id) => !inside.has(id)),
+        ),
+      ]
+      if (outside.length > 0) {
+        const titles = await deps.prisma.node.findMany({
+          where: { id: { in: outside }, canvasId: deps.canvasId },
+          select: { id: true, title: true },
+        })
+        return fail(
+          `这些节点和组外有连线：${outside.length} 个（${titles.map((node) => node.title ?? node.id).slice(0, 5).join('、')}）。` +
+            '请先问用户：要一并纳入这些相连节点再建组，还是放弃建组。不要自己决定。',
+        )
+      }
+
+      // 锚点 = 展开框左上角 = 折叠卡片位置（与界面一致：取最左/最上再让出标题条）
+      const posX = Math.round(Math.min(...nodes.map((node) => node.posX)) - 20)
+      const posY = Math.round(Math.min(...nodes.map((node) => node.posY)) - 52)
+
+      const group = await deps.prisma.nodeGroup.create({
+        data: {
+          canvasId: deps.canvasId,
+          title,
+          posX,
+          posY,
+          ownerId: deps.userId,
+          summary: {
+            nodeCount: nodes.length,
+            types: [...new Set(nodes.map((node) => node.type))],
+            ready: nodes.filter((node) => node.status === 'READY').length,
+            // artifacts 可能为空（节点还没跑过），不能直接 .map
+            artifactKinds: [...new Set(nodes.flatMap((node) => (node.artifacts ?? []).map((artifact) => artifact.kind)))],
+          } as unknown as object,
+          members: { create: nodeIds.map((nodeId) => ({ nodeId })) },
+        },
+        select: { id: true, title: true },
+      })
+
+      return ok(
+        { groupId: group.id, title: group.title, memberCount: nodeIds.length },
+        { kind: 'create-group', id: group.id, label: group.title },
+      )
+    }
+
+    case 'rename_group': {
+      const groupId = stringArg(args, 'groupId')
+      const title = typeof args.title === 'string' ? args.title.trim().slice(0, 80) : ''
+      if (!groupId) return fail('缺少 groupId')
+      if (title.length === 0) return fail('缺少 title')
+
+      const group = await deps.prisma.nodeGroup.findFirst({
+        where: { id: groupId, canvasId: deps.canvasId },
+        select: { id: true },
+      })
+      if (!group) return fail(`当前画布上没有 id 为 ${groupId} 的分组`)
+
+      const updated = await deps.prisma.nodeGroup.update({
+        where: { id: groupId },
+        data: { title },
+        select: { id: true, title: true },
+      })
+      return ok(
+        { groupId, title: updated.title },
+        { kind: 'rename-group', id: groupId, label: updated.title },
+      )
+    }
+
+    case 'unpack_group': {
+      const groupId = stringArg(args, 'groupId')
+      if (!groupId) return fail('缺少 groupId')
+
+      const group = await deps.prisma.nodeGroup.findFirst({
+        where: { id: groupId, canvasId: deps.canvasId },
+        select: { id: true, title: true, members: { select: { nodeId: true } }, links: { select: { nodeId: true } } },
+      })
+      if (!group) return fail(`当前画布上没有 id 为 ${groupId} 的分组`)
+
+      /**
+       * 被引用时**不直接删**：先把这个事实交回给模型，让它去征得用户同意。
+       * 拆掉之后下游拿不到这组的产物，是"静默少了一块上下文"，
+       * 用户很难联想到是拆组造成的。
+       */
+      if (group.links.length > 0) {
+        return fail(
+          `分组「${group.title}」正被 ${group.links.length} 个节点当作上下文引用。` +
+            '拆组会解除这些引用，下游下次运行就拿不到这一组的产物。' +
+            '请先告知用户并得到同意；用户同意后，改用画布上的「解组」按钮完成（或再次调用本工具并明确说明已获同意）。',
+        )
+      }
+
+      await deps.prisma.nodeGroup.delete({ where: { id: groupId } })
+      return ok(
+        { groupId, title: group.title, keptNodeCount: group.members.length },
+        { kind: 'unpack-group', id: groupId, label: group.title },
+      )
+    }
+
     default:
       // 模型编了不存在的工具名：明确拒绝，而不是悄悄忽略
       return fail(`没有名为 ${name} 的工具`)
@@ -626,6 +831,12 @@ const SYSTEM_RULES = [
   '4a-1. 只有在 split_cards 不可用（没有抽取节点）时才用 create_node 建 CARD，并且**每个节点都要填 conceptName**，一个节点只做一个概念。',
   '4a-2. 没填 conceptName 的 CARD 节点会把上游所有概念都做成卡，几张卡内容就一模一样 —— 这是真实报障，不要这样建。',
   '4b. DEEPEN（深入理解）只接受知识卡与题目的连线；LECTURE（导出讲义）接受任意节点产出，用来汇总成讲义。',
+  '4g. 分组：用 list_groups 看已有的组（不要编 groupId）。建组用 create_group，至少 2 个节点。',
+  '4g-1. **建组被拒绝且理由是"和组外有连线"时**：把相连节点的名字念给用户听，问「一并纳入这些节点再建组，还是算了」。',
+  '  用户说要纳入，就把那些 id 加进 nodeIds 再调一次；用户说算了就不建。不要自己替用户扩大范围。',
+  '4g-2. **解组被拒绝且理由是"被下游引用"时**：告诉用户"拆组会让 N 个下游节点拿不到这组的内容"，问是否继续。',
+  '  用户确认后，让他点画布上的「解组」按钮（那是唯一能强制执行解组的入口）。',
+  '4g-3. 组不能执行、不能连线；它只是"这几个节点的产物一起看"。别把组当成节点。',
   '5. **永远不要执行节点**（不要假装运行）——运行只能由用户点节点上的 ▶。',
   '6. 不许编造 id：只用 list_canvas / 上面状态里给出的 id。工具报错就照错误信息修正，不要重试同样的参数。',
   '7. 回复用中文，简短、具体。',
