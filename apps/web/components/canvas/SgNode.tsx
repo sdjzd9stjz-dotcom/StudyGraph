@@ -286,15 +286,44 @@ export function SgNode({ id, data, selected }: NodeProps) {
           </button>
           <button
             type="button"
-            title="运行这个节点"
+            title={d.running ? '正在运行…' : '运行这个节点'}
             data-testid={`run-node-${id}`}
+            data-running={d.running ? 'true' : 'false'}
+            disabled={d.running === true}
             onClick={(event) => {
               event.stopPropagation()
               d.onRun?.(id)
             }}
-            style={iconButton}
+            style={{
+              ...iconButton,
+              cursor: d.running ? 'default' : 'pointer',
+              // 运行中给一个明确的"正在转"，比按钮变灰更能说明"它在干活"
+              background: d.running ? 'rgba(255,255,255,0.22)' : iconButton.background,
+            }}
           >
-            ▶
+            {/*
+              运行中换成一个转圈的缺口环。
+              用 CSS 动画而不是文字"…"：节点跑 10 秒以上时，转圈是唯一能持续
+              传达"还在进行"的反馈，静态符号看起来像卡住了。
+            */}
+            {d.running ? (
+              <span
+                data-testid={`run-spinner-${id}`}
+                aria-label="运行中"
+                style={{
+                  display: 'inline-block',
+                  width: 9,
+                  height: 9,
+                  borderRadius: '50%',
+                  border: '1.6px solid rgba(255,255,255,0.35)',
+                  borderTopColor: '#fff',
+                  animation: 'sg-spin .7s linear infinite',
+                  verticalAlign: 'middle',
+                }}
+              />
+            ) : (
+              '▶'
+            )}
           </button>
           <button
             type="button"

@@ -32,7 +32,7 @@ import { NodeChat } from './NodeChat'
 import { NodeSearch } from './NodeSearch'
 import { Sidebar } from './Sidebar'
 import type { SkillView } from './Sidebar'
-import { buildFrames, restoreTargets, stackTargets } from '../../lib/group-motion'
+import { buildFrames, frameSize, restoreTargets, stackTargets } from '../../lib/group-motion'
 import { orderByDependency } from '../../lib/run-order'
 import { selectionForContextMenu, toggleSelection } from '../../lib/selection'
 import { usePrompt } from '../ui/PromptDialog'
@@ -278,31 +278,45 @@ function Inner({
    */
   const groupNodes = useMemo<FlowNode[]>(
     () =>
-      groups.map((group) => ({
-        id: groupNodeId(group.id),
-        type: 'sgGroup',
-        // 位置就是组卡片的位置：拖动时直接改它，和普通节点一样保存
-        position: { x: group.posX, y: group.posY },
-        // 收起时它就是画布上唯一代表这一组的东西；展开时它是标题条
-        draggable: true,
-        selectable: true,
-        data: {
-          groupId: group.id,
-          title: group.title,
-          color: group.color,
-          memberCount: group.memberIds.length,
-          collapsed: collapsed.has(group.id),
-          usedBy: group.usedBy.length,
-          onToggle: (groupId: string) => {
-            const target = groups.find((item) => item.id === groupId)
-            if (target) toggleGroupRef.current(target)
-          },
-          onOpenMenu: (groupId: string, clientX: number, clientY: number) => {
-            setGroupMenu({ groupId, x: clientX, y: clientY })
-          },
-        } satisfies SgGroupData,
-      })),
-    [groups, collapsed],
+      groups.map((group) => {
+        /**
+         * 锚点：`posX/posY` 是**折叠卡片所在的绝对位置**，也是展开后虚线框的左上角。
+         *
+         * 两种形态锚在同一点，开合时框不会跳到别处（用户 2026-11-24 明确要求）。
+         * 展开尺寸由成员相对这个锚点的偏移算出来 —— 所以成员挪动/增减，框会跟着变。
+         */
+        const anchor = { x: group.posX, y: group.posY }
+        const memberPoints = nodes
+          .filter((node) => group.memberIds.includes(node.id))
+          .map((node) => ({ x: node.position.x - anchor.x, y: node.position.y - anchor.y }))
+        const size = frameSize(memberPoints)
+
+        return {
+          id: groupNodeId(group.id),
+          type: 'sgGroup',
+          position: anchor,
+          draggable: true,
+          selectable: true,
+          data: {
+            groupId: group.id,
+            title: group.title,
+            color: group.color,
+            memberCount: group.memberIds.length,
+            collapsed: collapsed.has(group.id),
+            usedBy: group.usedBy.length,
+            frameWidth: size.width,
+            frameHeight: size.height,
+            onToggle: (groupId: string) => {
+              const target = groups.find((item) => item.id === groupId)
+              if (target) toggleGroupRef.current(target)
+            },
+            onOpenMenu: (groupId: string, clientX: number, clientY: number) => {
+              setGroupMenu({ groupId, x: clientX, y: clientY })
+            },
+          } satisfies SgGroupData,
+        }
+      }),
+    [groups, collapsed, nodes],
   )
   /**
    * 收起前每个成员的位置。
@@ -354,11 +368,6 @@ function Inner({
    * 用 useViewport 而不是监听 onMove：前者是订阅，拖动时自动重渲，不会漏帧。
    */
   const viewport = useViewport()
-  /** 把流程坐标换算成覆盖层用的像素坐标 */
-  const toScreen = useCallback(
-    (x: number, y: number) => ({ x: x * viewport.zoom + viewport.x, y: y * viewport.zoom + viewport.y }),
-    [viewport.x, viewport.y, viewport.zoom],
-  )
 
   const headers = { 'content-type': 'application/json', authorization: `Bearer ${token}` }
   const router = useRouter()
@@ -1076,7 +1085,19 @@ function Inner({
     const response = await fetch(`${apiBaseUrl}/v1/canvases/${canvasId}/groups`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ title, nodeIds: selected.map((node) => node.id), posX: Math.max(...selected.map((node) => node.position.x)), posY: Math.min(...selected.map((node) => node.position.y)) - 60 }),
+      body: JSON.stringify({
+        title,
+        nodeIds: selected.map((node) => node.id),
+        /**
+         * 锚点 = 展开虚线框的左上角 = 折叠卡片的位置（用户 2026-11-24）。
+         *
+         * 取成员的**最左、最上**再往上左让出一点：框要包住节点，
+         * 左上角还得留出标题条的高度。之前取的是 Math.max(x)（最右），
+         * 结果锚点落在成员右边界，框把节点全甩在外面。
+         */
+        posX: Math.round(Math.min(...selected.map((node) => node.position.x)) - 20),
+        posY: Math.round(Math.min(...selected.map((node) => node.position.y)) - 52),
+      }),
     })
     if (!response.ok) {
       notify('打包失败')
@@ -1174,6 +1195,7 @@ function Inner({
         })
         memberOrigins.current.set(group.id, saved)
 
+        // 朝左上角收：目标点就是折叠卡片本身所在的绝对位置
         const targets = stackTargets({ x: group.posX, y: group.posY }, from.length)
         const frames = buildFrames(from, targets, FRAME_COUNT)
         setAnimating({ groupId: group.id, to: 'collapsed' })
@@ -1182,6 +1204,11 @@ function Inner({
         const step = () => {
           const positions = frames[frame]
           if (!positions) {
+            /**
+             * 全部成员已经叠到锚点上，这时才隐藏成员、露出折叠卡片
+             * （用户 2026-11-24：「按折叠后全部叠一起动画后才出现折叠组」）。
+             * 顺序反了会看到卡片早早出现、节点还在往它里面飞。
+             */
             setCollapsed((current) => new Set(current).add(group.id))
             setAnimating(null)
             return
@@ -1527,6 +1554,48 @@ function Inner({
                */
               if (isGroupNodeId(node.id)) {
                 const groupId = node.id.slice(GROUP_ID_PREFIX.length)
+                const group = groups.find((item) => item.id === groupId)
+                const deltaX = position.x - (group?.posX ?? position.x)
+                const deltaY = position.y - (group?.posY ?? position.y)
+
+                /**
+                 * 拖动组 = 整体平移（用户 2026-11-24）。
+                 *
+                 * 锚点变了就必须把成员一起挪同样的距离，否则展开时成员还停在原地，
+                 * 看起来像"框跑了、节点留在里面"。收起态时成员是隐藏的，一起挪也无害 ——
+                 * 展开后它们仍然落在框内原来的相对位置。
+                 */
+                if (group && (deltaX !== 0 || deltaY !== 0)) {
+                  memberOrigins.current.set(
+                    groupId,
+                    Object.fromEntries(
+                      Object.entries(memberOrigins.current.get(groupId) ?? {}).map(([id, point]) => [
+                        id,
+                        { x: point.x + deltaX, y: point.y + deltaY },
+                      ]),
+                    ),
+                  )
+                  const moved: Array<{ id: string; x: number; y: number }> = []
+                  setNodes((current) =>
+                    current.map((item) => {
+                      if (!group.memberIds.includes(item.id)) return item
+                      const next = { x: item.position.x + deltaX, y: item.position.y + deltaY }
+                      moved.push({ id: item.id, x: Math.round(next.x), y: Math.round(next.y) })
+                      return { ...item, position: next }
+                    }),
+                  )
+                  // 成员坐标要落库，否则刷新后组框与成员对不上
+                  await Promise.all(
+                    moved.map((item) =>
+                      fetch(`${apiBaseUrl}/v1/nodes/${item.id}`, {
+                        method: 'PATCH',
+                        headers,
+                        body: JSON.stringify({ posX: item.x, posY: item.y }),
+                      }),
+                    ),
+                  )
+                }
+
                 await fetch(`${apiBaseUrl}/v1/groups/${groupId}`, {
                   method: 'PATCH',
                   headers,
@@ -1559,6 +1628,34 @@ function Inner({
                 flowY: flow.y,
                 // 空白处右键：沿用按下那一瞬的选中项（框选后想打包就靠它）
                 selectedIds: start?.selectedIds ?? [],
+              })
+            }}
+            /**
+             * 多选状态下的右键。
+             *
+             * 框选后库会把选中节点包进一个 `.react-flow__nodesselection` 覆盖层，
+             * 右键落在它上面时 onNodeContextMenu / onPaneContextMenu **都不会触发** ——
+             * 用户看到的就是"框选了好几个节点，右键没反应"（本次报障的第 2 条）。
+             * 只接这一个回调，用按下时的快照还原整组选中。
+             */
+            onSelectionContextMenu={(event) => {
+              event.preventDefault()
+              const native = event as unknown as MouseEvent
+              const start = rightDown.current
+              rightDown.current = null
+              if (start && Math.hypot(native.clientX - start.x, native.clientY - start.y) > RIGHT_DRAG_THRESHOLD) return
+              const ids = start?.selectedIds?.length
+                ? start.selectedIds.filter((id) => !isGroupNodeId(id))
+                : nodes.filter((node) => node.selected && !isGroupNodeId(node.id)).map((node) => node.id)
+              const flow = screenToFlowPosition({ x: native.clientX, y: native.clientY })
+              setMenu({
+                x: native.clientX,
+                y: native.clientY,
+                // nodeId 为 null → 走"空白处"分支，里面有打包 / 批量运行 / 批量删除
+                nodeId: null,
+                flowX: flow.x,
+                flowY: flow.y,
+                selectedIds: ids,
               })
             }}
             onNodeContextMenu={(event, node) => {
@@ -1612,46 +1709,6 @@ function Inner({
               nodeColor={(node) => nodeColor(String(node.data?.nodeType ?? ''))}
             />
           </ReactFlow>
-
-          {/*
-            分组：**外观**。组本身已经是画布上的真实节点（见 groupNodes / SgGroupNode），
-            缩放、拖动、输出端口都由画布统一处理；这里只画展开状态下那圈虚线，
-            并且完全不接收鼠标事件 —— 否则又会像以前那样把框里节点的点击吃掉。
-          */}
-          <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
-            {groups.map((group) => {
-              // 收起时什么都不画：组节点自己就是那叠卡片
-              if (collapsed.has(group.id)) return null
-              const members = nodes.filter((node) => group.memberIds.includes(node.id))
-              if (members.length === 0) return null
-
-              const pad = 34
-              const xs = members.map((node) => node.position.x)
-              const ys = members.map((node) => node.position.y)
-              const left = Math.min(...xs) - pad
-              // 顶部留出 46px：组节点的标题条就摆在成员上方
-              const top = Math.min(...ys) - pad - 46
-              const right = Math.max(...xs) + 320 + pad
-              const bottom = Math.max(...ys) + 220 + pad
-              const topLeft = toScreen(left, top)
-              return (
-                <div
-                  key={group.id}
-                  data-testid={'group-frame-' + group.id}
-                  style={{
-                    position: 'absolute',
-                    left: topLeft.x,
-                    top: topLeft.y,
-                    width: Math.max((right - left) * viewport.zoom, 240),
-                    height: Math.max((bottom - top) * viewport.zoom, 90),
-                    border: '1.5px dashed ' + group.color,
-                    borderRadius: 10,
-                    opacity: 0.55,
-                  }}
-                />
-              )
-            })}
-          </div>
 
           {toast && (
             <div

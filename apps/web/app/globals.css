@@ -10,3 +10,22 @@ body {
   margin: 0;
   font-family: system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
 }
+
+/*
+  节点运行中的转圈。
+  放在全局而不是内联 style：@keyframes 没法写在 style 对象里。
+  减少动效偏好下直接停转 —— 对前庭敏感的人，持续旋转是最容易引起不适的一类动画。
+*/
+@keyframes sg-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-testid^='run-spinner-'] {
+    animation: none;
+    borderTopColor: rgba(255, 255, 255, 0.35);
+    background: #fff;
+  }
+}

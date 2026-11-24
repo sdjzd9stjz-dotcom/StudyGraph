@@ -1,25 +1,35 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { buildFrames, easeOutCubic, lerpPoint, restoreTargets, stackTargets } from '../lib/group-motion.ts'
+import { buildFrames, easeOutCubic, frameSize, lerpPoint, restoreTargets, stackTargets } from '../lib/group-motion.ts'
 
 /**
  * 分组的开合动画与位置还原（用户 2026-11-24 要求）。
  *
  * 三条硬要求，任何一条做不到都会被看得见：
- *   · 收起是"所有节点飞向右上角、叠在一起"，不是瞬间消失
+ *   · 收起是"所有节点飞向左上角（折叠卡片所在处）、叠在一起"，不是瞬间消失
  *   · 展开要回到**收起前**的相对位置，而不是聚成一堆
  *   · 动画最后一帧必须精确落在目标点（差 1px 都会在下次收起时累积偏移）
  */
 
-test('堆叠点：全部落在组的右上角附近，且每次调用结果一致', () => {
+test('堆叠点：全部收向组的左上角，且每次调用结果一致', () => {
   const a = stackTargets({ x: 100, y: 200 }, 3)
   const b = stackTargets({ x: 100, y: 200 }, 3)
   assert.deepEqual(a, b)
   assert.equal(a.length, 3)
-  for (const point of a) {
-    assert.ok(point.x > 100 && point.y > 200, '叠放点在组的右下方一点，不会盖住标题')
-  }
+  // 第一个成员就落在锚点上（折叠卡片的位置），后面的往左上错开
+  assert.deepEqual(a[0], { x: 100, y: 200 })
+  assert.ok(a[1]!.x < 100 && a[1]!.y < 200, '后续成员向左上错开，形成叠放层次')
+})
+
+test('展开框尺寸：按成员相对锚点的最远右/下边缘算，且不小于最小值', () => {
+  const size = frameSize([{ x: 40, y: 60 }, { x: 340, y: 300 }])
+  // 最远右边缘 340 + 320 节点宽 + 26 留白
+  assert.equal(size.width, 340 + 320 + 26)
+  assert.equal(size.height, 300 + 220 + 26)
+
+  const tiny = frameSize([])
+  assert.ok(tiny.width > 0 && tiny.height > 0, '空组也要给一个最小框')
 })
 
 test('缓动：起点 0、终点 1，中间单调递增', () => {
