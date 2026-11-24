@@ -281,13 +281,15 @@ function Inner({
     outsideNames: string[]
   } | null>(null)
   /**
-   * 组的真实画布节点。
+   * toggleGroup 的引用。
    *
-   * 之前组是绝对定位的覆盖层，三个问题都由它而来：缩放不跟随、拖不动、
-   * 输出点被裁掉一半点不中。做成真正的节点后，这三件事交给画布统一处理。
-   * 单独放在一个 state 里而不是混进 `nodes`：`nodes` 参与选中/删除/保存坐标，
-   * 混进去后每个遍历点都要额外判断"这个是不是真节点"。
+   * groupNodes 在这之前定义，而 toggleGroup 依赖 nodes/setNodes，只能定义在后面。
+   * 用 ref 转一层。**必须先声明再使用**：memo 的函数体在首次渲染时就会读这个
+   * 绑定，声明放在后面会触发 TDZ（Cannot access before initialization），
+   * 整个画布组件直接崩掉 —— 表现就是"点打包什么也没发生"。
    */
+  const toggleGroupRef = useRef<(group: WorkbenchGroup) => void>(() => {})
+
   const groupNodes = useMemo<FlowNode[]>(
     () =>
       groups.map((group) => {
@@ -343,7 +345,6 @@ function Inner({
    * groupNodes 是本组件里靠前定义的 useMemo，而 toggleGroup 依赖 nodes/setNodes，
    * 只能定义在后面。用 ref 转一层，避免把两段逻辑互相牵扯（也避免循环依赖）。
    */
-  const toggleGroupRef = useRef<(group: WorkbenchGroup) => void>(() => {})
   const hiddenNodeIds = useMemo(() => {
     const ids = new Set<string>()
     for (const group of groups) {
@@ -907,6 +908,12 @@ function Inner({
     [apiBaseUrl, canvasId, createNode, headers, nodes, notify, search, setEdges, token],
   )
 
+  /** 当前选中的真实节点（排除组节点）：工具条按钮与菜单共用这一份 */
+  const selectedNodeIds = useMemo(
+    () => nodes.filter((node) => node.selected && !isGroupNodeId(node.id)).map((node) => node.id),
+    [nodes],
+  )
+
   // 把回调注入到每个节点的 data 里（ReactFlow 的 data 是数据，不是 props）
   const nodesWithHandlers = useMemo(
     () =>
@@ -1073,6 +1080,9 @@ function Inner({
       }
 
       const outsideNames = outside.map((id) => String(nodes.find((node) => node.id === id)?.data?.title ?? id))
+      // 先确认"点到了、也真的进到打开对话框这一步"：没有这句就无法区分
+      // "打包没被触发"和"对话框渲染失败"
+      notify(`准备打包 ${selected.length} 个节点`)
       setPackDraft({ ids: [...idSet], outside, outsideNames })
     },
     [edges, nodes, notify],
@@ -1106,6 +1116,8 @@ function Inner({
         return
       }
       const group = (await response.json()) as { id: string; title: string; posX: number; posY: number; color: string }
+      // 定位用：服务端已建好，但若界面上看不见，这行能区分"数据没进来"还是"渲染没出来"
+      console.info('[pack] group created', group, 'members', members.length)
       setGroups((current) => [...current, { ...group, memberIds: members.map((node) => node.id), usedBy: [] }])
       notify(`已打包 ${members.length} 个节点：${group.title}`)
 
@@ -1400,6 +1412,30 @@ function Inner({
               }}
             >
               ▦ 整理
+            </button>
+            {/*
+              打包成组的不依赖右键菜单的入口（用户 2026-11-24 报「点了打包依旧不行」）。
+              右键那条路要经过"多选覆盖层 → 快照 → 菜单"三道，任一道出问题都会静默失败；
+              工具条按钮直接读当前选中的节点，链路最短，也方便排查。
+            */}
+            <button
+              type="button"
+              data-testid="pack-selected"
+              title="把选中的节点打包成组（也可以右键 → 打包）"
+              disabled={selectedNodeIds.length < 2}
+              onClick={() => packGroup(selectedNodeIds)}
+              style={{
+                border: '1px solid #cbd5e1',
+                background: selectedNodeIds.length >= 2 ? '#fff' : '#f8fafc',
+                color: selectedNodeIds.length >= 2 ? '#334155' : '#cbd5e1',
+                borderRadius: 8,
+                padding: '6px 12px',
+                fontSize: 12,
+                cursor: selectedNodeIds.length >= 2 ? 'pointer' : 'not-allowed',
+                boxShadow: '0 1px 3px rgba(15,23,42,0.08)',
+              }}
+            >
+              ▣ 打包{selectedNodeIds.length >= 2 ? ` ${selectedNodeIds.length} 个` : ''}
             </button>
           </div>
           {chatTarget && (
