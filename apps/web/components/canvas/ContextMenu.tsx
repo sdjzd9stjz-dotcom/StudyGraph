@@ -14,6 +14,15 @@ export interface MenuContext {
   /** 转换为画布坐标后的落点 */
   flowX: number
   flowY: number
+  /**
+   * 打开菜单那一刻被选中的节点 id。
+   *
+   * 为什么要**快照**而不是在菜单里现算 `nodes.filter(selected)`：
+   * 右键点下去本身会改变选中态（库会把点中的节点设为唯一选中），
+   * 等菜单渲染时再读，"框选了 4 个"已经变成"只有 1 个"，
+   * 于是打包项根本不出现 —— 用户报的就是"框选之后无法右键打包"。
+   */
+  selectedIds: string[]
 }
 
 /**
@@ -35,6 +44,7 @@ export function ContextMenu({
   onDuplicate,
   onRun,
   selectedCount,
+  selectedIds,
   onPackGroup,
   onSplitCards,
   nodeType,
@@ -46,7 +56,9 @@ export function ContextMenu({
   onDelete: (nodeId: string) => void
   onDuplicate: (nodeId: string) => void
   onRun: (nodeId: string) => void
+  /** 已过时：保留给调用方兼容，实际以 menu.selectedIds 为准 */
   selectedCount: number
+  selectedIds: string[]
   onPackGroup: () => void
   /** 按概念拆分知识卡（只有概念抽取节点有这一项） */
   onSplitCards?: (nodeId: string) => void
@@ -94,7 +106,7 @@ export function ContextMenu({
             <Item label="重命名" onClick={() => { onRename(menu.nodeId!); onClose() }} />
             <Item label="复制节点" onClick={() => { onDuplicate(menu.nodeId!); onClose() }} />
             <Divider />
-            {selectedCount >= 2 && <Item label={`打包这 ${selectedCount} 个节点为上下文`} onClick={() => { onPackGroup(); onClose() }} />}
+            {selectedIds.length >= 2 && <Item label={`打包这 ${selectedIds.length} 个节点为上下文`} onClick={() => { onPackGroup(); onClose() }} />}
             <Item label="删除" danger onClick={() => { onDelete(menu.nodeId!); onClose() }} />
           </>
         ) : (
@@ -162,7 +174,7 @@ export function ContextMenu({
             )}
 
             <Divider />
-            {selectedCount >= 2 && <Item label={`打包选中的 ${selectedCount} 个节点`} onClick={() => { onPackGroup(); onClose() }} />}
+            {selectedIds.length >= 2 && <Item label={`打包选中的 ${selectedIds.length} 个节点`} onClick={() => { onPackGroup(); onClose() }} />}
             <Item label="粘贴" disabled onClick={() => {}} />
           </>
         )}

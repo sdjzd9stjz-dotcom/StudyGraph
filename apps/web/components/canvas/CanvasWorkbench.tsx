@@ -30,6 +30,7 @@ import { NodeChat } from './NodeChat'
 import { NodeSearch } from './NodeSearch'
 import { Sidebar } from './Sidebar'
 import type { SkillView } from './Sidebar'
+import { selectionForContextMenu, toggleSelection } from '../../lib/selection'
 import { usePrompt } from '../ui/PromptDialog'
 
 const nodeTypes = { sg: SgNode }
@@ -118,6 +119,10 @@ function Inner({
   }, [nodeSkills])
 
   const [nodes, setNodes, onNodesChange] = useNodesState<FlowNode>(initialNodes.map((node) => toFlowNode(node, skillsByNode)))
+  /** 最新节点数组：capture 阶段的事件回调里读不到当前的 `nodes`，只能走 ref */
+  const nodesRef = useRef(nodes)
+  // 每次渲染更新：事件回调是 native listener，闭包里的 nodes 会是旧的
+  nodesRef.current = nodes
 
   /**
    * 把服务端新出现的节点并进画布。
@@ -254,7 +259,16 @@ function Inner({
    * 但浏览器在右键松开时会照常派发 contextmenu —— 拖了半个屏幕再弹菜单很烦。
    * 所以记下右键按下的位置，松手时若已经移出几像素，就当"平移"处理，不弹菜单。
    */
-  const rightDown = useRef<{ x: number; y: number } | null>(null)
+  const rightDown = useRef<{ x: number; y: number; selectedIds: string[] } | null>(null)
+  /**
+   * Shift+左键按下那一刻的选中快照。
+   *
+   * 为什么要存整份而不是只存"被点的那个"：
+   * 库在 click 里会先 `addSelectedNodes([node])`，把**其它节点的选中全部清掉**，
+   * 然后才调用我们的 onNodeClick。只翻转被点的节点，"其它已选中的"已经没了 ——
+   * 结果就是 Shift 点第二个节点时第一个反而被取消（用户报的"Shift+左键无法增选"）。
+   */
+  const shiftDown = useRef<{ nodeId: string; selectedIds: string[] } | null>(null)
   const RIGHT_DRAG_THRESHOLD = 4
   const { screenToFlowPosition, getViewport } = useReactFlow()
   /**
@@ -290,7 +304,34 @@ function Inner({
      * 后者到松手才来，那时已经没法还原起点。
      */
     const onPointerDown = (event: PointerEvent) => {
-      if (event.button === 2) rightDown.current = { x: event.clientX, y: event.clientY }
+      if (event.button === 2) {
+        /**
+         * 按下右键的这一刻就把选中项记下来。
+         *
+         * 库在右键时会重写选中态（点中的节点变成唯一选中），
+         * 等 contextmenu 事件到的时候已经是"只选了 1 个" ——
+         * 这就是"框选 4 个之后右键没有打包项"的原因。
+         */
+        rightDown.current = {
+          x: event.clientX,
+          y: event.clientY,
+          selectedIds: nodesRef.current.filter((node) => node.selected).map((node) => node.id),
+        }
+      }
+      /**
+       * Shift+左键：记下**点击之前**的选中状态。
+       *
+       * 库在 pointerdown 之后就会把点中的节点设为选中（并把别的清掉），
+       * 等 click 事件再来取反，读到的已经是"它被选中了"，于是永远变成取消选中。
+       * 判定要用按下那一刻的状态。
+       */
+      if (event.button === 0 && event.shiftKey) {
+        const target = (event.target as HTMLElement | null)?.closest?.('.react-flow__node') as HTMLElement | null
+        const nodeId = target?.dataset?.id ?? null
+        shiftDown.current = nodeId
+          ? { nodeId, selectedIds: nodesRef.current.filter((item) => item.selected).map((item) => item.id) }
+          : null
+      }
     }
     const handler = (event: MouseEvent) => {
       const target = event.target as HTMLElement
@@ -817,10 +858,18 @@ function Inner({
   )
 
   // ── 分组 ────────────────────────────────────────────────────────────────
-  const packGroup = useCallback(async () => {
-    const selected = nodes.filter((node) => node.selected)
+  /**
+   * 打包成上下文组。
+   *
+   * `ids` 由调用方传入（右键菜单里那份快照），**不再现场读 `node.selected`**：
+   * 右键按下时库会改写选中态，等菜单点击时再读就只剩被点中的那一个，
+   * 于是"框选 4 个 → 右键 → 打包"永远只有 1 个成员、或者直接不出现打包项。
+   */
+  const packGroup = useCallback(async (ids: string[]) => {
+    const idSet = new Set(ids)
+    const selected = nodes.filter((node) => idSet.has(node.id))
     if (selected.length < 2) {
-      notify('先在画布上框选至少两个节点')
+      notify('至少要选中两个节点才能打包')
       return
     }
     const title = await prompt({
@@ -991,7 +1040,41 @@ function Inner({
             panOnDrag={[1, 2]}
             selectionOnDrag
             selectionKeyCode={null}
-            multiSelectionKeyCode="Shift"
+            /**
+             * 增选/减选由我们自己接管（见 onNodeClick）。
+             *
+             * 库的 Shift 实现依赖「按下 Shift 时全局 multiSelectionActive」，
+             * 在 Electron 窗口里焦点切换后这个状态会丢，表现为"Shift+左键没反应"。
+             * 关掉库的处理，避免两边各自改一次选中态导致互相抵消。
+             */
+            multiSelectionKeyCode={null}
+            onNodeClick={(event, node) => {
+              if (!event.shiftKey) return
+              /**
+               * Shift+左键 = 增选 / 减选这一个节点，其它节点的选中原样保留。
+               *
+               * 做法：拿 pointerdown 时记下的选中集合，翻转目标节点，再整份写回。
+               * 不用 `!node.selected` —— 库在我们之前已经把这一下变成"选中"了，
+               * 那样取反永远得到"取消选中"。
+               * 用 setTimeout 推到库的这次 click 处理之后，保证最终状态是我们的。
+               */
+              const snapshot = shiftDown.current
+              shiftDown.current = null
+              const before = snapshot?.selectedIds ?? nodesRef.current.filter((item) => item.selected).map((item) => item.id)
+              const next = toggleSelection(before, node.id)
+              const base = new Set(next)
+              window.setTimeout(() => {
+                setNodes((current) => current.map((item) => ({ ...item, selected: base.has(item.id) })))
+              }, 0)
+            }}
+            onPaneClick={() => {
+              // 点空白清空选中：和资源管理器一致，避免"残留选中"导致下次打包带上旧节点
+              setNodes((current) =>
+                current.some((item) => item.selected)
+                  ? current.map((item) => (item.selected ? { ...item, selected: false } : item))
+                  : current,
+              )
+            }}
             selectNodesOnDrag={false}
             /**
              * 删除键：默认行为只是从本地状态里移除，刷新就回来（图上删了库里没删）。
@@ -1032,7 +1115,15 @@ function Inner({
               rightDown.current = null
               if (start && Math.hypot(native.clientX - start.x, native.clientY - start.y) > RIGHT_DRAG_THRESHOLD) return
               const flow = screenToFlowPosition({ x: native.clientX, y: native.clientY })
-              setMenu({ x: native.clientX, y: native.clientY, nodeId: null, flowX: flow.x, flowY: flow.y })
+              setMenu({
+                x: native.clientX,
+                y: native.clientY,
+                nodeId: null,
+                flowX: flow.x,
+                flowY: flow.y,
+                // 空白处右键：沿用按下那一瞬的选中项（框选后想打包就靠它）
+                selectedIds: start?.selectedIds ?? [],
+              })
             }}
             onNodeContextMenu={(event, node) => {
               event.preventDefault()
@@ -1040,7 +1131,19 @@ function Inner({
               const start = rightDown.current
               rightDown.current = null
               if (start && Math.hypot(native.clientX - start.x, native.clientY - start.y) > RIGHT_DRAG_THRESHOLD) return
-              setMenu({ x: native.clientX, y: native.clientY, nodeId: node.id, flowX: node.position.x, flowY: node.position.y })
+              /**
+               * 节点上右键：如果这个节点本来就在多选里，保留整组选中；
+               * 否则只当它是单节点操作（库已经把选中态改成只选它了）。
+               */
+              const selectedIds = selectionForContextMenu(start?.selectedIds ?? [], node.id)
+              setMenu({
+                x: native.clientX,
+                y: native.clientY,
+                nodeId: node.id,
+                flowX: node.position.x,
+                flowY: node.position.y,
+                selectedIds,
+              })
             }}
             onDrop={async (event) => {
               event.preventDefault()
@@ -1221,8 +1324,9 @@ function Inner({
           onDelete={(nodeId) => void deleteNode(nodeId)}
           onDuplicate={(nodeId) => void duplicateNode(nodeId)}
           onRun={(nodeId) => void runNode(nodeId)}
-          selectedCount={nodes.filter((node) => node.selected).length}
-          onPackGroup={() => void packGroup()}
+          selectedCount={menu.selectedIds.length}
+          selectedIds={menu.selectedIds}
+          onPackGroup={() => void packGroup(menu.selectedIds)}
           onSplitCards={(nodeId) => void splitCards(nodeId)}
           nodeType={
             menu.nodeId

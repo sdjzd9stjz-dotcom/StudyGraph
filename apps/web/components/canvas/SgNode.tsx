@@ -64,7 +64,7 @@ export interface SgNodeData {
  * 为什么提示词窗要收起：提示词通常很长，常驻会把节点撑成一面墙，
  * 一屏放不下几个节点，就失去了"看思维链条"的意义。
  */
-export function SgNode({ id, data }: NodeProps) {
+export function SgNode({ id, data, selected }: NodeProps) {
   const d = data as SgNodeData
   const [hover, setHover] = useState(false)
   /**
@@ -143,22 +143,62 @@ export function SgNode({ id, data }: NodeProps) {
         width: nodeWidth,
         background: '#fff',
         borderRadius: 10,
-        border: `2px solid ${d.running ? '#f59e0b' : compatible ? '#22c55e' : color}`,
-        // 能接上的：绿色描边 + 外发光 + 轻微放大，一眼就能看出"往这儿松手"
-        boxShadow: compatible
-          ? '0 0 0 3px rgba(34,197,94,0.28), 0 6px 18px rgba(15,23,42,0.13)'
-          : hover
-            ? '0 6px 18px rgba(15,23,42,0.13)'
-            : '0 1px 3px rgba(15,23,42,0.08)',
+        /**
+         * 选中态：以**节点自身**为单位高亮，不靠库默认的虚线包围盒。
+         *
+         * 视觉分三层，缩到 60% 也还看得见：
+         *   1. 2px 边框换成主色（挑颜色之外再靠粗细区分）
+         *   2. 3px 外发光环 —— 多个节点同时选中时，环与环之间不互相吞掉
+         *   3. 左上角一个实心勾标 —— 黑白色差最稳，色弱也能分辨
+         */
+        border: `2px solid ${
+          d.running ? '#f59e0b' : compatible ? '#22c55e' : selected ? '#2563eb' : color
+        }`,
+        boxShadow: selected
+          ? '0 0 0 3px rgba(37,99,235,0.32), 0 10px 24px rgba(37,99,235,0.20)'
+          : compatible
+            ? '0 0 0 3px rgba(34,197,94,0.28), 0 6px 18px rgba(15,23,42,0.13)'
+            : hover
+              ? '0 6px 18px rgba(15,23,42,0.13)'
+              : '0 1px 3px rgba(15,23,42,0.08)',
         // 接不上的压暗，但不是消失：用户仍能看见它在哪
         opacity: incompatible ? 0.4 : 1,
         transform: compatible ? 'scale(1.03)' : 'scale(1)',
         fontSize: 12,
         transition: 'box-shadow .12s, opacity .12s, transform .12s, border-color .12s',
+        // 选中时抬到其它节点之上，外发光不会被相邻节点盖住
+        zIndex: selected ? 5 : undefined,
         // 不能用 overflow:hidden —— ReactFlow 的端口跨在边框上，裁掉就点不中（实测拖不出线）。
         // 圆角裁剪交给内部的标题栏/内容块自己处理。
       }}
     >
+      {/* 选中标记：左上角实心圆 + 勾。颜色之外还有形状，缩小时也认得出 */}
+      {selected && (
+        <div
+          data-testid="node-selected-badge"
+          style={{
+            position: 'absolute',
+            top: -10,
+            left: -10,
+            width: 20,
+            height: 20,
+            borderRadius: '50%',
+            background: '#2563eb',
+            border: '2px solid #fff',
+            boxShadow: '0 2px 6px rgba(37,99,235,0.4)',
+            display: 'grid',
+            placeItems: 'center',
+            color: '#fff',
+            fontSize: 11,
+            fontWeight: 700,
+            lineHeight: 1,
+            pointerEvents: 'none',
+          }}
+        >
+          ✓
+        </div>
+      )}
+
       {/* 能接上时在右上角给一个明确提示，颜色之外再加一层文字 */}
       {compatible && (
         <div
