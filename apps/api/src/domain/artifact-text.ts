@@ -144,6 +144,10 @@ export function summarizeArtifact(kind: string, structured: unknown): string {
     case 'PROBLEM_DRAFT': {
       const created = asArray(data.created)
       lines.push(`✏️ 出题 ${num(data.actual) ?? created.length} 道（要求 ${num(data.requested) ?? '-'} 道）`)
+      // 用了待复核概念的题：能刷，但定义还没经过人工确认
+      if (data.usedPendingReview === true) {
+        lines.push('⚠ 用的是「待复核」概念：题目可用，建议去概念卡面板确认定义')
+      }
       for (const item of created.slice(0, 6)) {
         lines.push(`• ${clip(str((item as Record<string, unknown>).stem), 90)}`)
       }

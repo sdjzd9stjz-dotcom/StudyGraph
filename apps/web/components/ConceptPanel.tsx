@@ -117,6 +117,32 @@ export function ConceptPanel({ canvasId, apiBaseUrl, token, initialConcepts }: C
     setConcepts(payload.concepts)
   }, [canvasId, token])
 
+  const pendingCount = concepts.filter((concept) => concept.status === 'PENDING_REVIEW').length
+  const [bulkBusy, setBulkBusy] = useState(false)
+
+  /** 批量确认：逐条调 /review，失败的单独记下来，不因为一条错就中断整批 */
+  const acceptAll = useCallback(async () => {
+    const pending = concepts.filter((concept) => concept.status === 'PENDING_REVIEW')
+    if (pending.length === 0) return
+    setBulkBusy(true)
+    setError(null)
+    const failed: string[] = []
+    try {
+      for (const concept of pending) {
+        const response = await fetch(`${apiBaseUrl}/v1/concepts/${concept.id}/review`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+          body: JSON.stringify({ decision: 'ACCEPT' }),
+        })
+        if (!response.ok) failed.push(concept.name)
+      }
+      await reload()
+      if (failed.length > 0) setError(`有 ${failed.length} 条确认失败：${failed.slice(0, 3).join('、')}`)
+    } finally {
+      setBulkBusy(false)
+    }
+  }, [apiBaseUrl, concepts, reload, token])
+
   /**
    * 人工确认一条概念。
    *
@@ -155,6 +181,30 @@ export function ConceptPanel({ canvasId, apiBaseUrl, token, initialConcepts }: C
           <span data-testid="concept-count" style={{ fontSize: 12, color: '#6b7280' }}>
             共 {concepts.length} 张
           </span>
+          {/*
+            一键确认全部待复核。
+            没有它，用户要出题就得逐条点几十次；真实报障是"跑完卡直接出题报没概念"。
+            仍然逐条走 /review 接口：状态机与审计字段由服务端维护，这里只是批量点。
+          */}
+          {pendingCount > 0 && (
+            <button
+              type="button"
+              data-testid="concept-accept-all"
+              disabled={bulkBusy}
+              onClick={() => void acceptAll()}
+              style={{
+                fontSize: 12,
+                border: 'none',
+                borderRadius: 6,
+                padding: '3px 10px',
+                background: bulkBusy ? '#86efac' : '#16a34a',
+                color: '#fff',
+                cursor: bulkBusy ? 'default' : 'pointer',
+              }}
+            >
+              {bulkBusy ? '确认中…' : `全部确认（${pendingCount}）`}
+            </button>
+          )}
           <button
             type="button"
             onClick={reload}

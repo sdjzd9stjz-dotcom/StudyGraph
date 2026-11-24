@@ -201,30 +201,51 @@ export const quizExecutor: NodeExecutor<QuizParams> = {
   async run(ctx) {
     const count = Math.min(MAX_PER_RUN, Math.max(1, ctx.params?.count ?? 5))
 
-    // 只取 VERIFIED：未复核的概念不该变成学生的练习题
-    const concepts = await ctx.prisma.concept.findMany({
-      where: {
-        canvasId: ctx.canvasId,
-        status: 'VERIFIED',
-        ...(Array.isArray(ctx.params?.conceptNames) && ctx.params.conceptNames.length > 0
-          ? { name: { in: ctx.params.conceptNames } }
-          : {}),
-      },
+    /**
+     * 概念来源：优先已确认的，没有再退到待复核的。
+     *
+     * 为什么要退：卡片跑完后概念一律是 PENDING_REVIEW，要人去概念面板逐条点确认。
+     * 之前这里只认 VERIFIED，用户跑完卡直接出题就撞上「没有通过复核的概念」，
+     * 而整条链路上**没有任何提示告诉他去点确认** —— 用户以为出题坏了（真实报障）。
+     *
+     * 边界仍然守住：UNVERIFIED（引文对不上原文）绝不能变成练习题。
+     * PENDING_REVIEW 意味着引文可查、只是定义待人复核，用它出题并在产物里标明。
+     */
+    const conceptFilter = {
+      canvasId: ctx.canvasId,
+      ...(Array.isArray(ctx.params?.conceptNames) && ctx.params.conceptNames.length > 0
+        ? { name: { in: ctx.params.conceptNames } }
+        : {}),
+    }
+    const conceptSelect = {
+      id: true,
+      name: true,
+      definition: true,
+      status: true,
+      // 出题必须有引用可挂：没有主引用的概念无法给题目挂 ProblemCitation
+      citations: { where: { isPrimary: true }, take: 1, select: { spanId: true } },
+    } as const
+
+    let concepts = await ctx.prisma.concept.findMany({
+      where: { ...conceptFilter, status: 'VERIFIED' },
       orderBy: { name: 'asc' },
       take: MAX_CONCEPTS,
-      select: {
-        id: true,
-        name: true,
-        definition: true,
-        // 出题必须有引用可挂：没有主引用的概念无法给题目挂 ProblemCitation
-        citations: { where: { isPrimary: true }, take: 1, select: { spanId: true } },
-      },
+      select: conceptSelect,
     })
+    const usedPendingReview = concepts.length === 0
+    if (usedPendingReview) {
+      concepts = await ctx.prisma.concept.findMany({
+        where: { ...conceptFilter, status: 'PENDING_REVIEW' },
+        orderBy: { name: 'asc' },
+        take: MAX_CONCEPTS,
+        select: conceptSelect,
+      })
+    }
 
     if (concepts.length === 0) {
       throw new Error(
-        '画布上没有通过复核的概念（status=VERIFIED）。出题需要至少一条已确认概念；' +
-          '请先跑 card 节点并通过人工复核。',
+        '画布上没有可用的概念（需要 VERIFIED 或 PENDING_REVIEW）。' +
+          '请先跑概念卡节点；如果已经跑过，去画布上方的「概念卡」面板确认概念。',
       )
     }
 
@@ -443,6 +464,8 @@ export const quizExecutor: NodeExecutor<QuizParams> = {
         dropped,
         dropReasons,
         ...(allowedTypes.length > 0 ? { allowedTypes } : {}),
+        // 用了待复核的概念就必须让人看见：题目能出，但定义还没人确认过
+        ...(usedPendingReview ? { usedPendingReview: true, conceptStatus: 'PENDING_REVIEW' } : {}),
       },
       usage: result.usage,
       usageRecords: [{ provider: result.provider, model: result.modelVersion, ...result.usage }],

@@ -187,6 +187,37 @@ test('create_node：模型编的节点类型被拒绝，合法类型落成 DRAFT
   assert.equal(state.nodes[1]!.status, 'DRAFT')
 })
 
+/**
+ * 真实报障：AI 用 create_node 建了三张知识卡节点，三张内容一模一样。
+ *
+ * 原因就是这个工具原本写死 `params: {}` —— 没有 conceptName，
+ * CARD 执行器读不到概念名，就把上游所有概念都做成卡。
+ * 现在：建 CARD 必须给概念名，且概念名要真的写进 params。
+ */
+test('create_node：建知识卡必须绑定概念，否则内容会和别的卡重复', async () => {
+  const { prisma, state } = makePrisma()
+  const deps = depsOf(prisma)
+
+  const missing = await executeCanvasTool(deps, 'create_node', JSON.stringify({ type: 'CARD', title: '定积分' }))
+  assert.equal(missing.result.ok, false, '没有 conceptName 的 CARD 必须被拒绝')
+  assert.match(String(missing.result.error), /conceptName/)
+  assert.equal(state.nodes.length, 0, '被拒绝时不能留下半成品节点')
+
+  const good = await executeCanvasTool(
+    deps,
+    'create_node',
+    JSON.stringify({ type: 'CARD', conceptName: '定积分', posX: 10, posY: 20 }),
+  )
+  assert.equal(good.result.ok, true)
+  const created = state.nodes.at(-1)!
+  assert.deepEqual(created.params, { conceptName: '定积分' }, '概念名必须落进 params，执行器才认得')
+  assert.equal(created.title, '定积分', '没给标题时用概念名当标题')
+
+  // 别的类型不需要概念名
+  const quiz = await executeCanvasTool(deps, 'create_node', JSON.stringify({ type: 'QUIZ' }))
+  assert.equal(quiz.result.ok, true)
+})
+
 test('create_edge：自连、跨画布、端口不匹配都拒绝；合法连线只建一次', async () => {
   const { prisma, state } = makePrisma({
     nodes: [
@@ -281,7 +312,13 @@ test('agent 循环：模型调工具 → 结果回灌 → 给出最终答复', a
   const responses = [
     {
       content: '',
-      toolCalls: [{ id: 'call_1', name: 'create_node', arguments: JSON.stringify({ type: 'CARD', title: '知识卡' }) }],
+      toolCalls: [
+        {
+          id: 'call_1',
+          name: 'create_node',
+          arguments: JSON.stringify({ type: 'CARD', conceptName: '定积分', title: '定积分' }),
+        },
+      ],
     },
     {
       content: '我建好了一个知识卡节点。',

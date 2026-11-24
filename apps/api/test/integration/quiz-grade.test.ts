@@ -222,15 +222,57 @@ test('QUIZ：错误项没有合法错因时被丢弃，不足 2 项则整题丢�
   assert.ok(stored[0]!.stemMd.includes('导数的几何意义'))
 })
 
-test('QUIZ：没有已确认概念时明确报错，不写空题', async () => {
+test('QUIZ：一条概念都没有时明确报错，不写空题', async () => {
   const { canvas } = await makeCanvas()
   const node = await prisma.node.create({ data: { canvasId: canvas.id, type: 'QUIZ', params: {}, posX: 0, posY: 0 } })
 
   await assert.rejects(
     () => quizExecutor.run(quizCtx(canvas.id, node.id, stubGateway({ problems: [] }))),
-    /没有通过复核的概念/,
+    /没有可用的概念/,
   )
   assert.equal(await prisma.problem.count({ where: { canvasId: canvas.id } }), 0)
+})
+
+/**
+ * 真实报障：跑完概念卡直接点出题，只看到「没有通过复核的概念」，出不了题。
+ *
+ * 卡片产出的概念默认是 PENDING_REVIEW（定义待人复核），之前只认 VERIFIED，
+ * 于是**整条链路在出题这一步断掉**，而界面不说该去哪儿确认。
+ * 现在：没有已确认的就用待复核的出题，并在产物里标明 usedPendingReview。
+ * 边界不变：UNVERIFIED（引文对不上原文）仍然绝不能变成练习题。
+ */
+test('QUIZ：没有已确认概念时用待复核的出题，并标明需要复核', async () => {
+  const { owner, canvas } = await makeCanvas()
+  user.id = owner.id
+
+  const pending = await makeConcept(canvas.id, '可导的定义', '可导指左右导数存在且相等。', '可导指左右导数存在且相等。')
+  await prisma.concept.update({ where: { id: pending.concept.id }, data: { status: 'PENDING_REVIEW' } })
+
+  const node = await prisma.node.create({ data: { canvasId: canvas.id, type: 'QUIZ', params: {}, posX: 0, posY: 0 } })
+  const payload = {
+    problems: [
+      {
+        type: 'SHORT_ANSWER',
+        stem: '说明可导与导数存在的关系。',
+        answer: '可导即导数存在。',
+        judgeRule: '按要点判分',
+        conceptNames: ['可导的定义'],
+      },
+    ],
+  }
+
+  const result = await quizExecutor.run(quizCtx(canvas.id, node.id, stubGateway(payload)))
+  const outputs = result.outputs as { actual: number; usedPendingReview?: boolean }
+  assert.equal(outputs.actual, 1, '待复核的概念应当能出题')
+  assert.equal(outputs.usedPendingReview, true, '必须标明用的是待复核概念')
+  assert.equal(await prisma.problem.count({ where: { canvasId: canvas.id } }), 1)
+
+  // UNVERIFIED 仍然不能出题
+  await prisma.concept.update({ where: { id: pending.concept.id }, data: { status: 'UNVERIFIED' } })
+  await assert.rejects(
+    () => quizExecutor.run(quizCtx(canvas.id, node.id, stubGateway({ problems: [] }))),
+    /没有可用的概念/,
+  )
 })
 
 test('GRADE：确定性判分的作答真的写进 Attempt，且错因来自选项配置', async () => {

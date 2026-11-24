@@ -170,6 +170,28 @@ function Inner({
   const [edges, setEdges, onEdgesChange] = useEdgesState<FlowEdge>(
     initialEdges.map((edge) => ({ id: edge.id, source: edge.fromNodeId, target: edge.toNodeId, sourceHandle: edge.fromPort, targetHandle: edge.toPort })),
   )
+  /**
+   * 连线也要跟着服务端更新。
+   *
+   * 和 nodes 同理：`useEdgesState` 只取一次初值。服务端新建的连线（比如「按概念拆分」
+   * 自动把抽取节点连到每张卡）在 router.refresh() 后只出现在 props 里，
+   * 不同步的话用户会看到新卡是孤立的、没有线。
+   * 只追加服务端有、本地没有的；本地刚画上但还没回包的连线保留。
+   */
+  useEffect(() => {
+    const incoming = initialEdges.map((edge) => ({
+      id: edge.id,
+      source: edge.fromNodeId,
+      target: edge.toNodeId,
+      sourceHandle: edge.fromPort,
+      targetHandle: edge.toPort,
+    }))
+    setEdges((current) => {
+      const known = new Set(current.map((edge) => edge.id))
+      const added = incoming.filter((edge) => !known.has(edge.id))
+      return added.length > 0 ? [...current, ...added] : current
+    })
+  }, [initialEdges, setEdges])
   const [groups, setGroups] = useState<WorkbenchGroup[]>(initialGroups)
   const [menu, setMenu] = useState<MenuContext | null>(null)
   /** 当前打开对话的节点（每个节点自己就是一个会话） */
@@ -344,6 +366,38 @@ function Inner({
       await createNode(source.data.nodeType as NodeType, source.position.x + 40, source.position.y + 60)
     },
     [createNode, nodes],
+  )
+
+  /**
+   * 按概念拆分知识卡（用户 2026-11-23：「加上右键入口」）。
+   *
+   * 一个概念一个节点。以前只能通过对话或接口触发，界面上没有入口，
+   * 用户只能手工建卡 —— 而手工建的卡没有 conceptName，每张都产出全部概念。
+   * 拆完后重新拉一次画布，新节点才能带着连线和位置回来。
+   */
+  const splitCards = useCallback(
+    async (nodeId: string) => {
+      const response = await fetch(`${apiBaseUrl}/v1/nodes/${nodeId}/split-cards`, { method: 'POST', headers })
+      const payload = (await response.json().catch(() => null)) as
+        | { created?: Array<unknown>; skipped?: Array<{ name: string; reason: string }>; error?: { message?: string } }
+        | null
+      if (!response.ok) {
+        notify(payload?.error?.message ?? `拆分失败：${response.status}`)
+        return
+      }
+      const created = payload?.created?.length ?? 0
+      const skipped = payload?.skipped ?? []
+      if (created === 0) {
+        // 全被跳过要说清楚原因，否则用户以为按钮坏了
+        const reason = skipped[0] ? `（${skipped[0].name}：${skipped[0].reason}）` : ''
+        notify(`没有新建知识卡${reason}`)
+        return
+      }
+      notify(`已拆出 ${created} 张知识卡${skipped.length > 0 ? `，跳过 ${skipped.length} 个概念` : ''}`)
+      // 新节点与新连线由服务端返回的 props 带回来（见上方同步 effect）
+      router.refresh()
+    },
+    [apiBaseUrl, headers, notify, router, token],
   )
 
   const renameNode = useCallback(
@@ -1169,6 +1223,12 @@ function Inner({
           onRun={(nodeId) => void runNode(nodeId)}
           selectedCount={nodes.filter((node) => node.selected).length}
           onPackGroup={() => void packGroup()}
+          onSplitCards={(nodeId) => void splitCards(nodeId)}
+          nodeType={
+            menu.nodeId
+              ? String(nodes.find((node) => node.id === menu.nodeId)?.data?.nodeType ?? '')
+              : null
+          }
         />
       )}
 

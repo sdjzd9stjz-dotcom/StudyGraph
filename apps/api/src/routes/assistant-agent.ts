@@ -61,7 +61,10 @@ export const CANVAS_TOOLS: readonly ToolSpec[] = [
   },
   {
     name: 'create_node',
-    description: `在画布上创建一个节点。类型只能是：${NODE_TYPES.join(' / ')}。`,
+    description:
+      `在画布上创建一个节点。类型只能是：${NODE_TYPES.join(' / ')}。` +
+      '建 CARD（知识卡）节点时**必须**填 conceptName —— 一个节点只做一个概念；' +
+      '不填的话这个节点会把上游所有概念都做成卡，几张卡内容就一模一样了。',
     parameters: {
       type: 'object',
       properties: {
@@ -69,6 +72,11 @@ export const CANVAS_TOOLS: readonly ToolSpec[] = [
         title: { type: 'string', description: '节点标题（可选，默认用类型名）' },
         posX: { type: 'number', description: '画布横坐标（可选，默认排在现有节点右侧）' },
         posY: { type: 'number', description: '画布纵坐标（可选，默认 0）' },
+        conceptName: {
+          type: 'string',
+          description:
+            '要绑定到这个概念名（CARD 节点必填，必须与上游概念抽取里的 name 一字不差）。其他类型可省略。',
+        },
       },
       required: ['type'],
       additionalProperties: false,
@@ -76,13 +84,19 @@ export const CANVAS_TOOLS: readonly ToolSpec[] = [
   },
   {
     name: 'update_node',
-    description: '修改节点的标题或提示词（prompt）。prompt 是该节点运行时追加给模型的指令。',
+    description:
+      '修改节点的标题、提示词（prompt）或知识卡绑定的概念（conceptName）。prompt 是该节点运行时追加给模型的指令。',
     parameters: {
       type: 'object',
       properties: {
         nodeId: { type: 'string' },
         title: { type: 'string', description: '新标题（可选）' },
         prompt: { type: 'string', description: '新的节点提示词（可选，会写进 params.prompt）' },
+        conceptName: {
+          type: 'string',
+          description:
+            'CARD 节点绑定的概念名（可选）。用于修复"几张知识卡内容一样"的节点：每个卡节点要绑定不同的概念。',
+        },
       },
       required: ['nodeId'],
       additionalProperties: false,
@@ -310,12 +324,26 @@ export async function executeCanvasTool(
         posX = (rightmost?.posX ?? 0) + 320
       }
 
+      /**
+       * CARD 节点的概念绑定。
+       *
+       * 用户报的"拆出来的知识卡内容都一样"：这三张卡是 agent 用 create_node 建的，
+       * 这里原本写死 `params: {}`，于是每个节点都没有 conceptName ——
+       * CARD 执行器读不到概念名就走旧行为（全部 claims 都建卡），
+       * 结果每个节点都产出同样的一组卡。
+       */
+      const conceptName = typeof args.conceptName === 'string' ? args.conceptName.trim() : ''
+      if (type === 'CARD' && conceptName.length === 0) {
+        return fail('建知识卡（CARD）节点必须给 conceptName：一个节点只做一个概念，否则每张卡内容都一样。可以先 read_node_output 看上游抽取了哪些概念名。')
+      }
+      const params = (conceptName.length > 0 ? { conceptName } : {}) as object
+
       const node = await deps.prisma.node.create({
         data: {
           canvasId: deps.canvasId,
           type: type as NodeType,
-          title: title && title.length > 0 ? title : null,
-          params: {},
+          title: title && title.length > 0 ? title : conceptName.length > 0 ? conceptName : null,
+          params,
           status: 'DRAFT',
           posX,
           posY,
@@ -339,11 +367,19 @@ export async function executeCanvasTool(
 
       const data: Record<string, unknown> = {}
       if (typeof args.title === 'string') data.title = args.title.trim().slice(0, 200)
-      if (typeof args.prompt === 'string') {
+
+      const prompt = typeof args.prompt === 'string' ? args.prompt.slice(0, 4000) : null
+      const conceptName = typeof args.conceptName === 'string' ? args.conceptName.trim() : null
+      if (prompt !== null || conceptName !== null) {
+        // 合并而不是替换：params 里还有课件路径、闸门状态这类字段，整块覆盖会把它们抹掉
         const params = (node.params ?? {}) as Record<string, unknown>
-        data.params = { ...params, prompt: args.prompt.slice(0, 4000) }
+        data.params = {
+          ...params,
+          ...(prompt !== null ? { prompt } : {}),
+          ...(conceptName !== null && conceptName.length > 0 ? { conceptName } : {}),
+        }
       }
-      if (Object.keys(data).length === 0) return fail('没有要修改的字段（title 或 prompt）')
+      if (Object.keys(data).length === 0) return fail('没有要修改的字段（title / prompt / conceptName）')
 
       const updated = await deps.prisma.node.update({
         where: { id: nodeId },
@@ -586,7 +622,9 @@ const SYSTEM_RULES = [
   '2. 回答画布相关问题时，引用节点里的具体内容（概念名、定义、题目），不要泛泛而谈；内容里确实没有就直说没有，不要编造引文。',
   '3. 只有用户明确要求删除时才调用 delete_node / delete_edge。',
   '4. 不要重复创建用户已经有的节点类型，除非用户明确要求。',
-  '4a. 用户要"知识卡"时，如果画布上已有概念抽取节点且跑过，用 split_cards 按概念拆成一概念一节点；不要建一个塞满所有卡的单节点。',
+  '4a. 用户要"知识卡"时，如果画布上已有概念抽取节点且跑过，**必须**用 split_cards 按概念拆成一概念一节点；不要建一个塞满所有卡的单节点。',
+  '4a-1. 只有在 split_cards 不可用（没有抽取节点）时才用 create_node 建 CARD，并且**每个节点都要填 conceptName**，一个节点只做一个概念。',
+  '4a-2. 没填 conceptName 的 CARD 节点会把上游所有概念都做成卡，几张卡内容就一模一样 —— 这是真实报障，不要这样建。',
   '4b. DEEPEN（深入理解）只接受知识卡与题目的连线；LECTURE（导出讲义）接受任意节点产出，用来汇总成讲义。',
   '5. **永远不要执行节点**（不要假装运行）——运行只能由用户点节点上的 ▶。',
   '6. 不许编造 id：只用 list_canvas / 上面状态里给出的 id。工具报错就照错误信息修正，不要重试同样的参数。',

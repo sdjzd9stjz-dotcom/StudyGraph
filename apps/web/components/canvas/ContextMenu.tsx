@@ -36,6 +36,8 @@ export function ContextMenu({
   onRun,
   selectedCount,
   onPackGroup,
+  onSplitCards,
+  nodeType,
 }: {
   menu: MenuContext
   onClose: () => void
@@ -46,6 +48,10 @@ export function ContextMenu({
   onRun: (nodeId: string) => void
   selectedCount: number
   onPackGroup: () => void
+  /** 按概念拆分知识卡（只有概念抽取节点有这一项） */
+  onSplitCards?: (nodeId: string) => void
+  /** 右键点中的节点类型：决定菜单里显示哪些专属项 */
+  nodeType?: string | null
 }) {
   const [subOpen, setSubOpen] = useState(false)
 
@@ -73,6 +79,18 @@ export function ContextMenu({
         {menu.nodeId ? (
           <>
             <Item label="运行此节点" onClick={() => { onRun(menu.nodeId!); onClose() }} />
+            {/*
+              按概念拆分：只对概念抽取节点显示。
+              之前这个能力只有对话和接口能触发，界面上找不到入口 ——
+              用户只能手工建卡，结果每张卡内容都一样（真实报障）。
+            */}
+            {nodeType === 'EXTRACT' && onSplitCards && (
+              <Item
+                label="按概念拆成知识卡"
+                testId="menu-split-cards"
+                onClick={() => { onSplitCards(menu.nodeId!); onClose() }}
+              />
+            )}
             <Item label="重命名" onClick={() => { onRename(menu.nodeId!); onClose() }} />
             <Item label="复制节点" onClick={() => { onDuplicate(menu.nodeId!); onClose() }} />
             <Divider />
@@ -153,10 +171,23 @@ export function ContextMenu({
   )
 }
 
-function Item({ label, onClick, danger, disabled }: { label: string; onClick: () => void; danger?: boolean; disabled?: boolean }) {
+function Item({
+  label,
+  onClick,
+  danger,
+  disabled,
+  testId,
+}: {
+  label: string
+  onClick: () => void
+  danger?: boolean
+  disabled?: boolean
+  testId?: string
+}) {
   return (
     <button
       type="button"
+      data-testid={testId}
       disabled={disabled}
       onClick={onClick}
       style={{
