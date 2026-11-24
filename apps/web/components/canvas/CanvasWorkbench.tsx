@@ -213,7 +213,7 @@ function Inner({
       return added.length > 0 ? [...current, ...added] : current
     })
   }, [initialEdges, setEdges])
-  const [groups, setGroups] = useState<WorkbenchGroup[]>(initialGroups)
+  const [groups, setGroups] = useState<(WorkbenchGroup & { measured?: FlowNode['measured'] })[]>(initialGroups)
   const [menu, setMenu] = useState<MenuContext | null>(null)
   /** 当前打开对话的节点（每个节点自己就是一个会话） */
   const [chatTarget, setChatTarget] = useState<{ id: string; title: string; type: string } | null>(null)
@@ -308,6 +308,8 @@ function Inner({
         return {
           id: groupNodeId(group.id),
           type: 'sgGroup',
+          measured: group.measured,
+          style: collapsed.has(group.id) ? undefined : { pointerEvents: 'none' },
           position: anchor,
           draggable: true,
           selectable: true,
@@ -1223,6 +1225,12 @@ function Inner({
              * 顺序反了会看到卡片早早出现、节点还在往它里面飞。
              */
             setCollapsed((current) => new Set(current).add(group.id))
+            /**
+             * 尺寸从"虚线框"变成"折叠卡片"，之前记下的 measured 已经不适用。
+             * 不清掉的话，画布会继续用旧宽高做连线锚点与包围盒计算，
+             * 收起后的卡片会偏到框原来的右边缘去。清空后由画布重新测量。
+             */
+            setGroups((current) => current.map((item) => (item.id === group.id ? { ...item, measured: undefined } : item)))
             setAnimating(null)
             return
           }
@@ -1254,6 +1262,8 @@ function Inner({
         next.delete(group.id)
         return next
       })
+      // 从"折叠卡片"变回"虚线框"：旧的 measured 是卡片尺寸，必须清掉重新测量
+      setGroups((current) => current.map((item) => (item.id === group.id ? { ...item, measured: undefined } : item)))
       setAnimating({ groupId: group.id, to: 'expanded' })
 
       const start = stackTargets({ x: group.posX, y: group.posY }, memberIds.length)
@@ -1455,7 +1465,30 @@ function Inner({
             ]}
             edges={edges}
             nodeTypes={nodeTypes}
-            onNodesChange={onNodesChange}
+            onNodesChange={(changes) => {
+              // 组节点从 groups 派生，尺寸若只写入普通 nodes，下次渲染就会重新变为 hidden。
+              const sizes = new Map<string, FlowNode['measured']>()
+              for (const change of changes) {
+                if (change.type === 'dimensions' && change.dimensions && isGroupNodeId(change.id)) {
+                  sizes.set(change.id.slice(GROUP_ID_PREFIX.length), change.dimensions)
+                }
+              }
+              if (sizes.size) {
+                setGroups((current) => {
+                  let changed = false
+                  const next = current.map((group) => {
+                    const size = sizes.get(group.id)
+                    if (!size) return group
+                    // 值没变就别产生新对象：否则 setGroups → 重渲染 → 又触发一次测量，来回打转
+                    if (group.measured?.width === size.width && group.measured?.height === size.height) return group
+                    changed = true
+                    return { ...group, measured: size }
+                  })
+                  return changed ? next : current
+                })
+              }
+              onNodesChange(changes)
+            }}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
             /**
