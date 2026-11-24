@@ -85,6 +85,29 @@ export function registerGroupRoutes(app: FastifyInstance, deps: GroupRouteDeps):
    * 起一个 6 字的名字，把 2 万字塞进上下文既慢又贵，还会让模型跑偏。
    * 失败不影响使用：返回 ok:false，界面保留原来的名字让用户自己改。
    */
+  /**
+   * 重命名分组（用户 2026-11-24 要求：分组右键可重命名）。
+   *
+   * 只改 title：成员、位置、颜色都由其它接口管，混在一起会让一次改名
+   * 意外清掉别的东西。
+   */
+  app.patch('/v1/groups/:id', { preHandler: guard('CANVAS_WRITE') }, async (request) => {
+    const auth = getAuth(request)
+    const { id } = request.params as { id: string }
+    const body = parse(z.object({ title: z.string().trim().min(1).max(120) }), request.body)
+
+    const group = await prisma.nodeGroup.findUnique({ where: { id }, select: { canvasId: true } })
+    if (!group) throw new AppError(404, 'GROUP_NOT_FOUND', '分组不存在')
+    await requireCanvasWrite(prisma, group.canvasId, auth.user.id)
+
+    const updated = await prisma.nodeGroup.update({
+      where: { id },
+      data: { title: body.title },
+      select: { id: true, title: true },
+    })
+    return updated
+  })
+
   app.post('/v1/groups/:id/auto-name', { preHandler: guard('CANVAS_WRITE') }, async (request) => {
     const auth = getAuth(request)
     const { id } = request.params as { id: string }

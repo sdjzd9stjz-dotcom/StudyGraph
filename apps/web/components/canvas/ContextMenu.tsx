@@ -48,6 +48,8 @@ export function ContextMenu({
   onPackGroup,
   onSplitCards,
   nodeType,
+  onRunSelected,
+  onDeleteSelected,
 }: {
   menu: MenuContext
   onClose: () => void
@@ -64,6 +66,10 @@ export function ContextMenu({
   onSplitCards?: (nodeId: string) => void
   /** 右键点中的节点类型：决定菜单里显示哪些专属项 */
   nodeType?: string | null
+  /** 多选时整批运行（按依赖顺序，上游先跑） */
+  onRunSelected?: (ids: string[]) => void
+  /** 多选时整批删除 */
+  onDeleteSelected?: (ids: string[]) => void
 }) {
   const [subOpen, setSubOpen] = useState(false)
 
@@ -107,6 +113,22 @@ export function ContextMenu({
             <Item label="复制节点" onClick={() => { onDuplicate(menu.nodeId!); onClose() }} />
             <Divider />
             {selectedIds.length >= 2 && <Item label={`打包这 ${selectedIds.length} 个节点为上下文`} onClick={() => { onPackGroup(); onClose() }} />}
+            {/* 多选时：整批操作（用户 2026-11-24 要求） */}
+            {selectedIds.length >= 2 && onRunSelected && (
+              <Item
+                label={`按依赖顺序运行这 ${selectedIds.length} 个节点`}
+                testId="menu-run-selected"
+                onClick={() => { onRunSelected(selectedIds); onClose() }}
+              />
+            )}
+            {selectedIds.length >= 2 && onDeleteSelected && (
+              <Item
+                label={`删除选中的 ${selectedIds.length} 个节点`}
+                testId="menu-delete-selected"
+                danger
+                onClick={() => { onDeleteSelected(selectedIds); onClose() }}
+              />
+            )}
             <Item label="删除" danger onClick={() => { onDelete(menu.nodeId!); onClose() }} />
           </>
         ) : (
@@ -175,6 +197,21 @@ export function ContextMenu({
 
             <Divider />
             {selectedIds.length >= 2 && <Item label={`打包选中的 ${selectedIds.length} 个节点`} onClick={() => { onPackGroup(); onClose() }} />}
+            {selectedIds.length >= 2 && onRunSelected && (
+              <Item
+                label={`按依赖顺序运行这 ${selectedIds.length} 个节点`}
+                testId="menu-run-selected"
+                onClick={() => { onRunSelected(selectedIds); onClose() }}
+              />
+            )}
+            {selectedIds.length >= 2 && onDeleteSelected && (
+              <Item
+                label={`删除选中的 ${selectedIds.length} 个节点`}
+                testId="menu-delete-selected"
+                danger
+                onClick={() => { onDeleteSelected(selectedIds); onClose() }}
+              />
+            )}
             <Item label="粘贴" disabled onClick={() => {}} />
           </>
         )}
