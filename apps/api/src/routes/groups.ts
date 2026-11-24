@@ -264,6 +264,41 @@ export function registerGroupRoutes(app: FastifyInstance, deps: GroupRouteDeps):
     }
   })
 
+  /**
+   * 把一个节点并进已有的组（用户 2026-11-24 报「反向连线无法连接」）。
+   *
+   * 反向拖线（节点输出口 → 组的入点）在画布上表达的是"这个节点归到这组里"，
+   * 不是"把它当上游喂给组"——组不执行，没有输入这个概念。
+   * 语义明确后两端才好实现，也避免一边建组引用、一边建成员导致同一手势两种后果。
+   *
+   * 幂等：已在组里就直接返回，不报 409 —— 拖线误触很常见，没必要弹错。
+   */
+  app.post('/v1/groups/:id/members', { preHandler: guard('CANVAS_WRITE') }, async (request, reply) => {
+    const auth = getAuth(request)
+    const { id } = request.params as { id: string }
+    const body = parse(linkBody, request.body)
+
+    const group = await prisma.nodeGroup.findUnique({
+      where: { id },
+      select: { canvasId: true, members: { select: { nodeId: true } } },
+    })
+    if (!group) throw new AppError(404, 'GROUP_NOT_FOUND', '分组不存在')
+    await requireCanvasWrite(prisma, group.canvasId, auth.user.id)
+
+    if (group.members.some((member) => member.nodeId === body.nodeId)) {
+      return reply.status(200).send({ groupId: id, nodeId: body.nodeId, added: false })
+    }
+
+    const node = await prisma.node.findFirst({
+      where: { id: body.nodeId, canvasId: group.canvasId },
+      select: { id: true, title: true, type: true },
+    })
+    if (!node) throw new AppError(400, 'NODE_NOT_IN_CANVAS', '目标节点不在本画布')
+
+    await prisma.nodeGroupMember.create({ data: { groupId: id, nodeId: body.nodeId } })
+    return reply.status(201).send({ groupId: id, nodeId: body.nodeId, added: true, node: { id: node.id, title: node.title, type: node.type } })
+  })
+
   /** 把一个组当作另一个节点的上下文。 */
   app.post('/v1/groups/:id/link', { preHandler: guard('CANVAS_WRITE') }, async (request, reply) => {
     const auth = getAuth(request)

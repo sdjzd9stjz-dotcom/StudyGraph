@@ -331,6 +331,14 @@ function Inner({
            */
           width: isCollapsed ? 208 : size.width,
           height: isCollapsed ? 64 : size.height,
+          /**
+           * 展开态：节点外层不收鼠标事件。
+           *
+           * 必须这样 —— 组节点在 DOM 里排在成员后面、盖在它们上面，
+           * 外层一旦可点，框内所有成员的点击都会被它吃掉。
+           * 端口和左上角标题条各自写 `pointerEvents: 'auto'`，
+           * CSS 允许子元素在 none 的父元素里恢复命中，所以它们仍然可拖。
+           */
           style: isCollapsed ? undefined : { pointerEvents: 'none' },
           position: anchor,
           draggable: true,
@@ -360,17 +368,66 @@ function Inner({
             connectHighlight: (() => {
               if (!connectDraft) return null
               if (connectDraft.originNodeId === groupNodeId(group.id)) return 'origin'
-              // 组的唯一用途是当上游给别人喂上下文：只有"往组里拖"才可能接上
-              return connectDraft.originHandleType === 'target' &&
-                canLinkGroupTo(connectDraft.fromType ?? '')
-                ? 'compatible'
-                : 'incompatible'
+              /**
+               * 两个方向都算"能接"：
+               *   · 组出点 → 节点输入口：组当上游（只有四类节点收）
+               *   · 节点输出口 → 组入点：把这个节点并进组（任何节点都行）
+               * 之前只认后者的一半，从普通节点拖出来时整块框被压暗，
+               * 看起来就是"连不上"（用户 2026-11-24 报的）。
+               */
+              if (connectDraft.originHandleType === 'target') {
+                return canLinkGroupTo(connectDraft.fromType ?? '') ? 'compatible' : 'incompatible'
+              }
+              return 'compatible'
             })(),
           } satisfies SgGroupData,
         }
       }),
     [groups, collapsed, nodes, connectDraft],
   )
+  /**
+   * 组 → 节点的连线**显示**。
+   *
+   * 这层关系在库里是 NodeGroupLink（不是 Edge），之前画布上什么都不画，
+   * 用户拖完看不到线，会以为"没连上"（2026-11-24 反馈）。
+   *
+   * 这些是**纯展示**的边：不落库、不能删、不进 onEdgesChange ——
+   * 真正的增删走 /v1/groups/:id/link。由 `groups` 派生而不是塞进 edges state，
+   * 所以收/展开组、刷新画布都不会影响它，状态永远跟着分组数据走。
+   *
+   * 目标端口取该节点第一个非外部输入口：组给的是"整批摘要"，
+   * 落到主输入口就是执行器真正读 upstreamContext 的地方。
+   */
+  const groupLinkEdges = useMemo<FlowEdge[]>(
+    () =>
+      groups.flatMap((group) =>
+        group.usedBy.flatMap((nodeId) => {
+          const target = nodes.find((node) => node.id === nodeId)
+          const nodeType = target?.data?.nodeType as NodeType | undefined
+          const port = nodeType
+            ? (NODE_PORTS[nodeType]?.inputs ?? []).find((item) => !item.external)
+            : undefined
+          if (!port) return []
+          return [
+            {
+              id: `glink__${group.id}__${nodeId}`,
+              source: groupNodeId(group.id),
+              sourceHandle: 'group-out',
+              target: nodeId,
+              targetHandle: port.name,
+              type: 'smoothstep',
+              style: { stroke: group.color, strokeDasharray: '6 4', strokeWidth: 1.6 },
+              animated: false,
+              deletable: false,
+              selectable: false,
+              focusable: false,
+            } satisfies FlowEdge,
+          ]
+        }),
+      ),
+    [groups, nodes],
+  )
+
   /**
    * 收起前每个成员的位置。
    *
@@ -1031,62 +1088,6 @@ function Inner({
   )
 
   // ── 连线 ────────────────────────────────────────────────────────────────
-  const onConnect = useCallback(
-    async (connection: Connection) => {
-      /**
-       * 从组节点拖出来的线：不建 Edge，而是建 NodeGroupLink。
-       * 组不是 Node，Edge 的外键接不上（服务端会 400），
-       * 语义上也不同：组给下游的是"全部成员产物的合并上下文"。
-       */
-      if (isGroupNodeId(connection.source)) {
-        const groupId = connection.source.slice(GROUP_ID_PREFIX.length)
-        if (isGroupNodeId(connection.target)) {
-          notify('组之间不能直接连线')
-          return
-        }
-        await linkGroupTo(groupId, connection.target)
-        return
-      }
-      if (isGroupNodeId(connection.target)) {
-        notify('组只能作为上游（从组右侧的点拖到节点上）')
-        return
-      }
-      /**
-       * 单入口容错。
-       *
-       * 有的节点只有一个输入口（如 REVIEW），用户从卡片拖过去时如果端口类型不完全匹配，
-       * ReactFlow 仍然会画出这条线，但服务端 400 拒绝 —— 结果是**图上有线、库里没有**，
-       * 之后的删除、运行、连线都对着一个不存在的关系操作，看起来就是"节点存在但提示不存在"。
-       * 这里不猜类型，只做一件事：单入口节点隐式使用它唯一的那个口，让连线真实落地或明确失败。
-       */
-      const targetType = nodes.find((node) => node.id === connection.target)?.data?.nodeType as NodeType | undefined
-      const targetPorts = targetType ? NODE_PORTS[targetType] : undefined
-      const targetHandle =
-        connection.targetHandle ??
-        (targetPorts && targetPorts.inputs.length === 1 ? targetPorts.inputs[0]!.name : undefined)
-      const sourceType = nodes.find((node) => node.id === connection.source)?.data?.nodeType as NodeType | undefined
-      const sourcePorts = sourceType ? NODE_PORTS[sourceType] : undefined
-      const sourceHandle =
-        connection.sourceHandle ??
-        (sourcePorts && sourcePorts.outputs.length === 1 ? sourcePorts.outputs[0]!.name : undefined)
-
-      const response = await fetch(`${apiBaseUrl}/v1/canvases/${canvasId}/edges`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ fromNodeId: connection.source, toNodeId: connection.target, fromPort: sourceHandle, toPort: targetHandle }),
-      })
-      const payload = (await response.json().catch(() => null)) as { id?: string; error?: { message?: string; code?: string } } | null
-      if (!response.ok) {
-        notify(`连线被拒：${payload?.error?.message ?? response.status}`)
-        return
-      }
-      setEdges((current) =>
-        addEdge({ id: String(payload?.id), source: connection.source, target: connection.target, sourceHandle: connection.sourceHandle ?? undefined, targetHandle: connection.targetHandle ?? undefined }, current),
-      )
-    },
-    [apiBaseUrl, canvasId, notify, setEdges, token],
-  )
-
   // ── 分组 ────────────────────────────────────────────────────────────────
   /**
    * 打包成上下文组。
@@ -1317,7 +1318,16 @@ function Inner({
        * 这样动画是"从那一叠里散开"，而不是"凭空出现"。
        */
       const saved = memberOrigins.current.get(group.id)
-      const restored = restoreTargets(saved, memberIds, { x: group.posX, y: group.posY })
+      /**
+       * 重进画布后内存快照是空的（用户 2026-11-24 报「退出重进后组再次展开时相对位置无法保留」）。
+       * 但成员在库里的坐标就是收起前的位置 —— 收起只在本地移动、从不写库。
+       * 所以快照缺失时拿画布上的当前位置当第二优先，别退回网格。
+       */
+      const current: Record<string, { x: number; y: number }> = {}
+      for (const node of nodes) {
+        if (memberIds.includes(node.id)) current[node.id] = { x: node.position.x, y: node.position.y }
+      }
+      const restored = restoreTargets(saved, memberIds, { x: group.posX, y: group.posY }, current)
       const restoreById = new Map(restored.map((item) => [item.id, item.point]))
 
       setCollapsed((current) => {
@@ -1418,6 +1428,45 @@ function Inner({
   )
 
   /**
+   * 把一个节点并进已有的组（组左侧入点被拖到时调用）。
+   *
+   * 与 linkGroupTo 是两件事：那个是"组 → 下游"，这个是"节点 → 组"。
+   * 接口幂等，重复拖同一个节点不会报错。
+   */
+  const addGroupMember = useCallback(
+    async (groupId: string, nodeId: string) => {
+      const response = await fetch(`${apiBaseUrl}/v1/groups/${groupId}/members`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ nodeId }),
+      })
+      const payload = (await response.json().catch(() => null)) as
+        | { added?: boolean; error?: { message?: string } }
+        | null
+      if (!response.ok) {
+        notify(payload?.error?.message ?? `加不进这一组：${response.status}`)
+        return
+      }
+      const group = groups.find((item) => item.id === groupId)
+      const added = payload?.added !== false
+      setGroups((current) =>
+        current.map((item) =>
+          item.id === groupId && !item.memberIds.includes(nodeId)
+            ? { ...item, memberIds: [...item.memberIds, nodeId] }
+            : item,
+        ),
+      )
+      const title = String(nodes.find((node) => node.id === nodeId)?.data?.title ?? '节点')
+      notify(
+        added
+          ? `已把「${title}」并进「${group?.title ?? '分组'}」`
+          : `「${title}」已经在这个组里了`,
+      )
+    },
+    [apiBaseUrl, groups, headers, nodes, notify, token],
+  )
+
+  /**
    * 把分组连到一个下游节点（组的右侧输出点拖过去）。
    *
    * 这条关系写进 NodeGroupLink，而不是普通 Edge：
@@ -1447,6 +1496,71 @@ function Inner({
       notify(`已把分组接到「${String(target?.data?.title ?? nodeId)}」`)
     },
     [apiBaseUrl, headers, nodes, notify, token],
+  )
+
+  const onConnect = useCallback(
+    async (connection: Connection) => {
+      /**
+       * 从组节点拖出来的线：不建 Edge，而是建 NodeGroupLink。
+       * 组不是 Node，Edge 的外键接不上（服务端会 400），
+       * 语义上也不同：组给下游的是"全部成员产物的合并上下文"。
+       */
+      if (isGroupNodeId(connection.source)) {
+        const groupId = connection.source.slice(GROUP_ID_PREFIX.length)
+        if (isGroupNodeId(connection.target)) {
+          notify('组之间不能直接连线')
+          return
+        }
+        await linkGroupTo(groupId, connection.target)
+        return
+      }
+      /**
+       * 反向拖线：从**普通节点**的输出口拖到组的左侧入点。
+       *
+       * 语义是"把这个节点并进这一组"，不是"喂给组当上游"—— 组不执行，没有输入。
+       * 之前只给了组一个出点，React Flow 严格模式下没有目标口可吸附，
+       * 所以从别的节点拖过来永远连不上（用户 2026-11-24 报的正是这条）。
+       */
+      if (isGroupNodeId(connection.target)) {
+        const groupId = connection.target.slice(GROUP_ID_PREFIX.length)
+        if (!connection.source || isGroupNodeId(connection.source)) return
+        await addGroupMember(groupId, connection.source)
+        return
+      }
+      /**
+       * 单入口容错。
+       *
+       * 有的节点只有一个输入口（如 REVIEW），用户从卡片拖过去时如果端口类型不完全匹配，
+       * ReactFlow 仍然会画出这条线，但服务端 400 拒绝 —— 结果是**图上有线、库里没有**，
+       * 之后的删除、运行、连线都对着一个不存在的关系操作，看起来就是"节点存在但提示不存在"。
+       * 这里不猜类型，只做一件事：单入口节点隐式使用它唯一的那个口，让连线真实落地或明确失败。
+       */
+      const targetType = nodes.find((node) => node.id === connection.target)?.data?.nodeType as NodeType | undefined
+      const targetPorts = targetType ? NODE_PORTS[targetType] : undefined
+      const targetHandle =
+        connection.targetHandle ??
+        (targetPorts && targetPorts.inputs.length === 1 ? targetPorts.inputs[0]!.name : undefined)
+      const sourceType = nodes.find((node) => node.id === connection.source)?.data?.nodeType as NodeType | undefined
+      const sourcePorts = sourceType ? NODE_PORTS[sourceType] : undefined
+      const sourceHandle =
+        connection.sourceHandle ??
+        (sourcePorts && sourcePorts.outputs.length === 1 ? sourcePorts.outputs[0]!.name : undefined)
+
+      const response = await fetch(`${apiBaseUrl}/v1/canvases/${canvasId}/edges`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ fromNodeId: connection.source, toNodeId: connection.target, fromPort: sourceHandle, toPort: targetHandle }),
+      })
+      const payload = (await response.json().catch(() => null)) as { id?: string; error?: { message?: string; code?: string } } | null
+      if (!response.ok) {
+        notify(`连线被拒：${payload?.error?.message ?? response.status}`)
+        return
+      }
+      setEdges((current) =>
+        addEdge({ id: String(payload?.id), source: connection.source, target: connection.target, sourceHandle: connection.sourceHandle ?? undefined, targetHandle: connection.targetHandle ?? undefined }, current),
+      )
+    },
+    [apiBaseUrl, canvasId, addGroupMember, linkGroupTo, nodes, notify, setEdges, token],
   )
 
   return (
@@ -1532,7 +1646,7 @@ function Inner({
               ...nodesWithHandlers.filter((node) => !hiddenNodeIds.has(node.id)),
               ...groupNodes,
             ]}
-            edges={edges}
+            edges={[...edges, ...groupLinkEdges]}
             nodeTypes={nodeTypes}
             onNodesChange={(changes) => {
               // 组节点从 groups 派生，尺寸若只写入普通 nodes，下次渲染就会重新变为 hidden。
@@ -1558,7 +1672,17 @@ function Inner({
               }
               onNodesChange(changes)
             }}
-            onEdgesChange={onEdgesChange}
+            /**
+             * 组连线的选中/删除变化一律丢掉（用户 2026-11-24：「展开和收起后不要影响连线状态」）。
+             * 组 → 节点那些虚线边是纯展示的（id 前缀 glink__），不在 edges state 里，
+             * 放它们进 onEdgesChange 只会让画布对一条不存在的关系做增删。
+             */
+            onEdgesChange={(changes) =>
+              onEdgesChange(
+                // EdgeChange 是联合类型：只有"改编/删/选中"这类既有边的变化带 id，新增边没有
+                changes.filter((change) => !('id' in change && String(change.id).startsWith('glink__'))),
+              )
+            }
             onConnect={onConnect}
             /**
              * 端口拖到空白处松手 → 列出能接上的节点（ComfyUI 的另一核心效率来源）。

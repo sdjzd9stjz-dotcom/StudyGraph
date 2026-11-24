@@ -101,16 +101,24 @@ export function buildFrames(
 /**
  * 展开时成员应该回到哪。
  *
- * 有快照（收起时记下的原坐标）就用快照；没有（比如刷新过页面）
- * 退回网格排布，并且只动这一组的成员。
+ * 优先级（用户 2026-11-24 报「重进画布再展开，相对位置没了」）：
+ *   1. `saved`：本次会话收起时记下的坐标 —— 最准
+ *   2. `current`：画布上成员**现在**的位置。重进画布后内存快照是空的，
+ *      但成员在库里存的就是收起前的坐标（收起只在本地移动、从不写库），
+ *      所以这里拿到的就是原来的摆位。
+ *   3. 网格：连当前位置都没有（成员刚被外部删除等），只能兜底。
+ *
+ * 第 2 步是关键：之前缺了它，重进后只能退回网格，
+ * 用户精心摆的链被重新排成三列，看起来就是"相对位置没保留"。
  */
 export function restoreTargets(
   saved: Record<string, Point> | undefined,
   memberIds: readonly string[],
   fallbackOrigin: Point,
+  current?: Record<string, Point>,
 ): Array<{ id: string; point: Point }> {
   return memberIds.map((id, index) => {
-    const known = saved?.[id]
+    const known = saved?.[id] ?? current?.[id]
     if (known) return { id, point: { ...known } }
     return {
       id,

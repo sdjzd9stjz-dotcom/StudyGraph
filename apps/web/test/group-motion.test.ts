@@ -73,11 +73,28 @@ test('展开：有快照就回到收起前的位置（关键需求）', () => {
 })
 
 test('展开：没有快照（刷新过页面）时退回网格，且只排这一组的成员', () => {
+  // 只有"连当前位置都拿不到"时才走到网格 —— 这是最后兜底，不是常规路径
   const restored = restoreTargets(undefined, ['a', 'b', 'c', 'd'], { x: 100, y: 100 })
   // 每行 3 个：第 4 个换行
   assert.equal(restored[0]!.point.y, restored[2]!.point.y)
   assert.ok(restored[3]!.point.y > restored[0]!.point.y, '第 4 个节点必须换行')
   assert.ok(restored[0]!.point.x > 100, '起点要避开组标题条')
+})
+
+test('展开：刷新后没有内存快照，用成员当前坐标还原（用户报"重进后相对位置没了"）', () => {
+  const current = { a: { x: 12, y: 34 }, b: { x: 900, y: 120 } }
+  const restored = restoreTargets(undefined, ['a', 'b'], { x: 0, y: 0 }, current)
+  assert.deepEqual(restored, [
+    { id: 'a', point: { x: 12, y: 34 } },
+    { id: 'b', point: { x: 900, y: 120 } },
+  ])
+})
+
+test('展开：内存快照优先于当前坐标（同一会话里收起后又拖动过组）', () => {
+  const saved = { a: { x: 1, y: 2 } }
+  const current = { a: { x: 300, y: 400 } }
+  const restored = restoreTargets(saved, ['a'], { x: 0, y: 0 }, current)
+  assert.deepEqual(restored[0], { id: 'a', point: { x: 1, y: 2 } })
 })
 
 test('展开：部分有快照时，缺的用网格补，不会整体错乱', () => {

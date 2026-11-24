@@ -85,6 +85,18 @@ export function SgGroupNode({ data }: NodeProps) {
           作为上下文：{d.memberCount} 个节点的产物
           {d.usedBy > 0 ? ` · 已被 ${d.usedBy} 个节点引用` : ''}
         </div>
+        {/*
+          入点（用户 2026-11-24 报「从其它节点反向连线时无自动吸附，同时无法连接」）。
+          React Flow 默认严格模式只允许"源 → 目标"，组之前只有出点，
+          所以别的节点拖过来永远找不到落点 —— 不是拖不准，是根本没有可吸附的点。
+        */}
+        <Handle
+          id="group-in"
+          type="target"
+          position={Position.Left}
+          title="把一个节点拖到这里：把它并进这一组"
+          style={{ ...handleStyle(color), left: -7, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'auto' }}
+        />
         {/* 收起态也有出点：用户明确指出之前这里没有 */}
         <Handle
           id="group-out"
@@ -161,13 +173,24 @@ export function SgGroupNode({ data }: NodeProps) {
         <Header d={d} color={color} />
       </div>
 
+      {/*
+        入点：贴在框的左侧边上，和出点同一高度。
+        节点输出口拖到它上面 = 把那个节点并进这一组（用户 2026-11-24 要求反向连接）。
+      */}
+      <Handle
+        id="group-in"
+        type="target"
+        position={Position.Left}
+        title="把一个节点拖到这里：把它并进这一组"
+        style={{ ...handleStyle(color), pointerEvents: 'auto', left: -8, top: 40 }}
+      />
       {/* 出点：贴在框的右侧边上 */}
       <Handle
         id="group-out"
         type="source"
         position={Position.Right}
         title="拖到下游节点上：把这一组当作上下文"
-        style={{ ...handleStyle(color), pointerEvents: 'auto', right: -8, top: 22 }}
+        style={{ ...handleStyle(color), pointerEvents: 'auto', right: -8, top: 40 }}
       />
     </div>
   )
