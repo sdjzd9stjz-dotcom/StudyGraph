@@ -1,6 +1,6 @@
 # StudyGraph
 
-<video src="https://github.com/user-attachments/assets/eb32aac2-2529-4190-a0ff-404f53d9d2c4" controls width="100%"></video>
+https://github.com/user-attachments/assets/eb32aac2-2529-4190-a0ff-404f53d9d2c4
 
 面向大学生的**节点式 AI 学习平台**。把课堂材料拖进画布，用节点连线完成
 `原料 → 理解 → 结构化 → 解题方法建模 → 训练 → 出题与组卷 → 复习`，
