@@ -166,3 +166,8 @@ PostgreSQL 16 + pgvector · Electron 33 · pdfjs-dist · tesseract.js（本机 O
 
 不直连厂商 API（所有调用经 Gateway 收口）、不上 Neo4j、不用 OT —— 理由见
 [docs/architecture.md §5](docs/architecture.md)。
+
+## 贡献者
+
+- [sdjzd9stjz-dotcom](https://github.com/sdjzd9stjz-dotcom)
+- [Hgiiii-w](https://github.com/Hgiiii-w)

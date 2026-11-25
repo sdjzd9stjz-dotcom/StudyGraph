@@ -35,3 +35,7 @@ apps/api/tsconfig.build.json
 
 # 内置 PostgreSQL 运行时（约 70MB，由 scripts/prepare-pg-runtime.mjs 生成，不入库）
 vendor/
+
+# 本地宣传片补录素材
+/视频素材/StudyGraph-0.25.5-宣传片补录/
+/视频素材/StudyGraph-0.25.5-宣传片补录.zip
