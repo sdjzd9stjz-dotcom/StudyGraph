@@ -315,6 +315,8 @@ enum PaperStatus {
 // =============================================================================
 
 model User {
+  assistantThreads CanvasAssistantThread[]
+  canvasEdits CanvasEdit[]
   id          String   @id @default(cuid())
   email       String   @unique
   displayName String
@@ -377,6 +379,8 @@ model OAuthClient {
 // =============================================================================
 
 model Canvas {
+  assistantThreads CanvasAssistantThread[]
+  editHistory CanvasEdit[]
   id            String           @id @default(cuid())
   ownerId       String
   owner         User             @relation("CanvasOwner", fields: [ownerId], references: [id], onDelete: Cascade)
@@ -417,6 +421,31 @@ model Canvas {
 
   @@index([ownerId])
   @@index([visibility, isTemplate])
+}
+
+model CanvasAssistantThread {
+  canvasId String
+  userId String
+  revision Int @default(1)
+  messages Json
+  canvas Canvas @relation(fields: [canvasId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([canvasId, userId])
+}
+
+model CanvasEdit {
+  seq      BigInt  @id @default(autoincrement())
+  canvasId String
+  canvas   Canvas  @relation(fields: [canvasId], references: [id], onDelete: Cascade)
+  userId   String
+  user     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  undone   Boolean @default(false)
+  label    String
+  targets  Json
+  snapshot Json
+
+  @@index([canvasId, userId, seq], map: "CanvasEdit_stack_idx")
 }
 
 model CanvasMember {

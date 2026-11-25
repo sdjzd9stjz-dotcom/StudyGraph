@@ -60,6 +60,7 @@ function registerNodeChat(app: FastifyInstance, deps: AssistantRouteDeps): void 
     const body = parse(
       z.object({
         message: z.string().trim().min(1).max(2000),
+        turnId: z.string().uuid().optional(),
         history: z
           .array(z.object({ role: z.enum(['user', 'assistant']), text: z.string().max(4000) }))
           .max(20)
@@ -82,7 +83,16 @@ function registerNodeChat(app: FastifyInstance, deps: AssistantRouteDeps): void 
      * 历史一律从库里取，不再信任客户端回传的 history —— 客户端有、服务端没有的话，
      * 同一条对话在"节点里"和"下游提示词里"会长得不一样。
      */
-    await prisma.nodeMessage.create({ data: { nodeId: id, role: 'user', content: body.message } })
+    const turn = body.turnId && `${id}:${auth.user.id}:${body.turnId}`
+    if (turn) {
+      const inserted = await prisma.nodeMessage.createMany({data:[{id:turn+':u',nodeId:id,role:'user',content:body.message}],skipDuplicates:true})
+      if (!inserted.count) {
+        const answer = await prisma.nodeMessage.findUnique({where:{id:turn+':a'}})
+        if (answer) return {reply:answer.content}
+        throw new AppError(409,'CONFLICT','提问已保存，尚未收到回复。不会重复调用模型。')
+      }
+    } else await prisma.nodeMessage.create({ data: { nodeId: id, role: 'user', content: body.message } })
+    const saveAnswer = (content:string) => prisma.nodeMessage.create({data:{id:turn ? turn+':a' : undefined,nodeId:id,role:'assistant',content}})
     const recent = await prisma.nodeMessage.findMany({
       where: { nodeId: id },
       orderBy: { createdAt: 'desc' },
@@ -102,7 +112,7 @@ function registerNodeChat(app: FastifyInstance, deps: AssistantRouteDeps): void 
 
     if (!artifact) {
       const replyText = `「${label}」这个节点还没跑过，没有内容可以讨论。先点节点上的 ▶ 跑一次，我就能就它的结果和你聊。`
-      await prisma.nodeMessage.create({ data: { nodeId: id, role: 'assistant', content: replyText } })
+      await saveAnswer(replyText)
       return reply.status(200).send({
         reply: replyText,
         output: null,
@@ -147,7 +157,7 @@ function registerNodeChat(app: FastifyInstance, deps: AssistantRouteDeps): void 
       const payload = result.data as { reply?: string; text?: string; thinking?: string } | undefined
       const text = payload?.reply ?? payload?.text
       const replyText = typeof text === 'string' && text.trim().length > 0 ? text : '模型没有返回内容，换个问法再试一次。'
-      await prisma.nodeMessage.create({ data: { nodeId: id, role: 'assistant', content: replyText } })
+      await saveAnswer(replyText)
       return reply.status(200).send({
         reply: replyText,
         output: card,
@@ -162,7 +172,7 @@ function registerNodeChat(app: FastifyInstance, deps: AssistantRouteDeps): void 
         '这个节点的产出是：\n' +
         card.slice(0, 1200) +
         '\n\n配好模型密钥后，我可以据此解释、追问、指出矛盾。'
-      await prisma.nodeMessage.create({ data: { nodeId: id, role: 'assistant', content: replyText } })
+      await saveAnswer(replyText)
       return reply.status(200).send({
         reply: replyText,
         output: card,
@@ -177,6 +187,29 @@ export function registerAssistantRoutes(app: FastifyInstance, deps: AssistantRou
 
   registerNodeChat(app, deps)
 
+  const threadPath = '/v1/canvases/:canvasId/assistant/thread'
+  app.get(threadPath, { preHandler: guard('CANVAS_READ') }, async request => {
+    const { canvasId } = request.params as { canvasId: string }
+    const userId = getAuth(request).user.id
+    await requireCanvasWrite(prisma, canvasId, userId)
+    return await prisma.canvasAssistantThread.findUnique({ where: { canvasId_userId: { canvasId, userId } }, select: { revision: true, messages: true } }) ?? { revision: 0, messages: [] }
+  })
+  app.put(threadPath, { preHandler: guard('CANVAS_WRITE') }, async request => {
+    const { canvasId } = request.params as { canvasId: string }
+    const userId = getAuth(request).user.id
+    await requireCanvasWrite(prisma, canvasId, userId)
+    const { revision, messages, append } = parse(z.object({ revision: z.number().int().nonnegative(), append:z.boolean().default(false), messages: z.array(z.object({
+      id: z.string(), role: z.enum(['user', 'assistant']), text: z.string(), source: z.string().optional(), model: z.string().nullable().optional(),
+      changes: z.array(z.object({ kind: z.string(), id: z.string(), label: z.string() })).optional(),
+    })).max(40) }), request.body)
+    const prior = append && revision ? await prisma.canvasAssistantThread.findUnique({ where:{canvasId_userId:{canvasId,userId}}, select:{messages:true} }) : null
+    const history = Array.isArray(prior?.messages) ? [...prior.messages,...messages] : messages
+    const result = revision === 0 ? await prisma.canvasAssistantThread.createMany({ data: [{ canvasId, userId, messages:history }], skipDuplicates: true })
+      : await prisma.canvasAssistantThread.updateMany({ where: { canvasId, userId, revision }, data: { messages:history, revision: { increment: 1 } } })
+    if (!result.count) throw new AppError(409, 'CONFLICT', '另一窗口已修改这段对话，未覆盖其记录')
+    return { revision: revision + 1 }
+  })
+
   /**
    * 读节点对话。刷新页面、换机器之后，节点里的会话还在 ——
    * 它同时是下游节点的上下文来源，只存在浏览器里就不算"对话"。
@@ -190,11 +223,11 @@ export function registerAssistantRoutes(app: FastifyInstance, deps: AssistantRou
 
     const messages = await prisma.nodeMessage.findMany({
       where: { nodeId: id },
-      orderBy: { createdAt: 'asc' },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: 100,
       select: { id: true, role: true, content: true, createdAt: true },
     })
-    return { messages }
+    return { messages: messages.reverse() }
   })
 
   /**

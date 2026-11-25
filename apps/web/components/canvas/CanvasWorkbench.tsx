@@ -24,6 +24,7 @@ import { renderLectureHtml } from '../../lib/lecture-html'
 import { decideGate } from '../../lib/api'
 import { AssistantBar } from './AssistantBar'
 import { ContextMenu } from './ContextMenu'
+import { useCanvasEditing } from './use-canvas-editing'
 import type { MenuContext } from './ContextMenu'
 import { GroupCreateDialog } from './GroupCreateDialog'
 import { SgGroupNode } from './SgGroupNode'
@@ -34,10 +35,11 @@ import { NodeChat } from './NodeChat'
 import { NodeSearch } from './NodeSearch'
 import { Sidebar } from './Sidebar'
 import type { SkillView } from './Sidebar'
-import { buildFrames, frameBox, frameSize, restoreTargets, stackTargets } from '../../lib/group-motion'
+import { arrangeMembers, buildFrames, frameBox, stackTargets } from '../../lib/group-motion'
+import { LayoutWriter, type LayoutBatch } from '../../lib/layout-writer'
+import { useCanvasExit } from './use-canvas-exit'
 import { orderByDependency } from '../../lib/run-order'
 import { ConnectDraftContext } from './connect-draft'
-import { changedPositions } from '../../lib/save-state'
 import { selectionForContextMenu, toggleSelection } from '../../lib/selection'
 import { usePrompt } from '../ui/PromptDialog'
 
@@ -69,6 +71,7 @@ export interface WorkbenchNode {
 
 export interface WorkbenchEdge {
   id: string
+  kind?: string
   fromNodeId: string
   toNodeId: string
   fromPort: string
@@ -170,6 +173,7 @@ function Inner({
           data.status === updated.status &&
           data.outputSummary === updated.outputSummary &&
           data.title === updated.title &&
+          data.params === updated.params &&
           data.skills === updated.skills
         return same
           ? node
@@ -180,6 +184,7 @@ function Inner({
                 status: updated.status,
                 outputSummary: updated.outputSummary,
                 title: updated.title,
+                params: updated.params,
                 skills: updated.skills,
                 inputs: updated.inputs,
                 outputs: updated.outputs,
@@ -193,8 +198,8 @@ function Inner({
       return changed ? [...merged, ...added] : current
     })
   }, [initialNodes, skillsByNode, setNodes])
-  const [edges, setEdges, onEdgesChange] = useEdgesState<FlowEdge>(
-    initialEdges.map((edge) => ({ id: edge.id, source: edge.fromNodeId, target: edge.toNodeId, sourceHandle: edge.fromPort, targetHandle: edge.toPort })),
+  const [edges, setEdges] = useEdgesState<FlowEdge>(
+    initialEdges.map((edge) => ({ id: edge.id, source: edge.fromNodeId, target: edge.toNodeId, sourceHandle: edge.fromPort, targetHandle: edge.toPort, data: { kind: edge.kind } })),
   )
   /**
    * 连线也要跟着服务端更新。
@@ -210,6 +215,7 @@ function Inner({
       source: edge.fromNodeId,
       target: edge.toNodeId,
       sourceHandle: edge.fromPort,
+      data: { kind: edge.kind },
       targetHandle: edge.toPort,
     }))
     setEdges((current) => {
@@ -269,9 +275,7 @@ function Inner({
    * 收起状态从**服务端**初始化（用户报「重进画布打包组自动解包/虚线框消失」）。
    * 之前是空集合，每次进画布全部当展开；现在的真值在 NodeGroup.collapsed。
    */
-  const [collapsed, setCollapsed] = useState<Set<string>>(
-    () => new Set(initialGroups.filter((group) => group.collapsed).map((group) => group.id)),
-  )
+  const collapsed = useMemo(() => new Set(groups.filter(g => g.collapsed).map(g => g.id)), [groups])
   /** 分组右键菜单位置（组没有节点 id，单独一份状态） */
   const [groupMenu, setGroupMenu] = useState<{ groupId: string; x: number; y: number } | null>(null)
   /**
@@ -281,7 +285,9 @@ function Inner({
    * 这里让框先缩到最小、同时淡出，动画结束后才真正隐藏成员 ——
    * duration 必须和 style 里的 transition 一致，否则会出现"卡一下再跳"。
    */
-  const [animating, setAnimating] = useState<{ groupId: string; to: 'collapsed' | 'expanded' } | null>(null)
+  const [animation,setAnimation] = useState<{groupId:string; points:Map<string,{x:number;y:number}>} | null>(null)
+  const animationTimer = useRef<number>(), dragOrigin = useRef<{x:number;y:number}>()
+  useEffect(() => () => clearTimeout(animationTimer.current), [])
   /**
    * 建组对话框的草稿。
    *
@@ -315,7 +321,7 @@ function Inner({
         const anchor = { x: group.posX, y: group.posY }
         const memberPoints = nodes
           .filter((node) => group.memberIds.includes(node.id))
-          .map((node) => ({ x: node.position.x - anchor.x, y: node.position.y - anchor.y }))
+          .map((node) => ({ x: node.position.x - anchor.x, y: node.position.y - anchor.y, ...node.measured }))
         const box = frameBox(memberPoints)
         const size = { width: box.width, height: box.height }
 
@@ -335,6 +341,8 @@ function Inner({
            */
           width: isCollapsed ? 208 : size.width,
           height: isCollapsed ? 64 : size.height,
+          // 只有把实测尺寸传回去，React Flow 重新接收节点时才会保留已测出的端口位置。
+          measured: group.measured,
           /**
            * 展开态：节点外层不收鼠标事件。
            *
@@ -367,17 +375,10 @@ function Inner({
             onOpenMenu: (groupId: string, clientX: number, clientY: number) => {
               setGroupMenu({ groupId, x: clientX, y: clientY })
             },
-            /**
-             * 拖线高亮**不放在 data 里**（用户 2026-11-24：「右侧出点依然拉不出线」）。
-             *
-             * 放进 data 就得让 groupNodes 依赖 connectDraft，一按下出点整组节点被重建，
-             * React Flow 的端口量测随之作废 —— 按得下去、线却拉不出来。
-             * 改由 ConnectDraftContext 下发，组节点对象在此期间保持稳定。
-             */
           } satisfies SgGroupData,
         }
       }),
-    // 刻意不依赖 connectDraft：高亮走 context，拖线期间组节点必须保持同一批对象
+    // 高亮走 context，不需要为了切换颜色重新构造组节点。
     [groups, collapsed, nodes],
   )
   /**
@@ -386,8 +387,7 @@ function Inner({
    * 这层关系在库里是 NodeGroupLink（不是 Edge），之前画布上什么都不画，
    * 用户拖完看不到线，会以为"没连上"（2026-11-24 反馈）。
    *
-   * 这些是**纯展示**的边：不落库、不能删、不进 onEdgesChange ——
-   * 真正的增删走 /v1/groups/:id/link。由 `groups` 派生而不是塞进 edges state，
+   * 组线的增删走 /v1/groups/:id/link。由 `groups` 派生而不是塞进 edges state，
    * 所以收/展开组、刷新画布都不会影响它，状态永远跟着分组数据走。
    *
    * 目标端口取该节点第一个非外部输入口：组给的是"整批摘要"，
@@ -410,12 +410,9 @@ function Inner({
               sourceHandle: 'group-out',
               target: nodeId,
               targetHandle: port.name,
-              type: 'smoothstep',
+              type: 'default',
               style: { stroke: group.color, strokeDasharray: '6 4', strokeWidth: 1.6 },
               animated: false,
-              deletable: false,
-              selectable: false,
-              focusable: false,
             } satisfies FlowEdge,
           ]
         }),
@@ -423,19 +420,6 @@ function Inner({
     [groups, nodes],
   )
 
-  /**
-   * 收起前每个成员的位置。
-   *
-   * 用户明确要求：「展开要回到收起前的相对位置，而不是聚在一起」。
-   * 收起时把坐标存下来，展开时按它还原；刷新过页面就没有快照，退回网格排布。
-   */
-  const memberOrigins = useRef<Map<string, Record<string, { x: number; y: number }>>>(new Map())
-  /**
-   * toggleGroup 的引用。
-   *
-   * groupNodes 是本组件里靠前定义的 useMemo，而 toggleGroup 依赖 nodes/setNodes，
-   * 只能定义在后面。用 ref 转一层，避免把两段逻辑互相牵扯（也避免循环依赖）。
-   */
   const hiddenNodeIds = useMemo(() => {
     const ids = new Set<string>()
     for (const group of groups) {
@@ -445,6 +429,55 @@ function Inner({
     return ids
   }, [groups, collapsed])
   const wrapper = useRef<HTMLDivElement>(null)
+  useEffect(() => { if (document.activeElement === document.body) wrapper.current?.focus({ preventScroll: true }) }, [canvasId])
+  const syncCanvas = async () => {
+      const read = async (suffix: string) => {
+        const r = await fetch(`${apiBaseUrl}/v1/canvases/${canvasId}${suffix}`, { headers: { authorization: `Bearer ${token}` }, cache: 'no-store' })
+        if (!r.ok) throw Error(`HTTP ${r.status}`)
+        return r.json()
+      }
+      const [canvas, grouped] = await Promise.all([read(''), read('/groups')]) as [
+        { nodes: (WorkbenchNode & {skillNames: string[]})[]; edges: WorkbenchEdge[] }, { groups: WorkbenchGroup[] },
+      ]
+      for (const n of canvas.nodes) skillsByNode.set(n.id, n.skillNames)
+      setNodes(current => {
+        const measured = new Map(current.map(n => [n.id,n.measured]))
+        return canvas.nodes.map(n => ({...toFlowNode(n, skillsByNode), measured:measured.get(n.id)}))
+      })
+      setEdges(canvas.edges.map(e => ({ id: e.id, source: e.fromNodeId, target: e.toNodeId, sourceHandle: e.fromPort, targetHandle: e.toPort, data: { kind: e.kind } })))
+      setGroups(current => grouped.groups.map(g => ({ ...g, measured: current.find(it => it.id === g.id && it.collapsed === g.collapsed)?.measured })))
+      wrapper.current?.focus({ preventScroll: true })
+  }
+  const edgeEditor = useCanvasEditing({api:apiBaseUrl, canvasId, token, notify:message => notify(message), sync:syncCanvas, beforeEdit: () => writer.current.flush(write)})
+  const canvasEdges = useMemo(() => [...edges, ...groupLinkEdges].map(edge => ({
+    ...edge, selected: edgeEditor.selected.has(edge.id), interactionWidth: 24,
+  })), [edges, groupLinkEdges, edgeEditor.selected])
+  // 刷新、关闭菜单或按钮被禁用时焦点可能落回 body；不接管输入框或侧栏的撤销。
+  const editRef = useRef(edgeEditor.edit)
+  editRef.current = edgeEditor.edit
+  useEffect(() => {
+    const onBodyKey = (e: KeyboardEvent) => {
+      if (e.target !== document.body || dialog || packDraft || search || e.altKey || e.isComposing || !(e.ctrlKey || e.metaKey)) return
+      const key = e.key.toLowerCase()
+      if (key !== 'z' && key !== 'y') return
+      e.preventDefault(); if (!e.repeat) void editRef.current(key === 'y' || e.shiftKey ? 'redo' : 'undo')
+    }
+    document.addEventListener('keydown', onBodyKey)
+    return () => document.removeEventListener('keydown', onBodyKey)
+  }, [dialog, packDraft, search])
+  const visibleEdges = canvasEdges.filter(e => !hiddenNodeIds.has(e.source) && !hiddenNodeIds.has(e.target))
+  const pickedEdges = visibleEdges.filter(e => e.selected)
+  function lineTargets(lines: FlowEdge[]) {
+    return { edges: lines.filter(e => !isGroupNodeId(e.source)).map(e => e.id),
+      links: lines.filter(e => isGroupNodeId(e.source)).map(e => ({ groupId: e.source.slice(GROUP_ID_PREFIX.length), nodeId: e.target })) }
+  }
+  function openEdgeMenu(id: string, x: number, y: number) {
+    const edgeIds = selectionForContextMenu(pickedEdges.map(e => e.id), id)
+    edgeEditor.setSelected(new Set(edgeIds))
+    setNodes(current => current.map(n => n.selected ? { ...n, selected: false } : n))
+    setGroupMenu(null)
+    setMenu({ x: Math.max(0, Math.min(x, window.innerWidth - 200)), y: Math.max(0, Math.min(y, window.innerHeight - 50)), nodeId: null, selectedIds: [], edgeIds, flowX: 0, flowY: 0 })
+  }
   /**
    * 右键拖动画布时不要弹右键菜单。
    *
@@ -494,18 +527,7 @@ function Inner({
     }),
     [connectDraft],
   )
-  /**
-   * 组节点的端口量测。
-   *
-   * 用户 2026-11-24 报「右侧出点依然拉不出线」，在真实浏览器里复现出的差别是：
-   * 页面刚加载时能拖，拖一次之后就不行了。原因是 setConnectDraft 导致重渲染，
-   * 组节点是每帧重新构造的对象（不是来自 useNodesState 的稳定引用），
-   * React Flow 内部缓存的端口位置（handleBounds）随之作废；
-   * 尺寸没变，ResizeObserver 也不会再触发一次，于是出点拖出来算不出起点、画不出线。
-   *
-   * 这里在"组的形态变化"和"拖线高亮变化"之后主动要求重新测量一次。
-   * 放在 rAF 里是因为要等这一帧的 DOM 落定（宽高/端口都渲染出来）再量。
-   */
+  // 开合会改变端口相对框的位置，等新形态渲染后再测；后续重建节点靠 measured 保留端口。
   useEffect(() => {
     if (groupNodes.length === 0) return
     const handle = window.requestAnimationFrame(() => {
@@ -567,7 +589,7 @@ function Inner({
       // 点在节点上不要弹搜索（那是重命名/编辑的位置）。
       // 不用 classList.contains('react-flow__pane')：pane 内部还有 renderer / viewport 等
       // 子元素，事件目标是哪一个取决于点在哪儿，用"是否落在节点内"判断更稳。
-      if (target.closest('.react-flow__node')) return
+      if (target.closest('.react-flow__node, .react-flow__edge, button, input, textarea')) return
       const rect = element.getBoundingClientRect()
       const flow = screenToFlowPosition({ x: event.clientX, y: event.clientY })
       setSearch({
@@ -618,15 +640,9 @@ function Inner({
 
   const deleteNode = useCallback(
     async (nodeId: string) => {
-      const response = await fetch(`${apiBaseUrl}/v1/nodes/${nodeId}`, { method: 'DELETE', headers })
-      if (!response.ok && response.status !== 204) {
-        notify(`删除失败：${response.status}`)
-        return
-      }
-      setNodes((current) => current.filter((node) => node.id !== nodeId))
-      setEdges((current) => current.filter((edge) => edge.source !== nodeId && edge.target !== nodeId))
+      if (await confirm({ title: '删除节点', message: '节点和关联的连线将一起删除，可撤销。', danger: true, okText: '删除' })) await edgeEditor.edit('delete', { nodes: [nodeId] })
     },
-    [apiBaseUrl, notify, setEdges, setNodes, token],
+    [confirm, edgeEditor.edit],
   )
 
   const duplicateNode = useCallback(
@@ -752,19 +768,18 @@ function Inner({
 
   /** 批量删除选中的节点：删前确认，逐个走接口（服务端会连带删连线） */
   const deleteSelected = useCallback(
-    async (ids: string[]) => {
+    async (ids: string[], lines: FlowEdge[] = []) => {
       if (ids.length === 0) return
       const ok = await confirm({
         title: '删除节点',
-        message: `删除选中的 ${ids.length} 个节点？\n\n连在它们上面的线会一起消失，无法恢复。`,
+        message: `删除选中的 ${ids.length} 个节点${lines.length ? `和 ${lines.length} 条连线` : ''}？关联的连线也会一起删除，可整批撤销。`,
         okText: '删除',
         danger: true,
       })
       if (!ok) return
-      for (const nodeId of ids) await deleteNode(nodeId)
-      notify(`已删除 ${ids.length} 个节点`)
+      await edgeEditor.edit('delete', { nodes: ids, ...lineTargets(lines) })
     },
-    [confirm, deleteNode, notify],
+    [confirm, edgeEditor.edit],
   )
 
   /**
@@ -776,30 +791,21 @@ function Inner({
    * 保存后**不自动运行**（硬约束 2）：改参数会改变指纹，节点会失效，
    * 但什么时候花这笔钱由学生决定。
    */
-  const saveNodeParams = useCallback(
-    async (nodeId: string, params: Record<string, unknown>) => {
-      const response = await fetch(`${apiBaseUrl}/v1/nodes/${nodeId}`, {
-        method: 'PATCH',
-        headers,
-        body: JSON.stringify({ params }),
-      })
-      if (!response.ok) {
-        const body = (await response.json().catch(() => null)) as { error?: { message?: string } } | null
-        notify(body?.error?.message ?? `保存失败：HTTP ${response.status}`)
-        return
-      }
-      setNodes((current) =>
-        current.map((node) =>
-          node.id === nodeId
-            ? { ...node, data: { ...node.data, params, status: 'DRAFT' } }
-            : node,
-        ),
-      )
-      notify('参数已保存，需要点 ▶ 重新运行才生效')
-    },
-    [apiBaseUrl, headers, notify, setNodes],
-  )
-
+  const drafts = useRef(new Map<string,{raw:Record<string,string>;params:Record<string,unknown>}>())
+  const paramWrites = useRef(new Set<Promise<void>>()), chatWrites = useRef(new Set<Promise<void>>())
+  const commitParams = async (nodeId: string, params: Record<string, unknown>) => {
+    const draft = drafts.current.get(nodeId)
+    const r = await fetch(`${apiBaseUrl}/v1/nodes/${nodeId}`, { method:'PATCH', headers, body:JSON.stringify({params}) })
+    if (!r.ok) throw Error((await r.json().catch(() => ({}))).error?.message ?? `参数保存失败：HTTP ${r.status}`)
+    if (draft?.params === params && draft === drafts.current.get(nodeId)) drafts.current.delete(nodeId)
+    setNodes(current => current.map(n => n.id === nodeId ? {...n, data:{...n.data,params,status:'DRAFT'}} : n))
+  }
+  const saveNodeParams = (id:string, params: Record<string,unknown>) => {
+    params = drafts.current.get(id)?.params ?? params
+    const p = Promise.allSettled([...paramWrites.current]).then(() => commitParams(id,params))
+    paramWrites.current.add(p)
+    void p.then(() => notify('参数已保存'), e => notify(String(e))).finally(() => paramWrites.current.delete(p))
+  }
   /**
    * 一键整理：服务端算好分层坐标，本地直接套用（不等整页刷新，点完就动）。
    *
@@ -952,14 +958,16 @@ function Inner({
        */
       if (isGroupNodeId(origin.nodeId)) {
         const portsByType = new Map<NodeType, string[]>()
+        const addingMember = origin.handleType === 'target'
         for (const candidate of [...PRIMARY_NODES, ...ADVANCED_NODES]) {
-          if (!canLinkGroupTo(candidate.type)) continue
+          if (!addingMember && !canLinkGroupTo(candidate.type)) continue
+          const ports = NODE_PORTS[candidate.type]
+          const handles = addingMember ? ports.outputs.filter((p) => !p.external) : ports.inputs.filter((p) => !p.external).slice(0, 1)
+          if (!handles.length) continue
           allowed.add(candidate.type)
-          // 组给的是"一整批节点的摘要"，落到目标节点的第一个非外部输入口上
-          const input = (NODE_PORTS[candidate.type]?.inputs ?? []).find((port) => !port.external)
-          if (input) portsByType.set(candidate.type, [input.name])
+          portsByType.set(candidate.type, handles.map((p) => p.name))
         }
-        return { allowed, portsByType, reason: '组可以接：复习 / 深入理解 / 导出讲义 / 先修' }
+        return { allowed, portsByType, reason: addingMember ? '新建节点并加入这个组' : '组可以接：复习 / 深入理解 / 导出讲义 / 先修' }
       }
       /**
        * 节点类型 → 该类型上**具体哪几根端口**能接上。
@@ -1002,62 +1010,6 @@ function Inner({
       return { allowed, portsByType, reason: `能喂 ${fromType}.${origin.handleId} 的节点` }
     },
     [nodes],
-  )
-
-  /** 搜索面板选中一个类型：建节点；若是端口拖拽来的，建完立刻接线 */
-  const pickFromSearch = useCallback(
-    async (type: NodeType) => {
-      const current = search
-      setSearch(null)
-      if (!current) return
-
-      const created = await createNode(type, current.flowX, current.flowY)
-      if (!created || !current.origin) return
-
-      const { origin } = current
-      const sourceIsOrigin = origin.handleType === 'source'
-      const fromType = sourceIsOrigin ? String(nodes.find((node) => node.id === origin.nodeId)?.data?.nodeType ?? '') : type
-      const toType = sourceIsOrigin ? type : String(nodes.find((node) => node.id === origin.nodeId)?.data?.nodeType ?? '')
-
-      // 挑一个能通过的端口组合。优先默认端口，不行再逐个试。
-      const fromPorts = NODE_PORTS[fromType as NodeType]?.outputs ?? []
-      const toPorts = NODE_PORTS[toType as NodeType]?.inputs ?? []
-      let chosen: { fromPort: string; toPort: string } | null = null
-      for (const fromPort of fromPorts) {
-        for (const toPort of toPorts) {
-          if (toPort.external) continue
-          if (sourceIsOrigin && fromPort.name !== origin.handleId) continue
-          if (!sourceIsOrigin && toPort.name !== origin.handleId) continue
-          if (validateConnection({ fromType: fromType as NodeType, fromPort: fromPort.name, toType: toType as NodeType, toPort: toPort.name }).ok) {
-            chosen = { fromPort: fromPort.name, toPort: toPort.name }
-            break
-          }
-        }
-        if (chosen) break
-      }
-      if (!chosen) {
-        notify('新节点已建好，但端口不匹配，无法自动连线')
-        return
-      }
-
-      const fromNodeId = sourceIsOrigin ? origin.nodeId : created.id
-      const toNodeId = sourceIsOrigin ? created.id : origin.nodeId
-      const response = await fetch(`${apiBaseUrl}/v1/canvases/${canvasId}/edges`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ fromNodeId, toNodeId, fromPort: chosen.fromPort, toPort: chosen.toPort }),
-      })
-      const payload = (await response.json().catch(() => null)) as { id?: string; error?: { message?: string } } | null
-      if (!response.ok) {
-        notify(`已建节点，连线被拒：${payload?.error?.message ?? response.status}`)
-        return
-      }
-      setEdges((currentEdges) =>
-        addEdge({ id: String(payload?.id), source: fromNodeId, target: toNodeId, sourceHandle: chosen!.fromPort, targetHandle: chosen!.toPort }, currentEdges),
-      )
-      notify(`已建 ${nodeLabel(type)} 并自动连线`)
-    },
-    [apiBaseUrl, canvasId, createNode, headers, nodes, notify, search, setEdges, token],
   )
 
   /** 当前选中的真实节点（排除组节点）：工具条按钮与菜单共用这一份 */
@@ -1113,6 +1065,8 @@ function Inner({
             onOpenPrompt: openPrompt,
             onGateDecision: decideGateNode,
             onSaveParams: saveNodeParams,
+            readDraft: () => drafts.current.get(node.id)?.raw,
+            onDraft: (raw:Record<string,string>,params:Record<string,unknown>) => drafts.current.set(node.id,{raw,params}),
             onChat: (nodeId: string) => setChatTarget({ id: nodeId, title: String(node.data.title ?? node.data.label ?? node.data.nodeType), type: String(node.data.nodeType) }),
             onExport: exportLecture,
             connectHighlight,
@@ -1230,13 +1184,6 @@ function Inner({
     [apiBaseUrl, canvasId, headers, nodes, notify],
   )
 
-  const moveGroup = useCallback(
-    async (group: WorkbenchGroup, x: number, y: number) => {
-      setGroups((current) => current.map((entry) => (entry.id === group.id ? { ...entry, posX: x, posY: y } : entry)))
-    },
-    [],
-  )
-
   const unpackGroup = useCallback(
     async (groupId: string, options?: { skipWarning?: boolean }) => {
       const group = groups.find((item) => item.id === groupId)
@@ -1264,157 +1211,45 @@ function Inner({
         if (!ok) return
       }
 
-      const response = await fetch(`${apiBaseUrl}/v1/groups/${groupId}`, { method: 'DELETE', headers })
-      if (response.ok || response.status === 204) setGroups((current) => current.filter((item) => item.id !== groupId))
+      await edgeEditor.edit('delete', { groups: [groupId] })
     },
-    [apiBaseUrl, confirm, groups, nodes, token],
+    [confirm, edgeEditor.edit, groups, nodes],
   )
 
   /**
    * 展开 / 收起一个分组（用户 2026-11-24 要求：左上角要有一个快捷按钮）。
    *
-   * 展开时把成员排回组内网格：之前展开后节点还停在各自原来的位置，
-   * 一旦被拖远过，框就会拉到半个屏幕 —— 看起来像"框和内容对不上"。
-   * 只调整这一组的成员，不碰画布上其它节点。
+   * 只在显示层插值。数据库、退出保存和撤销都不能读取过渡帧。
    */
-  const toggleGroup = useCallback(
-    (group: WorkbenchGroup) => {
-      const isCollapsed = collapsed.has(group.id)
-      const memberIds = group.memberIds
-      const FRAME_MS = 16
-      const FRAME_COUNT = 14 // ≈ 220ms：短到不烦人，长到看得出"它们在往一起收"
-
-      if (!isCollapsed) {
-        /**
-         * 收起（用户 2026-11-24 要求）。
-         *
-         * 先把每个成员当前坐标存进 memberOrigins —— 展开要靠它还原，
-         * 不存就只能退回网格，"精心摆好的链被重排"是真实抱怨。
-         * 然后把所有人一起飞向组的右上角（叠放点），逐帧插值；
-         * 动画结束才真正隐藏成员并显示组卡片。
-         */
-        const from = nodes
-          .filter((node) => memberIds.includes(node.id))
-          .map((node) => node.position)
-        if (from.length === 0) return
-
-        const saved: Record<string, { x: number; y: number }> = {}
-        nodes.forEach((node) => {
-          if (memberIds.includes(node.id)) saved[node.id] = { x: node.position.x, y: node.position.y }
-        })
-        memberOrigins.current.set(group.id, saved)
-
-        // 朝左上角收：目标点就是折叠卡片本身所在的绝对位置
-        const targets = stackTargets({ x: group.posX, y: group.posY }, from.length)
-        const frames = buildFrames(from, targets, FRAME_COUNT)
-        setAnimating({ groupId: group.id, to: 'collapsed' })
-
-        let frame = 0
-        const step = () => {
-          const positions = frames[frame]
-          if (!positions) {
-            /**
-             * 全部成员已经叠到锚点上，这时才隐藏成员、露出折叠卡片
-             * （用户 2026-11-24：「按折叠后全部叠一起动画后才出现折叠组」）。
-             * 顺序反了会看到卡片早早出现、节点还在往它里面飞。
-             */
-            setCollapsed((current) => new Set(current).add(group.id))
-            // 收起状态存库：重进画布时要保持收起，而不是自己弹开
-            void fetch(apiBaseUrl + '/v1/groups/' + group.id, {
-              method: 'PATCH',
-              headers,
-              body: JSON.stringify({ collapsed: true }),
-            }).catch(() => undefined)
-            /**
-             * 尺寸从"虚线框"变成"折叠卡片"，之前记下的 measured 已经不适用。
-             * 不清掉的话，画布会继续用旧宽高做连线锚点与包围盒计算，
-             * 收起后的卡片会偏到框原来的右边缘去。清空后由画布重新测量。
-             */
-            setGroups((current) => current.map((item) => (item.id === group.id ? { ...item, measured: undefined } : item)))
-            setAnimating(null)
-            return
-          }
-          setNodes((current) => {
-            let index = 0
-            return current.map((node) => {
-              if (!memberIds.includes(node.id)) return node
-              const point = positions[index++]
-              return point ? { ...node, position: point } : node
-            })
-          })
-          frame += 1
-          window.setTimeout(step, FRAME_MS)
-        }
-        step()
-        return
-      }
-
-      /**
-       * 展开：先让成员出现在堆叠点上（不可见状态），下一帧再飞回各自位置。
-       * 这样动画是"从那一叠里散开"，而不是"凭空出现"。
-       */
-      const saved = memberOrigins.current.get(group.id)
-      /**
-       * 重进画布后内存快照是空的（用户 2026-11-24 报「退出重进后组再次展开时相对位置无法保留」）。
-       * 但成员在库里的坐标就是收起前的位置 —— 收起只在本地移动、从不写库。
-       * 所以快照缺失时拿画布上的当前位置当第二优先，别退回网格。
-       */
-      const current: Record<string, { x: number; y: number }> = {}
-      for (const node of nodes) {
-        if (memberIds.includes(node.id)) current[node.id] = { x: node.position.x, y: node.position.y }
-      }
-      const restored = restoreTargets(saved, memberIds, { x: group.posX, y: group.posY }, current)
-      const restoreById = new Map(restored.map((item) => [item.id, item.point]))
-
-      setCollapsed((current) => {
-        const next = new Set(current)
-        next.delete(group.id)
-        return next
-      })
-      // 展开同样写库，否则下次进来还是收起的
-      void fetch(apiBaseUrl + '/v1/groups/' + group.id, {
-        method: 'PATCH',
-        headers,
-        body: JSON.stringify({ collapsed: false }),
-      }).catch(() => undefined)
-      // 从"折叠卡片"变回"虚线框"：旧的 measured 是卡片尺寸，必须清掉重新测量
-      setGroups((current) => current.map((item) => (item.id === group.id ? { ...item, measured: undefined } : item)))
-      setAnimating({ groupId: group.id, to: 'expanded' })
-
-      const start = stackTargets({ x: group.posX, y: group.posY }, memberIds.length)
-      const targets = memberIds.map((id) => restoreById.get(id) ?? { x: group.posX, y: group.posY })
-      const frames = buildFrames(start, targets, FRAME_COUNT)
-
-      setNodes((current) =>
-        current.map((node) => {
-          const index = memberIds.indexOf(node.id)
-          return index < 0 ? node : { ...node, position: start[index] ?? node.position }
-        }),
-      )
-
-      let frame = 0
-      const step = () => {
-        const positions = frames[frame]
-        if (!positions) {
-          setAnimating(null)
-          return
-        }
-        setNodes((current) =>
-          current.map((node) => {
-            const index = memberIds.indexOf(node.id)
-            const point = index < 0 ? undefined : positions[index]
-            return point ? { ...node, position: point } : node
-          }),
-        )
-        frame += 1
-        window.setTimeout(step, FRAME_MS)
-      }
-      window.setTimeout(step, FRAME_MS)
-    },
-    [collapsed, nodes, setNodes],
-  )
+  const toggleGroup = (group: WorkbenchGroup) => {
+    const next = !group.collapsed
+    const members = nodesRef.current.filter(n => group.memberIds.includes(n.id))
+    const stack = stackTargets({ x: group.posX, y: group.posY }, members.length)
+    const real = members.map(n => n.position)
+    const frames = buildFrames(next ? real : stack, next ? stack : real, 14)
+    if (animationTimer.current) clearTimeout(animationTimer.current)
+    let i = 0
+    const step = () => {
+      const positions = frames[i++]
+      if (!positions) { setAnimation(null); return }
+      setAnimation({ groupId: group.id, points: new Map(members.map((n,j) => [n.id, positions[j]!])) })
+      animationTimer.current = window.setTimeout(step, 16)
+    }
+    step()
+    setGroups(current => current.map(g => g.id === group.id ? { ...g, collapsed: next, measured: undefined } : g))
+    stageLayout({ nodes: [], groups: [{ id: group.id, posX: group.posX, posY: group.posY, collapsed: next }] })
+  }
   // groupNodes 的 data.onToggle 通过 ref 调用它（见 toggleGroupRef 的说明）
   toggleGroupRef.current = toggleGroup
+
+  async function arrangeGroup(g: WorkbenchGroup) {
+    if (!await confirm({title:'仅整理本组成员',message:'这会重新排列本组卡片，不会改动组外节点或连线。无法还原旧版本已经丢失的原始摆位。',okText:'整理本组'})) return
+    const members = nodesRef.current.filter(n => g.memberIds.includes(n.id))
+    const rows = arrangeMembers(members.map(n => ({id:n.id,...n.position,...n.measured})),{x:g.posX,y:g.posY})
+    const byId = new Map(rows.map(n => [n.id,{x:n.posX,y:n.posY}]))
+    setNodes(current => current.map(n => byId.has(n.id) ? {...n,position:byId.get(n.id)!} : n))
+    stageLayout({nodes:rows,groups:[]})
+  }
 
   const renameGroup = useCallback(
     async (group: WorkbenchGroup) => {
@@ -1450,17 +1285,14 @@ function Inner({
       const linked = group.usedBy.length > 0 ? `\n另有 ${group.usedBy.length} 个节点把这一组当作上下文，这些引用也会一并解除。` : ''
       const ok = await confirm({
         title: '删除分组',
-        message: `「${group.title}」里的 ${group.memberIds.length} 个节点会一起删除，无法恢复。${linked}\n\n只想取消分组、保留节点的话，请用「解组」。`,
+        message: `「${group.title}」里的 ${group.memberIds.length} 个节点会一起删除，可整组撤销。${linked}\n\n只想取消分组、保留节点的话，请用「解组」。`,
         okText: '全部删除',
         danger: true,
       })
       if (!ok) return
-      for (const nodeId of group.memberIds) await deleteNode(nodeId)
-      // 节点已经全删了，再弹"被下游引用"的提醒没有意义
-      await unpackGroup(group.id, { skipWarning: true })
-      notify(`已删除分组「${group.title}」`)
+      await edgeEditor.edit('delete', { nodes: group.memberIds, groups: [group.id] })
     },
-    [confirm, deleteNode, notify, unpackGroup],
+    [confirm, edgeEditor.edit],
   )
 
   /**
@@ -1510,7 +1342,7 @@ function Inner({
    * 全部成员的产物当作下游的上游上下文（见 execute.ts 的 groupLinks）。
    */
   const linkGroupTo = useCallback(
-    async (groupId: string, nodeId: string) => {
+    async (groupId: string, nodeId: string, newTitle?: string) => {
       const response = await fetch(`${apiBaseUrl}/v1/groups/${groupId}/link`, {
         method: 'POST',
         headers,
@@ -1529,109 +1361,99 @@ function Inner({
         ),
       )
       const target = nodes.find((node) => node.id === nodeId)
-      notify(`已把分组接到「${String(target?.data?.title ?? nodeId)}」`)
+      notify(`已把分组接到「${String(newTitle ?? target?.data?.title ?? nodeId)}」`)
     },
     [apiBaseUrl, headers, nodes, notify, token],
   )
 
-  /**
-   * 退出画布前把"坐标类"的改动一次性落库（用户 2026-11-24 要求）。
-   *
-   * 为什么需要它：拖节点、拖动组在松手时就写接口了，但有两种情况会漏 ——
-   *   1. 多选后按方向键平移 / 拖动其中一个，其余节点的坐标不经过 onNodeDragStop；
-   *   2. 操作完立刻点返回或关窗口，最后几个 PATCH 还没发出去。
-   *
-   * 只提交**与上次已保存值不同**的条目：全量重写一次就是几十个请求，
-   * 退出时反而更容易被浏览器截断。
-   */
-  const savedPositions = useRef<Record<string, { x: number; y: number }>>({})
-  // 首次渲染时把服务端给的坐标记成"已保存"，后面的差异才有意义
-  if (Object.keys(savedPositions.current).length === 0) {
-    for (const node of initialNodes) savedPositions.current[node.id] = { x: node.posX, y: node.posY }
-    for (const group of initialGroups) savedPositions.current[group.id] = { x: group.posX, y: group.posY }
-  }
-  const [savePhase, setSavePhase] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
-  const saveTimer = useRef<number | null>(null)
+  /** 搜索面板选中一个类型：建节点；若是端口拖拽来的，建完立刻接线 */
+  const pickFromSearch = useCallback(
+    async (type: NodeType) => {
+      const current = search
+      setSearch(null)
+      if (!current) return
 
-  const saveAll = useCallback(
-    async (reason: 'manual' | 'leave') => {
-      const nodeChanges = changedPositions(
-        nodes.map((node) => ({ id: node.id, x: node.position.x, y: node.position.y })),
-        savedPositions.current,
-      ).filter((item) => !isGroupNodeId(item.id))
-      const groupChanges = changedPositions(
-        groups.map((group) => ({ id: group.id, x: group.posX, y: group.posY })),
-        savedPositions.current,
-      )
-      const total = nodeChanges.length + groupChanges.length
-      if (total === 0 && reason === 'manual') {
-        notify('画布已经是最新的')
+      const created = await createNode(type, current.flowX, current.flowY)
+      if (!created || !current.origin) return
+
+      const { origin } = current
+      if (isGroupNodeId(origin.nodeId)) {
+        const groupId = origin.nodeId.slice(GROUP_ID_PREFIX.length)
+        if (origin.handleType === 'source') await linkGroupTo(groupId, created.id, created.title ?? nodeLabel(type))
+        else await addGroupMember(groupId, created.id)
         return
       }
-      if (total === 0) return
+      const sourceIsOrigin = origin.handleType === 'source'
+      const fromType = sourceIsOrigin ? String(nodes.find((node) => node.id === origin.nodeId)?.data?.nodeType ?? '') : type
+      const toType = sourceIsOrigin ? type : String(nodes.find((node) => node.id === origin.nodeId)?.data?.nodeType ?? '')
 
-      setSavePhase('saving')
-      const tasks: Array<Promise<Response>> = [
-        ...nodeChanges.map((item) =>
-          fetch(`${apiBaseUrl}/v1/nodes/${item.id}`, {
-            method: 'PATCH',
-            headers,
-            body: JSON.stringify({ posX: Math.round(item.x), posY: Math.round(item.y) }),
-            // 离开页面时浏览器会取消未完成的请求；keepalive 让它跑完
-            keepalive: reason === 'leave',
-          }),
-        ),
-        ...groupChanges.map((item) =>
-          fetch(`${apiBaseUrl}/v1/groups/${item.id}`, {
-            method: 'PATCH',
-            headers,
-            body: JSON.stringify({ posX: Math.round(item.x), posY: Math.round(item.y) }),
-            keepalive: reason === 'leave',
-          }),
-        ),
-      ]
-      try {
-        const results = await Promise.all(tasks)
-        if (results.some((response) => !response.ok && response.status !== 404)) {
-          setSavePhase('error')
-          return
+      // 挑一个能通过的端口组合。优先默认端口，不行再逐个试。
+      const fromPorts = NODE_PORTS[fromType as NodeType]?.outputs ?? []
+      const toPorts = NODE_PORTS[toType as NodeType]?.inputs ?? []
+      let chosen: { fromPort: string; toPort: string } | null = null
+      for (const fromPort of fromPorts) {
+        for (const toPort of toPorts) {
+          if (toPort.external) continue
+          if (sourceIsOrigin && fromPort.name !== origin.handleId) continue
+          if (!sourceIsOrigin && toPort.name !== origin.handleId) continue
+          if (validateConnection({ fromType: fromType as NodeType, fromPort: fromPort.name, toType: toType as NodeType, toPort: toPort.name }).ok) {
+            chosen = { fromPort: fromPort.name, toPort: toPort.name }
+            break
+          }
         }
-        for (const item of [...nodeChanges, ...groupChanges]) {
-          savedPositions.current[item.id] = { x: item.x, y: item.y }
-        }
-        setSavePhase('saved')
-        if (saveTimer.current) window.clearTimeout(saveTimer.current)
-        saveTimer.current = window.setTimeout(() => setSavePhase('idle'), 1600)
-      } catch {
-        setSavePhase('error')
+        if (chosen) break
       }
+      if (!chosen) {
+        notify('新节点已建好，但端口不匹配，无法自动连线')
+        return
+      }
+
+      const fromNodeId = sourceIsOrigin ? origin.nodeId : created.id
+      const toNodeId = sourceIsOrigin ? created.id : origin.nodeId
+      const response = await fetch(`${apiBaseUrl}/v1/canvases/${canvasId}/edges`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ fromNodeId, toNodeId, fromPort: chosen.fromPort, toPort: chosen.toPort }),
+      })
+      const payload = (await response.json().catch(() => null)) as { id?: string; error?: { message?: string } } | null
+      if (!response.ok) {
+        notify(`已建节点，连线被拒：${payload?.error?.message ?? response.status}`)
+        return
+      }
+      setEdges((currentEdges) =>
+        addEdge({ id: String(payload?.id), source: fromNodeId, target: toNodeId, sourceHandle: chosen!.fromPort, targetHandle: chosen!.toPort }, currentEdges),
+      )
+      notify(`已建 ${nodeLabel(type)} 并自动连线`)
     },
-    [apiBaseUrl, groups, headers, nodes, notify, token],
+    [apiBaseUrl, canvasId, createNode, addGroupMember, linkGroupTo, headers, nodes, notify, search, setEdges, token],
   )
 
-  /**
-   * 离开画布（关窗口、切页面、点返回）时兜底保存一次。
-   *
-   * `pagehide` 比 `beforeunload` 可靠：Electron 窗口关闭、Alt+F4 时前者一定会到。
-   * 两个都挂上，`saveAll` 会按差异去重，重复调用无害。
-   *
-   * **客户端跳转另算**（用户 2026-11-24：「做完操作后直接退出，返回时还是操作前的样子」）：
-   * 点「← 返回」是 Next 的软导航，不触发 pagehide/beforeunload，组件只是被卸载。
-   * 所以清理函数里也要存一次 —— 那时 saveAll 还是旧闭包，正好是要保存的那份状态。
-   */
-  useEffect(() => {
-    const handler = () => {
-      void saveAll('leave')
-    }
-    window.addEventListener('pagehide', handler)
-    window.addEventListener('beforeunload', handler)
-    return () => {
-      window.removeEventListener('pagehide', handler)
-      window.removeEventListener('beforeunload', handler)
-      void saveAll('leave')
-    }
-  }, [saveAll])
-
+  const writer = useRef(new LayoutWriter())
+  const [savePhase, setSavePhase] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  function write(batch: LayoutBatch, keepalive = false) {
+    return fetch(`${apiBaseUrl}/v1/canvases/${canvasId}/positions`, { method: 'PATCH', headers, keepalive, body: JSON.stringify(batch) }).then(async r => {
+      if (!r.ok) throw Error((await r.json().catch(() => ({}))).error?.message ?? `布局保存失败：HTTP ${r.status}`)
+    })
+  }
+  function stageLayout(batch: LayoutBatch) {
+    writer.current.stage(batch); setSavePhase('saving')
+    void writer.current.flush(write).then(() => setSavePhase('saved'), () => setSavePhase('error'))
+  }
+  const assistantFlush = useRef<() => Promise<void>>(async () => {})
+  const chatFailures = useRef(new Map<string,() => Promise<void>>())
+  const exitDialog = useCanvasExit([
+    { label: '节点坐标、组位置与开合', run: () => writer.current.flush(write) },
+    { label: '节点参数', run: async () => {
+      await Promise.all([...paramWrites.current]);
+      for (const [id,draft] of drafts.current) if (nodesRef.current.some(n => n.id === id)) await commitParams(id, draft.params)
+    } },
+    { label: '节点对话', run: async () => {
+      await Promise.all([...chatWrites.current]); for (const [id,retry] of chatFailures.current) {await retry(); chatFailures.current.delete(id)}
+    } },
+    { label: '画布助手对话', run: () => assistantFlush.current() },
+  ], () => {
+    const batch = writer.current.pending(); if (batch.nodes.length || batch.groups.length) void write(batch, true).catch(() => {})
+  })
   const onConnect = useCallback(
     async (connection: Connection) => {
       /**
@@ -1715,13 +1537,42 @@ function Inner({
           按屏幕坐标定位。缩放/平移之后框的范围可能超出画布区域，
           裁不掉就会画到底部「AI 配置」「概念卡」两块面板上（用户看到的现象）。
         */}
-        <div style={{ flex: 1, position: 'relative', overflow: 'hidden', minWidth: 0 }} ref={wrapper}>
+        <div style={{ flex: 1, position: 'relative', overflow: 'hidden', minWidth: 0 }} ref={wrapper} tabIndex={-1}
+          onKeyDownCapture={event => {
+            const target = event.target as Element
+            if (target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="dialog"]') || dialog || packDraft || search || event.nativeEvent.isComposing) return
+            const cmd = event.ctrlKey || event.metaKey
+            const key = event.key.toLowerCase()
+            const consume = () => { event.preventDefault(); event.stopPropagation() }
+            if (key === 'escape') {
+              edgeEditor.setSelected(new Set()); setMenu(null); setGroupMenu(null)
+              setNodes(current => current.map(n => n.selected ? { ...n, selected: false } : n))
+            } else if (cmd && !event.altKey && key === 'a') {
+              consume(); const linesOnly = !!target.closest('.react-flow__edge') || (pickedEdges.length > 0 && !selectedNodeIds.length)
+              setNodes(current => current.map(n => ({ ...n, selected: !linesOnly && !hiddenNodeIds.has(n.id) })))
+              edgeEditor.setSelected(new Set(linesOnly ? visibleEdges.map(e => e.id) : []))
+            } else if (cmd && !event.altKey && (key === 'z' || key === 'y')) {
+              consume(); if (!event.repeat) void edgeEditor.edit(key === 'y' || event.shiftKey ? 'redo' : 'undo')
+            } else if ((key === 'delete' || key === 'backspace') && !selectedNodeIds.length && pickedEdges.length) {
+              consume(); wrapper.current?.focus({ preventScroll: true }); if (!event.repeat) void edgeEditor.edit('delete', lineTargets(pickedEdges))
+            } else if ((key === 'delete' || key === 'backspace') && selectedNodeIds.length) {
+              consume(); if (!event.repeat) void deleteSelected(selectedNodeIds, pickedEdges)
+            } else if ((key === 'contextmenu' || (key === 'f10' && event.shiftKey)) && target.closest('.react-flow__edge')) {
+              consume(); const el = target.closest('.react-flow__edge')!
+              const box = el.getBoundingClientRect(); openEdgeMenu(el.getAttribute('data-id')!, box.x + box.width / 2, box.y + box.height / 2)
+            }
+          }}>
           {/*
             一键整理：按依赖方向把节点排成左→右。
             浮动在画布左上角 —— 它是"看完图之后想让它更清楚"时才点的动作，
             放进菜单里反而找不到。
           */}
           <div style={{ position: 'absolute', top: 12, left: 12, zIndex: 5, display: 'flex', gap: 6 }}>
+            {(['undo','redo'] as const).map(mode => {
+              const action = mode === 'undo' ? '撤销' : '重做', label = edgeEditor.history?.[mode]
+              const text = edgeEditor.pending ? '正在处理画布编辑' : label ? `${action}：${label}` : edgeEditor.history ? `暂无可${action}的操作` : action
+              return <button key={mode} type="button" data-testid={`canvas-${mode}`} disabled={edgeEditor.pending || (!!edgeEditor.history && !label)} aria-label={text} title={`${text} (${mode === 'undo' ? 'Ctrl+Z' : 'Ctrl+Shift+Z / Ctrl+Y'})`} onClick={() => void edgeEditor.edit(mode)}>{mode === 'undo' ? '↶' : '↷'}</button>
+            })}
             <button
               type="button"
               data-testid="arrange-nodes"
@@ -1767,6 +1618,10 @@ function Inner({
           </div>
           {chatTarget && (
             <NodeChat
+              key={chatTarget.id}
+              track={p => {chatWrites.current.add(p); void p.finally(() => chatWrites.current.delete(p))}}
+              waitForWrites={() => Promise.all([...chatWrites.current])}
+              rememberFailure={(id,retry) => chatFailures.current.set(id,retry)}
               nodeId={chatTarget.id}
               nodeTitle={chatTarget.title}
               nodeType={chatTarget.type}
@@ -1779,10 +1634,10 @@ function Inner({
           <ConnectDraftContext.Provider value={connectDraftValue}>
           <ReactFlow
             nodes={[
-              ...nodesWithHandlers.filter((node) => !hiddenNodeIds.has(node.id)),
+              ...nodesWithHandlers.filter(n => !hiddenNodeIds.has(n.id) || animation?.points.has(n.id)).map(n => animation?.points.has(n.id) ? {...n, position:animation.points.get(n.id)!, draggable:false} : n),
               ...groupNodes,
             ]}
-            edges={[...edges, ...groupLinkEdges]}
+            edges={canvasEdges}
             nodeTypes={nodeTypes}
             onNodesChange={(changes) => {
               // 组节点从 groups 派生，尺寸若只写入普通 nodes，下次渲染就会重新变为 hidden。
@@ -1807,18 +1662,28 @@ function Inner({
                 })
               }
               onNodesChange(changes)
+              const moved = changes.flatMap(c => c.type === 'position' && c.position && !isGroupNodeId(c.id) ? [{id:c.id,posX:Math.round(c.position.x),posY:Math.round(c.position.y)}] : [])
+              if (moved.length) {
+                writer.current.stage({nodes:moved,groups:[]})
+                if (!changes.some(c => c.type === 'position' && c.dragging)) void writer.current.flush(write).catch(() => setSavePhase('error'))
+              }
             }}
-            /**
-             * 组连线的选中/删除变化一律丢掉（用户 2026-11-24：「展开和收起后不要影响连线状态」）。
-             * 组 → 节点那些虚线边是纯展示的（id 前缀 glink__），不在 edges state 里，
-             * 放它们进 onEdgesChange 只会让画布对一条不存在的关系做增删。
-             */
-            onEdgesChange={(changes) =>
-              onEdgesChange(
-                // EdgeChange 是联合类型：只有"改编/删/选中"这类既有边的变化带 id，新增边没有
-                changes.filter((change) => !('id' in change && String(change.id).startsWith('glink__'))),
-              )
-            }
+            onEdgesChange={changes => edgeEditor.setSelected(current => {
+              const next = new Set(current)
+              for (const c of changes) if (c.type === 'select') c.selected ? next.add(c.id) : next.delete(c.id)
+              return next
+            })}
+            onEdgeClick={(event, edge) => {
+              const additive = event.shiftKey || event.ctrlKey || event.metaKey
+              edgeEditor.setSelected(new Set(additive ? toggleSelection([...edgeEditor.selected], edge.id) : [edge.id]))
+              ;(event.currentTarget as SVGElement).focus({ preventScroll: true })
+            }}
+            onEdgeContextMenu={(event, edge) => {
+              event.preventDefault(); event.stopPropagation()
+              const down = rightDown.current; rightDown.current = null
+              if (down && Math.hypot(event.clientX - down.x, event.clientY - down.y) > RIGHT_DRAG_THRESHOLD) return
+              openEdgeMenu(edge.id, event.clientX, event.clientY)
+            }}
             onConnect={onConnect}
             /**
              * 端口拖到空白处松手 → 列出能接上的节点（ComfyUI 的另一核心效率来源）。
@@ -1915,6 +1780,7 @@ function Inner({
               }, 0)
             }}
             onPaneClick={() => {
+              edgeEditor.setSelected(new Set()); wrapper.current?.focus({ preventScroll: true })
               // 点空白清空选中：和资源管理器一致，避免"残留选中"导致下次打包带上旧节点
               setNodes((current) =>
                 current.some((item) => item.selected)
@@ -1929,91 +1795,22 @@ function Inner({
              * 选中一片再按 Backspace 是很容易误触的动作。
              */
             deleteKeyCode={null}
-            onKeyDown={(event) => {
-              if (event.key !== 'Backspace' && event.key !== 'Delete') return
-              const target = event.target as HTMLElement
-              if (target.closest('input, textarea, [contenteditable="true"]')) return
-              // 组节点也带 selected，但它不是可删除的 Node —— 过滤掉，否则会去删一个不存在的 id
-              const selected = nodes.filter((node) => node.selected && !isGroupNodeId(node.id))
-              if (selected.length === 0) return
-              event.preventDefault()
-              void (async () => {
-                const ok = await confirm({
-                  title: '删除节点',
-                  message: `删除选中的 ${selected.length} 个节点？\n\n连在它们上面的线会一起消失，无法恢复。`,
-                  okText: '删除',
-                  danger: true,
-                })
-                if (!ok) return
-                for (const node of selected) await deleteNode(node.id)
-              })()
-            }}
-            onNodeDragStop={async (_event, node) => {
-              const position = { x: Math.round(node.position.x), y: Math.round(node.position.y) }
-              /**
-               * 组节点：位置存进 NodeGroup，不能发去 /v1/nodes（那里没有这个 id）。
-               * 这条也是"收起后拖不动"的修法 —— 组现在是真节点，拖动由画布完成，
-               * 松手时把新坐标写回分组记录即可。
-               */
-              if (isGroupNodeId(node.id)) {
-                const groupId = node.id.slice(GROUP_ID_PREFIX.length)
-                const group = groups.find((item) => item.id === groupId)
-                const deltaX = position.x - (group?.posX ?? position.x)
-                const deltaY = position.y - (group?.posY ?? position.y)
-
-                /**
-                 * 拖动组 = 整体平移（用户 2026-11-24）。
-                 *
-                 * 锚点变了就必须把成员一起挪同样的距离，否则展开时成员还停在原地，
-                 * 看起来像"框跑了、节点留在里面"。收起态时成员是隐藏的，一起挪也无害 ——
-                 * 展开后它们仍然落在框内原来的相对位置。
-                 */
-                if (group && (deltaX !== 0 || deltaY !== 0)) {
-                  memberOrigins.current.set(
-                    groupId,
-                    Object.fromEntries(
-                      Object.entries(memberOrigins.current.get(groupId) ?? {}).map(([id, point]) => [
-                        id,
-                        { x: point.x + deltaX, y: point.y + deltaY },
-                      ]),
-                    ),
-                  )
-                  const moved: Array<{ id: string; x: number; y: number }> = []
-                  setNodes((current) =>
-                    current.map((item) => {
-                      if (!group.memberIds.includes(item.id)) return item
-                      const next = { x: item.position.x + deltaX, y: item.position.y + deltaY }
-                      moved.push({ id: item.id, x: Math.round(next.x), y: Math.round(next.y) })
-                      return { ...item, position: next }
-                    }),
-                  )
-                  // 成员坐标要落库，否则刷新后组框与成员对不上
-                  await Promise.all(
-                    moved.map((item) =>
-                      fetch(`${apiBaseUrl}/v1/nodes/${item.id}`, {
-                        method: 'PATCH',
-                        headers,
-                        body: JSON.stringify({ posX: item.x, posY: item.y }),
-                      }),
-                    ),
-                  )
-                }
-
-                await fetch(`${apiBaseUrl}/v1/groups/${groupId}`, {
-                  method: 'PATCH',
-                  headers,
-                  body: JSON.stringify({ posX: position.x, posY: position.y }),
-                })
-                setGroups((current) =>
-                  current.map((item) => (item.id === groupId ? { ...item, posX: position.x, posY: position.y } : item)),
-                )
-                return
+            onNodeDragStart={(_event, node) => { dragOrigin.current = { ...node.position } }}
+            onNodeDragStop={(_event, node, dragged) => {
+              if (!isGroupNodeId(node.id)) {
+                const rows = dragged.filter(n => !isGroupNodeId(n.id)).map(n => ({id:n.id,posX:Math.round(n.position.x),posY:Math.round(n.position.y)}))
+                stageLayout({ nodes: rows, groups: [] }); return
               }
-              await fetch(`${apiBaseUrl}/v1/nodes/${node.id}`, {
-                method: 'PATCH',
-                headers,
-                body: JSON.stringify({ posX: position.x, posY: position.y }),
-              })
+              const g = groups.find(g => groupNodeId(g.id) === node.id), start = dragOrigin.current
+              if (!g || !start) return
+              const dx = Math.round(node.position.x-start.x), dy = Math.round(node.position.y-start.y)
+              if (!dx && !dy) return
+              const posX = g.posX+dx, posY = g.posY+dy
+              const moved = nodesRef.current.filter(n => g.memberIds.includes(n.id)).map(n => ({ id:n.id,posX:Math.round(n.position.x+dx),posY:Math.round(n.position.y+dy) }))
+              const byId = new Map(moved.map(n => [n.id,{x:n.posX,y:n.posY}]))
+              setNodes(current => current.map(n => byId.has(n.id) ? {...n,position:byId.get(n.id)!} : n))
+              setGroups(current => current.map(item => item.id === g.id ? {...item,posX,posY} : item))
+              stageLayout({nodes:moved,groups:[{id:g.id,posX,posY,collapsed:!!g.collapsed}]})
             }}
             onPaneContextMenu={(event) => {
               event.preventDefault()
@@ -2197,7 +1994,8 @@ function Inner({
       {menu && (
         <ContextMenu
           menu={menu}
-          onClose={() => setMenu(null)}
+          onClose={() => { setMenu(null); wrapper.current?.focus({ preventScroll: true }) }}
+          onDeleteEdges={ids => void edgeEditor.edit('delete', lineTargets(visibleEdges.filter(e => ids.includes(e.id))))}
           onCreateNode={(type, x, y) => void createNode(type, x, y)}
           onRename={(nodeId) => void renameNode(nodeId)}
           onDelete={(nodeId) => void deleteNode(nodeId)}
@@ -2269,6 +2067,7 @@ function Inner({
               }}
             >
               {item(isCollapsed ? '展开这一组' : '收起这一组', () => toggleGroup(group), { testId: 'group-menu-toggle' })}
+              {!isCollapsed && item('仅整理本组成员', () => void arrangeGroup(group), {testId:'group-menu-arrange'})}
               {/*
                 按依赖顺序运行整组：组最常见的用法就是"一条链跑一遍"，
                 逐个点 ▶ 既慢又容易漏序（下游先跑拿到空上游）。
@@ -2295,11 +2094,13 @@ function Inner({
 
       {dialog}
 
+      {exitDialog}
       <AssistantBar
         canvasId={canvasId}
         apiBaseUrl={apiBaseUrl}
         token={token}
-        onApplied={() => window.location.reload()}
+        flushRef={assistantFlush}
+        onApplied={async () => { await writer.current.flush(write); await syncCanvas(); router.refresh() }}
       />
     </div>
   )

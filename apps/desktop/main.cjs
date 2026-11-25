@@ -28,6 +28,8 @@ const log = (...args) => console.log('[studygraph-desktop]', ...args)
 /** 内置库的句柄；退出时要同步停掉，否则残留 postmaster.pid */
 let database = null
 let shuttingDown = false
+let mainWindow = null
+let closeApproved = false
 
 async function waitForHttp(url, { timeoutMs = 90000, intervalMs = 400 } = {}) {
   const started = Date.now()
@@ -352,6 +354,10 @@ function createWindow(url) {
       preload: path.join(__dirname, 'preload.cjs'),
     },
   })
+  require('./edit-shortcuts.cjs').enableEditShortcuts(window.webContents)
+  mainWindow = window
+  window.once('closed', () => { mainWindow = null })
+  require('./save-before-close.cjs').installSaveBeforeClose(window, dialog, () => { closeApproved = true })
   window.webContents.setWindowOpenHandler(({ url: target }) => {
     shell.openExternal(target)
     return { action: 'deny' }
@@ -432,16 +438,14 @@ function killChildren() {
 }
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.on(signal, () => {
-    killChildren()
-    if (database) database.stop().catch(() => {})
-  })
+  process.on(signal, () => app.quit())
 }
 
 // 退出顺序：先收 API/Web（它们还连着库），再停 postgres。
 // 用 preventDefault 等停库真的完成 —— 直接 quit 会让 postgres 变孤儿进程，
 // 下次启动时残留的 postmaster.pid 会把"启动失败"甩给用户。
 app.on('before-quit', (event) => {
+  if (mainWindow && !closeApproved) { event.preventDefault(); mainWindow.close(); return }
   if (shuttingDown || !database) return
   shuttingDown = true
   event.preventDefault()

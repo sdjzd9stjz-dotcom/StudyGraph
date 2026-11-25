@@ -10,8 +10,7 @@ import { ThinkingBubble } from './ThinkingBubble'
  * 每个节点本身就是一个会话：它带着自己的产物当上下文，
  * 你可以问"这条定义为什么这么写""这一步为什么成立"。
  *
- * 记录按节点分别存在 sessionStorage 里 —— 关掉窗口就忘掉，
- * 但刷页面、切走再切回来还在。
+ * 记录以服务端 NodeMessage 为准，读取失败不能把空列表当成真实历史。
  */
 
 interface Turn {
@@ -19,7 +18,6 @@ interface Turn {
   text: string
 }
 
-const KEY_PREFIX = 'studygraph:node-chat:'
 
 export function NodeChat({
   nodeId,
@@ -28,6 +26,9 @@ export function NodeChat({
   apiBaseUrl,
   token,
   onClose,
+  track,
+  waitForWrites,
+  rememberFailure,
 }: {
   nodeId: string
   nodeTitle: string
@@ -35,97 +36,56 @@ export function NodeChat({
   apiBaseUrl: string
   token: string
   onClose: () => void
+  track: (p: Promise<void>) => void
+  waitForWrites: () => Promise<unknown>
+  rememberFailure: (turn:string, retry:() => Promise<void>) => void
 }) {
   const [turns, setTurns] = useState<Turn[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
-  /** 这一轮的思考摘要（模型返回的 reasoning 节选），等待时就能看 */
   const [thinking, setThinking] = useState<string | null>(null)
+  const [ready, setReady] = useState(false), [error, setError] = useState(''), [attempt,setAttempt] = useState(0)
   const bottom = useRef<HTMLDivElement>(null)
-
-  /**
-   * 对话以**服务端**为准（用户 2026-11-21 要求：连线要带上游对话总结）。
-   *
-   * 只存 sessionStorage 的对话换台机器就没了，也进不了下游提示词；
-   * 所以先在服务端读，读不到再退回本地缓存 —— 旧记录不至于凭空消失。
-   */
   useEffect(() => {
-    let cancelled = false
-
+    let active = true
     async function load() {
-      try {
-        const response = await fetch(`${apiBaseUrl}/v1/nodes/${nodeId}/messages`, {
-          headers: { authorization: `Bearer ${token}` },
-        })
-        if (response.ok) {
-          const data = (await response.json()) as { messages?: Array<{ role: string; content: string }> }
-          if (!cancelled && Array.isArray(data.messages) && data.messages.length > 0) {
-            setTurns(
-              data.messages.map((message) => ({
-                role: message.role === 'user' ? 'user' : 'assistant',
-                text: message.content,
-              })),
-            )
-            return
-          }
-          if (!cancelled && Array.isArray(data.messages)) {
-            setTurns([])
-            return
-          }
-        }
-      } catch {
-        // 服务端不可达时再退回本地缓存
-      }
-      if (cancelled) return
-      try {
-        const saved = window.sessionStorage.getItem(KEY_PREFIX + nodeId)
-        if (saved) setTurns(JSON.parse(saved) as Turn[])
-        else setTurns([])
-      } catch {
-        setTurns([])
-      }
+      // 面板重新打开时，先等本画布中在途的节点回复落库。
+      await waitForWrites()
+      const r = await fetch(`${apiBaseUrl}/v1/nodes/${nodeId}/messages`, { headers: { authorization: `Bearer ${token}` }, cache:'no-store' })
+      if (!r.ok) throw Error(`读取节点对话失败：HTTP ${r.status}`)
+      const data = await r.json(); if (!active) return
+      setTurns(data.messages.map((m: {role: Turn['role']; content: string}) => ({role:m.role,text:m.content})))
+      setError(''); setReady(true)
     }
-
-    void load()
-    return () => {
-      cancelled = true
-    }
-  }, [nodeId, apiBaseUrl, token])
-
-  useEffect(() => {
-    try {
-      window.sessionStorage.setItem(KEY_PREFIX + nodeId, JSON.stringify(turns.slice(-30)))
-    } catch {
-      // 隐私模式写不进去：不影响本次会话
-    }
-    bottom.current?.scrollIntoView({ block: 'nearest' })
-  }, [nodeId, turns])
-
+    void load().catch(e => { if (active) setError(String(e)) }); return () => {active=false}
+  }, [nodeId,apiBaseUrl,token,attempt])
+  useEffect(() => { bottom.current?.scrollIntoView({block:'nearest'}) }, [turns])
   async function send() {
     const message = input.trim()
-    if (!message || busy) return
+    if (!message || busy || !ready) return
     setBusy(true)
     setInput('')
     setThinking(null)
     setTurns((prev) => [...prev, { role: 'user', text: message }])
-    try {
+    const turnId = crypto.randomUUID()
+    const deliver = async () => {
       // 历史由服务端从库里取：客户端再传一份只会和真正用于下游的版本分叉
       const response = await fetch(`${apiBaseUrl}/v1/nodes/${nodeId}/chat`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-        body: JSON.stringify({ message }),
+        body: JSON.stringify({ message, turnId }),
       })
       const data = (await response.json()) as { reply?: string; thinking?: string; error?: { message?: string } }
+      if (!response.ok || data.reply === undefined) throw Error(data.error?.message ?? `HTTP ${response.status}`)
       if (typeof data.thinking === 'string') setThinking(data.thinking)
       setTurns((prev) => [
         ...prev,
         { role: 'assistant', text: data.reply ?? data.error?.message ?? `请求失败：HTTP ${response.status}` },
       ])
-    } catch (error) {
-      setTurns((prev) => [
-        ...prev,
-        { role: 'assistant', text: `出错了：${error instanceof Error ? error.message : String(error)}` },
-      ])
+    }
+    try { await deliver() } catch (error) {
+      setError(`未确认回复：${String(error)}`)
+      rememberFailure(turnId, deliver)
     } finally {
       setBusy(false)
     }
@@ -170,6 +130,7 @@ export function NodeChat({
             <br />· 帮我把这段整理成卡片上的一句话。
           </p>
         )}
+        {error && <p role="alert">{error} <button onClick={() => setAttempt(n => n+1)}>重新读取</button></p>}
         {busy && <ThinkingBubble thinking={thinking} />}
         {turns.map((turn, index) => (
           <div
@@ -202,7 +163,7 @@ export function NodeChat({
           onKeyDown={(event) => {
             if (event.key === 'Enter' && !event.shiftKey) {
               event.preventDefault()
-              void send()
+              track(send())
             }
           }}
           placeholder="就这个节点问点什么…"
@@ -211,8 +172,8 @@ export function NodeChat({
         <button
           type="button"
           data-testid="node-chat-send"
-          disabled={busy || !input.trim()}
-          onClick={() => void send()}
+          disabled={!ready || busy || !input.trim()}
+          onClick={() => track(send())}
           style={{ border: 'none', background: busy ? '#93c5fd' : '#2563eb', color: '#fff', borderRadius: 8, padding: '7px 12px', fontSize: 13, cursor: busy ? 'wait' : 'pointer' }}
         >
           {busy ? '…' : '问'}

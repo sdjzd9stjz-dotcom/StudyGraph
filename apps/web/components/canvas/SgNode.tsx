@@ -40,6 +40,8 @@ export interface SgNodeData {
   onGateDecision?: (nodeId: string, approved: boolean) => void
   /** 保存节点参数（题型识别、变式等需要填题目原文） */
   onSaveParams?: (nodeId: string, params: Record<string, unknown>) => void
+  readDraft?: () => Record<string, string> | undefined
+  onDraft?: (raw: Record<string, string>, params: Record<string, unknown>) => void
   /** 打开这个节点的对话面板（每个节点自己就是一个会话） */
   onChat?: (nodeId: string) => void
   /** LECTURE 专用：导出讲义 PDF（桌面版走主进程打印） */
@@ -86,7 +88,9 @@ export function SgNode({ id, data, selected }: NodeProps) {
    * 输入框里只能放字符串。改动期间保持草稿，点「保存参数」才转回类型写库 ——
    * 中途每敲一个字就提交，会让"12"先变成 1 再变成 12，节点被无谓标脏。
    */
-  const [draft, setDraft] = useState<Record<string, string>>(() => flattenParams(d.nodeType, d.params))
+  const [, refreshDraft] = useState(0)
+  // 草稿属于画布；节点因开合卸载后仍能继续编辑，服务端刷新也不会覆盖脏输入。
+  const draft = d.readDraft?.() ?? flattenParams(d.nodeType, d.params)
   // 提示词对每个节点都开放；类型专属参数排在后面
   const fields = [PROMPT_FIELD, ...paramFieldsFor(d.nodeType)]
   const connectionInputs = d.inputs.filter((port) => !port.external)
@@ -133,7 +137,6 @@ export function SgNode({ id, data, selected }: NodeProps) {
           const active = document.activeElement as HTMLElement | null
           const inside = Boolean(root && active && active !== document.body && root.contains(active))
           if (!inside) {
-            if (active && active !== document.body) active.blur()
             setPinned(false)
           }
         }, 0)
@@ -452,7 +455,10 @@ export function SgNode({ id, data, selected }: NodeProps) {
               <div style={{ display: 'grid', gap: 4 }}>
                 {fields.map((field) => {
                   const value = draft[field.key] ?? ''
-                  const onChange = (next: string) => setDraft((current) => ({ ...current, [field.key]: next }))
+                  const onChange = (next: string) => {
+                    const raw = { ...draft, [field.key]: next }
+                    d.onDraft?.(raw, buildParams(fields, raw, d.params)); refreshDraft(i => i+1)
+                  }
                   if (field.type === 'textarea') {
                     return (
                       <label key={field.key} style={fieldLabel}>
@@ -624,7 +630,7 @@ function handleStyle(state: 'ok' | 'no' | undefined, color: string, top: number)
 /** 已有 params → 输入框能绑定的字符串 */
 function flattenParams(nodeType: string, params: Record<string, unknown> | null | undefined): Record<string, string> {
   const result: Record<string, string> = {}
-  for (const field of paramFieldsFor(nodeType)) {
+  for (const field of [PROMPT_FIELD, ...paramFieldsFor(nodeType)]) {
     const raw = params?.[field.key]
     if (raw === undefined || raw === null) continue
     if (Array.isArray(raw)) result[field.key] = raw.join(', ')

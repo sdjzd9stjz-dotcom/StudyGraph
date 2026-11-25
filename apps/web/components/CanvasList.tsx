@@ -43,7 +43,7 @@ export function CanvasList({
   canvases: CanvasRow[]
   apiBaseUrl: string
   token: string
-  dueTotal: number
+  dueTotal: number | null
 }) {
   const router = useRouter()
   const [canvases, setCanvases] = useState<CanvasRow[]>(initialCanvases)
@@ -269,7 +269,7 @@ export function CanvasList({
             <Link
               href="/review"
               data-testid="review-entry"
-              style={{ color: dueTotal > 0 ? '#2563eb' : '#9ca3af', fontSize: 13, marginLeft: 'auto' }}
+              style={{ color: (dueTotal ?? 0) > 0 ? '#2563eb' : '#9ca3af', fontSize: 13, marginLeft: 'auto' }}
             >
               今日到期 {dueTotal}
             </Link>

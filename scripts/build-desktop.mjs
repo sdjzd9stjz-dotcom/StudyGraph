@@ -93,7 +93,9 @@ console.log('Electron 已复制 →', appDir)
 // 桌面主进程（pg.cjs 是内置数据库的生命周期模块，必须一起带上）
 copyFileSync(path.join(root, 'apps', 'desktop', 'main.cjs'), path.join(resources, 'app', 'main.cjs'))
 copyFileSync(path.join(root, 'apps', 'desktop', 'pg.cjs'), path.join(resources, 'app', 'pg.cjs'))
+copyFileSync(path.join(root, 'apps', 'desktop', 'edit-shortcuts.cjs'), path.join(resources, 'app', 'edit-shortcuts.cjs'))
 // preload：讲义 PDF 的唯一桥，漏复制会让打印按钮静默失效
+copyFileSync(path.join(root, 'apps/desktop/save-before-close.cjs'), path.join(resources, 'app/save-before-close.cjs'))
 copyFileSync(path.join(root, 'apps', 'desktop', 'preload.cjs'), path.join(resources, 'app', 'preload.cjs'))
 // 应用图标（与宣传片一致：紫/蓝/绿三节点）
 copyFileSync(path.join(root, 'apps', 'desktop', 'icon.ico'), path.join(resources, 'app', 'icon.ico'))
@@ -104,7 +106,7 @@ if (existsSync(path.join(root, 'apps', 'desktop', 'startup'))) {
 }
 writeFileSync(
   path.join(resources, 'app', 'package.json'),
-  `${JSON.stringify({ name: 'studygraph', version: '0.0.0', main: 'main.cjs' }, null, 2)}\n`,
+  `${JSON.stringify({ name: 'studygraph', version: JSON.parse(readFileSync(path.join(root,'apps/desktop/package.json'),'utf8')).version, main: 'main.cjs' }, null, 2)}\n`,
 )
 
 // ── 2.4 使用说明书（应用内「使用教程」页读它，不复制内容以免分叉）─────────

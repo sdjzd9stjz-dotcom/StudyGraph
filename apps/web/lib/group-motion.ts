@@ -61,7 +61,7 @@ export function frameSize(
  * 这里同时算出新的左上角偏移（dx/dy）：锚点 + 偏移 = 框真正该在的位置。
  */
 export function frameBox(
-  members: readonly Point[],
+  members: readonly (Point & { width?: number; height?: number })[],
   options?: { nodeWidth?: number; nodeHeight?: number; pad?: number; minWidth?: number; minHeight?: number; topInset?: number },
 ): { width: number; height: number; dx: number; dy: number } {
   const nodeWidth = options?.nodeWidth ?? 320
@@ -77,11 +77,11 @@ export function frameBox(
   // 成员可能落在锚点的左/上方：取最小偏移当作新的左上角
   const minX = Math.min(...members.map((point) => point.x))
   const minY = Math.min(...members.map((point) => point.y))
-  const dx = minX < 0 ? minX - pad : 0
-  const dy = minY < 0 ? minY - topInset : 0
+  const dx = Math.min(0, minX - pad)
+  const dy = Math.min(0, minY - topInset)
 
-  const right = Math.max(...members.map((point) => point.x + nodeWidth)) - dx
-  const bottom = Math.max(...members.map((point) => point.y + nodeHeight)) - dy
+  const right = Math.max(...members.map(point => point.x + (point.width || nodeWidth))) - dx
+  const bottom = Math.max(...members.map(point => point.y + (point.height || nodeHeight))) - dy
   return {
     width: Math.max(right + pad, minWidth),
     height: Math.max(bottom + pad, minHeight + topInset),
@@ -93,6 +93,19 @@ export function frameBox(
 export function easeOutCubic(t: number): number {
   const clamped = Math.min(1, Math.max(0, t))
   return 1 - Math.pow(1 - clamped, 3)
+}
+
+/** 只在用户明确要求重排时使用，不猜测历史坐标。每行按最高成员留出下一行空间。 */
+export function arrangeMembers(members: readonly (Point & {id:string; width?:number; height?:number})[], origin:Point) {
+  const ordered = [...members].sort((a,b) => a.y-b.y || a.x-b.x || a.id.localeCompare(b.id))
+  const columns = Math.max(1, Math.ceil(Math.sqrt(ordered.length)))
+  let x=origin.x+26, y=origin.y+44, height=0
+  return ordered.map((m,i) => {
+    if (i && i%columns===0) { y+=height+36; x=origin.x+26; height=0 }
+    const pos={id:m.id,posX:Math.round(x),posY:Math.round(y)}
+    x+=(m.width || 320)+36; height=Math.max(height,m.height || 220)
+    return pos
+  })
 }
 
 /** 在两个位置之间插值 */

@@ -1,5 +1,6 @@
 import { API_BASE_URL, fetchCanvasList, fetchReviewStats, serverToken } from '../lib/api'
 import { CanvasList } from '../components/CanvasList'
+import { ReadSection } from '../components/ReadSection'
 
 export const dynamic = 'force-dynamic'
 
@@ -10,16 +11,17 @@ export const dynamic = 'force-dynamic'
  * 这一层只负责取数据 —— 服务端组件不能处理事件，混在一起会让表头每次交互都整页重渲。
  */
 export default async function HomePage() {
-  const [canvases, stats] = await Promise.all([fetchCanvasList(), fetchReviewStats()])
+  const [canvases, stats] = await Promise.all([fetchCanvasList().catch(() => null), fetchReviewStats().catch(() => null)])
 
   return (
     <main>
-      <CanvasList
+      <ReadSection error={stats ? undefined : '复习统计'} />
+      <ReadSection error={canvases ? undefined : '画布列表'}>{canvases && <CanvasList
         canvases={canvases}
         apiBaseUrl={API_BASE_URL}
         token={serverToken()}
-        dueTotal={stats.dueCount + stats.newCount}
-      />
+        dueTotal={stats ? stats.dueCount + stats.newCount : null}
+      />}</ReadSection>
     </main>
   )
 }

@@ -26,6 +26,19 @@ export interface CanvasRouteDeps {
 export function registerCanvasRoutes(app: FastifyInstance, deps: CanvasRouteDeps): void {
   const { prisma, guard, objectStore } = deps
 
+  app.patch('/v1/canvases/:id/positions', { preHandler: guard('CANVAS_WRITE') }, async request => {
+    const { id: canvasId } = request.params as { id: string }
+    await requireCanvasWrite(prisma, canvasId, getAuth(request).user.id)
+    const position = z.object({ id: z.string(), posX: z.number().int(), posY: z.number().int() })
+    const body = parse(z.object({ nodes: z.array(position), groups: z.array(position.extend({ collapsed: z.boolean() })) }), request.body)
+    // 锚点、开合和成员只能一起生效；过期或跨画布的 ID 会回滚整批。
+    await prisma.$transaction([
+      ...body.nodes.map(({ id, ...data }) => prisma.node.update({ where: { id, canvasId }, data, select: { id: true } })),
+      ...body.groups.map(({ id, ...data }) => prisma.nodeGroup.update({ where: { id, canvasId }, data, select: { id: true } })),
+    ])
+    return { saved: body.nodes.length + body.groups.length }
+  })
+
   app.post('/v1/canvases', { preHandler: guard('CANVAS_WRITE') }, async (request, reply) => {
     const auth = getAuth(request)
     const body = parse(createBody, request.body)
@@ -266,12 +279,12 @@ export function registerCanvasRoutes(app: FastifyInstance, deps: CanvasRouteDeps
     const { id } = request.params as { id: string }
 
     // 无权访问 → 404（不泄露画布是否存在）
-    await findCanvasForUser(prisma, id, auth.user.id)
+    const access = await findCanvasForUser(prisma, id, auth.user.id)
 
     const canvas = await prisma.canvas.findUniqueOrThrow({
       where: { id },
       include: {
-        nodes: { orderBy: { createdAt: 'asc' } },
+        nodes: { orderBy: { createdAt: 'asc' }, include: { skills: { select: { skill: { select: { name: true } } } } } },
         edges: { orderBy: { createdAt: 'asc' } },
       },
     })
@@ -298,10 +311,11 @@ export function registerCanvasRoutes(app: FastifyInstance, deps: CanvasRouteDeps
       title: canvas.title,
       ownerId: canvas.ownerId,
       createdAt: canvas.createdAt,
-      nodes: canvas.nodes.map((node) => {
+      nodes: canvas.nodes.map(({ skills, ...node }) => {
         const artifact = latest.get(node.id)
         return {
           ...node,
+          skillNames: access.isOwner || access.role === 'EDITOR' ? skills.map(s => s.skill.name) : [],
           // null = 还没跑过，界面据此显示"未运行"而不是一段空文本
           outputText: artifact ? summarizeArtifact(artifact.kind, artifact.structured) : null,
           outputKind: artifact?.kind ?? null,

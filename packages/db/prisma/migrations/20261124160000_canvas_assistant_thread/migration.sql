@@ -1,0 +1,7 @@
+CREATE TABLE "CanvasAssistantThread" (
+  "canvasId" TEXT NOT NULL REFERENCES "Canvas"("id") ON DELETE CASCADE ON UPDATE CASCADE,
+  "userId" TEXT NOT NULL REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE,
+  "revision" INTEGER NOT NULL DEFAULT 1,
+  "messages" JSONB NOT NULL,
+  PRIMARY KEY ("canvasId", "userId")
+);

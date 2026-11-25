@@ -46,6 +46,7 @@ export async function decideGate(
 }
 
 export interface CanvasNode {
+  skillNames: string[]
   id: string
   type: string
   title: string | null
@@ -77,7 +78,8 @@ export async function fetchCanvas(canvasId: string): Promise<{ id: string; title
     headers: { authorization: `Bearer ${serverToken()}` },
     cache: 'no-store',
   })
-  if (!response.ok) return null
+  if (response.status === 404) return null
+  if (!response.ok) throw Error('画布读取失败')
   return (await response.json()) as { id: string; title: string; nodes: CanvasNode[]; edges: CanvasEdge[] }
 }
 
@@ -107,7 +109,7 @@ export async function fetchCanvasConcepts(canvasId: string): Promise<CanvasConce
     headers: { authorization: `Bearer ${serverToken()}` },
     cache: 'no-store',
   })
-  if (!response.ok) return []
+  if (!response.ok) throw Error('概念卡读取失败')
   const payload = (await response.json()) as { concepts: CanvasConcept[] }
   return payload.concepts
 }
@@ -117,7 +119,7 @@ export async function fetchCanvasList(): Promise<Array<{ id: string; title: stri
     headers: { authorization: `Bearer ${serverToken()}` },
     cache: 'no-store',
   })
-  if (!response.ok) return []
+  if (!response.ok) throw Error('画布列表读取失败')
   const payload = (await response.json()) as { canvases: Array<{ id: string; title: string; createdAt: string }> }
   return payload.canvases
 }
@@ -200,7 +202,7 @@ export async function fetchDue(limit = 30): Promise<DuePayload> {
     headers: { authorization: `Bearer ${serverToken()}` },
     cache: 'no-store',
   })
-  if (!response.ok) return { now: new Date().toISOString(), count: 0, items: [] }
+  if (!response.ok) throw Error('复习队列读取失败')
   return (await response.json()) as DuePayload
 }
 
@@ -215,7 +217,7 @@ export async function fetchReviewStats(): Promise<ReviewStats> {
     headers: { authorization: `Bearer ${serverToken()}` },
     cache: 'no-store',
   })
-  if (!response.ok) return { dueCount: 0, newCount: 0, reviewedToday: 0 }
+  if (!response.ok) throw Error('复习统计读取失败')
   return (await response.json()) as ReviewStats
 }
 
@@ -276,7 +278,7 @@ export async function fetchGroups(canvasId: string): Promise<GroupView[]> {
     headers: { authorization: `Bearer ${serverToken()}` },
     cache: 'no-store',
   })
-  if (!response.ok) return []
+  if (!response.ok) throw Error('分组读取失败')
   const payload = (await response.json()) as { groups: GroupView[] }
   return payload.groups
 }
@@ -290,34 +292,10 @@ export interface SkillOption {
 }
 
 /** 画布页要一次性拿到：全部技能 + 每个节点已绑定的技能名 */
-export async function fetchCanvasSkills(canvasId: string): Promise<{
-  skills: SkillOption[]
-  nodeSkills: Record<string, string[]>
-}> {
-  const [skillsResponse, canvasResponse] = await Promise.all([
-    fetch(`${API_BASE_URL}/v1/skills`, { headers: { authorization: `Bearer ${serverToken()}` }, cache: 'no-store' }),
-    fetch(`${API_BASE_URL}/v1/canvases/${canvasId}`, { headers: { authorization: `Bearer ${serverToken()}` }, cache: 'no-store' }),
-  ])
-
-  if (!skillsResponse.ok || !canvasResponse.ok) return { skills: [], nodeSkills: {} }
-
-  const skillsPayload = (await skillsResponse.json()) as { skills: SkillOption[] }
-  const canvasPayload = (await canvasResponse.json()) as { nodes: Array<{ id: string }> }
-
-  // 每个节点的绑定要单独查；节点数量在几十的量级，串行也不会慢
-  const pairs = await Promise.all(
-    canvasPayload.nodes.map(async (node) => {
-      const response = await fetch(`${API_BASE_URL}/v1/nodes/${node.id}/skills`, {
-        headers: { authorization: `Bearer ${serverToken()}` },
-        cache: 'no-store',
-      })
-      if (!response.ok) return [node.id, [] as string[]] as const
-      const payload = (await response.json()) as { skills: Array<{ name: string }> }
-      return [node.id, payload.skills.map((skill) => skill.name)] as const
-    }),
-  )
-
-  return { skills: skillsPayload.skills, nodeSkills: Object.fromEntries(pairs) }
+export async function fetchCanvasSkills(): Promise<SkillOption[]> {
+  const r = await fetch(`${API_BASE_URL}/v1/skills`, { headers: { authorization: `Bearer ${serverToken()}` }, cache: 'no-store' })
+  if (!r.ok) throw Error('技能读取失败')
+  return (await r.json()).skills
 }
 
 export interface ErrorTagStat {

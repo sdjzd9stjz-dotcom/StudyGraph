@@ -23,6 +23,7 @@ export interface MenuContext {
    * 于是打包项根本不出现 —— 用户报的就是"框选之后无法右键打包"。
    */
   selectedIds: string[]
+  edgeIds?: string[]
 }
 
 /**
@@ -50,6 +51,7 @@ export function ContextMenu({
   nodeType,
   onRunSelected,
   onDeleteSelected,
+  onDeleteEdges,
 }: {
   menu: MenuContext
   onClose: () => void
@@ -70,6 +72,7 @@ export function ContextMenu({
   onRunSelected?: (ids: string[]) => void
   /** 多选时整批删除 */
   onDeleteSelected?: (ids: string[]) => void
+  onDeleteEdges: (ids: string[]) => void
 }) {
   const [subOpen, setSubOpen] = useState(false)
 
@@ -80,6 +83,7 @@ export function ContextMenu({
 
       <div
         data-testid="context-menu"
+        onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); onClose() } }}
         style={{
           position: 'fixed',
           left: menu.x,
@@ -94,7 +98,10 @@ export function ContextMenu({
           fontSize: 13,
         }}
       >
-        {menu.nodeId ? (
+        {menu.edgeIds?.length ? (
+          <Item autoFocus label={menu.edgeIds.length === 1 ? '删除连线' : `删除选中的 ${menu.edgeIds.length} 条连线`}
+            testId="menu-delete-edges" danger onClick={() => { onDeleteEdges(menu.edgeIds!); onClose() }} />
+        ) : menu.nodeId ? (
           <>
             <Item label="运行此节点" onClick={() => { onRun(menu.nodeId!); onClose() }} />
             {/*
@@ -226,17 +233,20 @@ function Item({
   danger,
   disabled,
   testId,
+  autoFocus,
 }: {
   label: string
   onClick: () => void
   danger?: boolean
   disabled?: boolean
   testId?: string
+  autoFocus?: boolean
 }) {
   return (
     <button
       type="button"
       data-testid={testId}
+      autoFocus={autoFocus}
       disabled={disabled}
       onClick={onClick}
       style={{

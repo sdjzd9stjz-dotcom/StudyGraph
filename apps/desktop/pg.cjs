@@ -477,29 +477,11 @@ function applyMigrations(ctx, migrationsDir, log) {
       continue
     }
 
-    const id = crypto.randomUUID()
-    must(
-      psql(ctx, [
-        '-d', ctx.database, '-v', 'ON_ERROR_STOP=1', '-q', '-c',
-        `INSERT INTO "_prisma_migrations" (id, checksum, migration_name, started_at) VALUES ('${id}', '${checksum}', '${migration.name}', now())`,
-      ]),
-      `登记迁移 ${migration.name}`,
-    )
-
-    const applied_ = psql(ctx, ['-d', ctx.database, '-v', 'ON_ERROR_STOP=1', '-q', '-f', migration.file])
-    if (applied_.status !== 0) {
-      // 失败就撤回登记，否则下次启动会以为它已应用 —— 这种"半截库"正是最难查的
-      psql(ctx, ['-d', ctx.database, '-q', '-c', `DELETE FROM "_prisma_migrations" WHERE id = '${id}'`])
-      must(applied_, `应用迁移 ${migration.name}`)
-    }
-
-    must(
-      psql(ctx, [
-        '-d', ctx.database, '-q', '-c',
-        `UPDATE "_prisma_migrations" SET finished_at = now(), applied_steps_count = 1 WHERE id = '${id}'`,
-      ]),
-      `记录迁移 ${migration.name} 完成`,
-    )
+    // 同一个 psql 连接、同一事务；进程中断时不会只留下表而没有完成记录。
+    const name = migration.name.replaceAll("'", "''")
+    must(psql(ctx, ['-d', ctx.database, '-1', '-v', 'ON_ERROR_STOP=1', '-q', '-f', migration.file, '-c',
+      `INSERT INTO "_prisma_migrations" (id,checksum,migration_name,started_at,finished_at,applied_steps_count) VALUES ('${crypto.randomUUID()}','${checksum}','${name}',now(),now(),1)`,
+    ]), `应用迁移 ${migration.name}`)
     count += 1
     log('迁移已应用：', migration.name)
   }

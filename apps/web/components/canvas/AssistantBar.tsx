@@ -14,83 +14,70 @@ export interface AssistantReply {
   reply: string
   changes: CanvasChange[]
   source: string
-  /** 实际回答的模型标识（来自厂商响应） */
   model?: string | null
-  /** 思考摘要（模型 reasoning 节选） */
   thinking?: string | null
 }
-
-interface Turn {
-  id: string
-  role: 'user' | 'assistant'
-  text: string
-  changes?: CanvasChange[]
-  model?: string | null
-  source?: string
-}
-
-/**
- * 底部 AI 对话栏。
- *
- * 能做的事：
- *   · 读画布现状，回答"我现在到哪一步了"
- *   · **一次铺一整张图**（主链 + 出题支线 + 解题支线 + 闸门），不是一次只加一个节点
- *   · 多轮追加：第二句"再加个出题"只补缺的部分，已有节点不重复建
- *   · 把整段对话留在面板里，刷新/应用后也还在
- * 不能做的事：**自动执行节点**。应用之后节点是 DRAFT，必须用户自己点 ▶。
- * 这不是能力不足：执行会真的花掉模型额度，必须由人发起。
- */
+interface Turn { id: string; role: 'user' | 'assistant'; text: string; changes?: CanvasChange[]; model?: string | null; source?: string }
 const THREAD_PREFIX = 'studygraph:assistant:'
 
-export function AssistantBar({
-  canvasId,
-  apiBaseUrl,
-  token,
-  onApplied,
-}: {
-  canvasId: string
-  apiBaseUrl: string
-  token: string
-  onApplied: () => void
+export function AssistantBar({canvasId, apiBaseUrl, token, onApplied, flushRef}: {
+  canvasId: string; apiBaseUrl: string; token: string; onApplied: () => Promise<void>; flushRef: {current: () => Promise<void>}
 }) {
-  const [open, setOpen] = useState(false)
-  const [input, setInput] = useState('')
-  const [busy, setBusy] = useState(false)
-  /** 等待期间的思考摘要（模型 reasoning 节选） */
+  const [open,setOpen] = useState(false), [input,setInput] = useState(''), [busy,setBusy] = useState(false)
   const [thinking, setThinking] = useState<string | null>(null)
   const [thread, setThread] = useState<Turn[]>([])
+  const [error, setError] = useState('')
+  const [ready, setReady] = useState(false)
+  const [attempt, setAttempt] = useState(0)
   const bottomRef = useRef<HTMLDivElement>(null)
-
-  /**
-   * 聊天记录存 sessionStorage。
-   *
-   * 为什么要存：应用建议后画布会刷新，组件可能重新挂载 ——
-   * 记录只放在内存里就会在"刚铺完图"的时候消失，用户正想回看刚才说了什么。
-   * 用 sessionStorage 而不是 localStorage：关掉窗口就该忘掉，不该留到下次。
-   */
-  useEffect(() => {
-    try {
-      const saved = window.sessionStorage.getItem(THREAD_PREFIX + canvasId)
-      if (!saved) return
-      const parsed = JSON.parse(saved) as Turn[]
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        setThread(parsed)
-        setOpen(true)
+  const current = useRef<Turn[]>([]), acknowledged = useRef(current.current), revision = useRef(0)
+  const tail = useRef(Promise.resolve()), sending = useRef<Promise<void> | null>(null)
+  const endpoint = `${apiBaseUrl}/v1/canvases/${canvasId}/assistant/thread`
+  const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' }
+  function persist() {
+    const save = tail.current.then(async () => {
+      const messages = current.current
+      if (messages === acknowledged.current) return
+      const previous = acknowledged.current
+      const append = messages.length >= previous.length && previous.every((m,i) => m === messages[i])
+      const r = await fetch(endpoint, { method: 'PUT', headers, body: JSON.stringify({ messages: append ? messages.slice(previous.length) : messages, append, revision: revision.current }) })
+      const body = await r.json(); if (!r.ok) {
+        // 回包丢失不等于写入失败。只认相同记录，绝不静默覆盖另一窗口的新消息。
+        if (r.status !== 409) throw Error(body.error?.message ?? `HTTP ${r.status}`)
+        const read = await fetch(endpoint,{headers,cache:'no-store'}); if (!read.ok) throw Error(`读取对话失败：HTTP ${read.status}`)
+        const remote = await read.json()
+        if (remote.messages.length !== messages.length || !messages.every((m,i) => m.id === remote.messages[i].id && m.text === remote.messages[i].text)) throw Error(body.error?.message ?? '对话已变更')
+        body.revision = remote.revision
       }
-    } catch {
-      // 存坏的记录直接忽略，不要为了一条历史让整个画布白屏
-    }
-  }, [canvasId])
-
+      revision.current = body.revision; acknowledged.current = messages; setError('')
+      try { sessionStorage.removeItem(THREAD_PREFIX + canvasId) } catch {}
+    })
+    tail.current = save.catch(e => setError(String(e)))
+    return save
+  }
+  function update(fn: (prev: Turn[]) => Turn[]) {
+    current.current = fn(current.current); setThread(current.current)
+    void persist().catch(() => {})
+  }
   useEffect(() => {
-    try {
-      window.sessionStorage.setItem(THREAD_PREFIX + canvasId, JSON.stringify(thread.slice(-40)))
-    } catch {
-      // 隐私模式下写不进去：不影响当前会话
+    let active = true
+    async function load() {
+      const r = await fetch(endpoint, { headers, cache: 'no-store' }); if (!r.ok) throw Error(`读取对话失败：HTTP ${r.status}`)
+      const body = await r.json(); if (!active) return
+      revision.current = body.revision; current.current = acknowledged.current = body.messages
+      let legacy: Turn[] | undefined
+      try { legacy = JSON.parse(sessionStorage.getItem(THREAD_PREFIX + canvasId) ?? 'null') } catch {}
+      if (!body.revision && Array.isArray(legacy) && legacy.length) update(() => legacy!)
+      setThread(current.current); setOpen(current.current.length > 0); setReady(true)
     }
-    bottomRef.current?.scrollIntoView({ block: 'nearest' })
-  }, [canvasId, thread])
-
+    void load().catch(e => { if (active) setError(String(e)) }); return () => { active = false }
+  }, [endpoint, token, attempt])
+  useEffect(() => { bottomRef.current?.scrollIntoView({block:'nearest'}) }, [thread])
+  flushRef.current = async () => { await sending.current; await persist() }
+  function submit() {
+    if (!ready || sending.current) return
+    sending.current = send().finally(() => { sending.current = null })
+  }
   async function send() {
     const message = input.trim()
     if (!message || busy) return
@@ -100,8 +87,8 @@ export function AssistantBar({
     setThinking(null)
 
     // 把最近的几轮一起带上，模型才知道"再"指的是什么
-    const history = thread.slice(-6).map((turn) => ({ role: turn.role, text: turn.text }))
-    setThread((prev) => [...prev, { id: `u-${Date.now()}`, role: 'user', text: message }])
+    const history = thread.slice(-6).map((turn) => ({ role: turn.role, text: turn.text.slice(0,4000) }))
+    update((prev) => [...prev, { id: `u-${Date.now()}`, role: 'user', text: message }])
 
     try {
       const response = await fetch(`${apiBaseUrl}/v1/canvases/${canvasId}/assistant`, {
@@ -111,7 +98,7 @@ export function AssistantBar({
       })
       const data = (await response.json()) as AssistantReply & { error?: { message?: string } }
       if (!response.ok) {
-        setThread((prev) => [
+        update((prev) => [
           ...prev,
           { id: `a-${Date.now()}`, role: 'assistant', text: data?.error?.message ?? `请求失败：HTTP ${response.status}` },
         ])
@@ -119,14 +106,14 @@ export function AssistantBar({
       }
       if (typeof data.thinking === 'string') setThinking(data.thinking)
       const changes = Array.isArray(data.changes) ? data.changes : []
-      setThread((prev) => [
+      update((prev) => [
         ...prev,
         { id: `a-${Date.now()}`, role: 'assistant', text: data.reply, changes, source: data.source, model: data.model ?? null },
       ])
       // 模型已经直接改过画布了：刷新一次，让用户看到节点/连线真的变了
-      if (changes.length > 0) onApplied()
+      if (changes.length > 0) await onApplied()
     } catch (error) {
-      setThread((prev) => [
+      update((prev) => [
         ...prev,
         { id: `a-${Date.now()}`, role: 'assistant', text: `出错了：${error instanceof Error ? error.message : String(error)}` },
       ])
@@ -137,6 +124,7 @@ export function AssistantBar({
 
   return (
     <div data-testid="assistant-bar" style={{ borderTop: '1px solid #e2e8f0', background: '#fff' }}>
+      {error && <p role="alert">{error} <button onClick={() => ready ? void persist().catch(() => {}) : setAttempt(n => n+1)}>重试</button></p>}
       {open && (
         <div
           data-testid="assistant-thread"
@@ -200,7 +188,7 @@ export function AssistantBar({
           onKeyDown={(event) => {
             if (event.key === 'Enter' && !event.shiftKey) {
               event.preventDefault()
-              void send()
+              submit()
             }
           }}
           onFocus={() => setOpen(true)}
@@ -211,7 +199,8 @@ export function AssistantBar({
           <button
             type="button"
             data-testid="clear-assistant"
-            onClick={() => setThread([])}
+            disabled={busy || !ready}
+            onClick={() => update(() => [])}
             title="清空对话记录"
             style={{ border: '1px solid #e2e8f0', background: '#fff', color: '#64748b', borderRadius: 8, padding: '7px 10px', fontSize: 12, cursor: 'pointer' }}
           >
@@ -221,8 +210,8 @@ export function AssistantBar({
         <button
           type="button"
           data-testid="assistant-send"
-          disabled={busy || !input.trim()}
-          onClick={() => void send()}
+          disabled={!ready || busy || !input.trim()}
+          onClick={submit}
           style={{ border: 'none', background: busy ? '#93c5fd' : '#2563eb', color: '#fff', borderRadius: 8, padding: '8px 16px', fontSize: 13, cursor: busy ? 'wait' : 'pointer' }}
         >
           {busy ? '…' : '发送'}

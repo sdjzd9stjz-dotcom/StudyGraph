@@ -49,12 +49,7 @@ export function SgGroupNode({ data }: NodeProps) {
    *   incompatible 接不上 → 压暗到 0.4，但仍可见
    *   origin       这根线就是从组拉出来的 → 保持不变
    */
-  /**
-   * 高亮优先从 context 读（真画布走这条），data 里的只当兜底。
-   *
-   * 为什么不让 data 兜底也生效：data 里一旦有值，groupNodes 就得依赖 connectDraft，
-   * 组节点在拖线开始时被重建，端口量测作废 —— 正是"出点拖不出线"的来源。
-   */
+  // 从 context 读高亮，不必为了换色重建整组节点。
   const draftValue = useConnectDraftValue()
   const highlight = draftValue ? draftValue.highlightFor(d.groupId) : (d.connectHighlight ?? null)
   const accent = highlight === 'compatible' ? '#22c55e' : highlight === 'origin' ? color : color

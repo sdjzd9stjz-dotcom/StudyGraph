@@ -1,4 +1,5 @@
 import Link from 'next/link'
+import { ReadSection } from '../../components/ReadSection'
 
 import { BackLink } from '../../components/BackLink'
 
@@ -14,7 +15,8 @@ export const dynamic = 'force-dynamic'
  * 而不是渲染一个空列表让人以为加载失败。
  */
 export default async function ProblemsPage({ searchParams }: { searchParams: { canvasId?: string } }) {
-  const canvases = await fetchCanvasList()
+  const canvases = await fetchCanvasList().catch(() => null)
+  if (!canvases) return <ReadSection error="题库画布列表" />
   const canvasId = searchParams.canvasId ?? canvases[0]?.id
   const problems = canvasId ? await fetchProblems(canvasId) : []
 

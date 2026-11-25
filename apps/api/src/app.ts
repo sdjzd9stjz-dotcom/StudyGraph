@@ -20,6 +20,7 @@ import { registerCompatRoutes } from './routes/compat.ts'
 import { registerConceptRoutes } from './routes/concepts.ts'
 import { registerDraftRoutes } from './routes/drafts.ts'
 import { registerEdgeRoutes } from './routes/edges.ts'
+import { registerCanvasEdits } from './routes/canvas-edits.ts'
 import { registerGraphRoutes } from './routes/graph.ts'
 import { registerGroupRoutes } from './routes/groups.ts'
 import { registerNodeRoutes } from './routes/nodes.ts'
@@ -219,6 +220,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   registerCanvasRoutes(app, { prisma, guard, objectStore })
   registerNodeRoutes(app, { prisma, guard })
   registerEdgeRoutes(app, { prisma, guard })
+  registerCanvasEdits(app, { prisma, guard })
   registerDraftRoutes(app, { prisma, guard, llm })
   registerGraphRoutes(app, { prisma, guard })
   registerGroupRoutes(app, { prisma, guard, llm })

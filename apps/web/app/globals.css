@@ -4,6 +4,15 @@
 @tailwind components;
 @tailwind utilities;
 
+/* 选中态要能压过组线的行内颜色，但保留虚线节奏以区分引用与依赖。 */
+.react-flow__edge.selected .react-flow__edge-path,
+.react-flow__edge:focus-visible .react-flow__edge-path {
+  stroke: #0369a1 !important;
+  stroke-width: 3 !important;
+  filter: drop-shadow(0 0 2px #38bdf8);
+}
+.react-flow__edge.selectable { cursor: pointer; }
+
 html,
 body {
   height: 100%;

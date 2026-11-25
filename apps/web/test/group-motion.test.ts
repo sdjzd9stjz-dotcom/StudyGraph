@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { buildFrames, easeOutCubic, frameSize, lerpPoint, restoreTargets, stackTargets } from '../lib/group-motion.ts'
+import { buildFrames, easeOutCubic, frameBox, frameSize, lerpPoint, restoreTargets, stackTargets } from '../lib/group-motion.ts'
+
+test('长卡及锚点旁的成员：四边留白，标题有独立空间', () => {
+  const box = frameBox([{ x: -40, y: 2, width: 460, height: 530 }, { x: 400, y: 110, width: 232, height: 90 }])
+  assert.deepEqual(box, { dx: -66, dy: -32, width: 724, height: 590 })
+})
 
 /**
  * 分组的开合动画与位置还原（用户 2026-11-24 要求）。

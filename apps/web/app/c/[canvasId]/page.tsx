@@ -1,4 +1,5 @@
 import Link from 'next/link'
+import { ReadSection } from '../../../components/ReadSection'
 
 import { CanvasWorkbench } from '../../../components/canvas/CanvasWorkbench'
 import { ConceptPanel } from '../../../components/ConceptPanel'
@@ -11,13 +12,14 @@ export const dynamic = 'force-dynamic'
 
 export default async function CanvasPage({ params }: { params: { canvasId: string } }) {
   const [canvas, groupsPayload, skillsPayload, concepts] = await Promise.all([
-    fetchCanvas(params.canvasId),
-    fetchGroups(params.canvasId),
-    fetchCanvasSkills(params.canvasId),
-    fetchCanvasConcepts(params.canvasId),
+    fetchCanvas(params.canvasId).catch(() => undefined),
+    fetchGroups(params.canvasId).catch(() => null),
+    fetchCanvasSkills().catch(() => null),
+    fetchCanvasConcepts(params.canvasId).catch(() => null),
   ])
 
-  if (!canvas) {
+  if (canvas === undefined) return <ReadSection key={params.canvasId} error="画布" />
+  if (canvas === null) {
     return (
       <main style={{ padding: 32 }}>
         <h1 style={{ fontSize: 20, fontWeight: 700 }}>画布不存在或无权访问</h1>
@@ -29,7 +31,7 @@ export default async function CanvasPage({ params }: { params: { canvasId: strin
   }
 
   return (
-    <main style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#f8fafc' }}>
+    <ReadSection key={params.canvasId}><main style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#f8fafc' }}>
       <header
         style={{
           display: 'flex',
@@ -64,7 +66,7 @@ export default async function CanvasPage({ params }: { params: { canvasId: strin
         </span>
       </header>
 
-      <CanvasWorkbench
+      <ReadSection key={canvas.id} error={!groupsPayload ? '画布分组' : !skillsPayload ? '技能' : undefined}>{groupsPayload && skillsPayload && <CanvasWorkbench
         canvasId={canvas.id}
         apiBaseUrl={API_BASE_URL}
         token={serverToken()}
@@ -81,14 +83,15 @@ export default async function CanvasPage({ params }: { params: { canvasId: strin
         initialEdges={canvas.edges.map((edge) => ({
           id: edge.id,
           fromNodeId: edge.fromNodeId,
+          kind: edge.kind,
           toNodeId: edge.toNodeId,
           fromPort: edge.fromPort,
           toPort: edge.toPort,
         }))}
         initialGroups={groupsPayload}
-        skills={skillsPayload.skills}
-        nodeSkills={skillsPayload.nodeSkills}
-      />
+        skills={skillsPayload}
+        nodeSkills={Object.fromEntries(canvas.nodes.map(n => [n.id, n.skillNames]))}
+      />}</ReadSection>
 
       {/**
         * 概念卡面板（含人工确认）。
@@ -99,17 +102,17 @@ export default async function CanvasPage({ params }: { params: { canvasId: strin
 
       <details data-testid="concept-panel-wrapper" style={{ borderTop: '1px solid #e2e8f0', background: '#fff' }}>
         <summary style={{ cursor: 'pointer', padding: '8px 16px', fontSize: 13, color: '#334155' }}>
-          概念卡（{concepts.length}）—— 出题前需要在这里确认
+          概念卡{concepts && `（${concepts.length}）`} —— 出题前需要在这里确认
         </summary>
         <div style={{ padding: '0 16px 16px' }}>
-          <ConceptPanel
+          <ReadSection key={canvas.id} error={concepts ? undefined : '概念卡'}>{concepts && <ConceptPanel
             canvasId={canvas.id}
             apiBaseUrl={API_BASE_URL}
             token={serverToken()}
             initialConcepts={concepts}
-          />
+          />}</ReadSection>
         </div>
       </details>
-    </main>
+    </main></ReadSection>
   )
 }
