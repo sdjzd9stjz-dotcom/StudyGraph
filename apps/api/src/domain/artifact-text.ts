@@ -8,12 +8,25 @@
  * 输出约定：纯文本、按行组织，客户端用等宽/多行方式渲染成"带解释的卡片"。
  */
 
+import { splitMath } from '../../../../packages/contracts/src/math-text.ts'
+
 const MAX_LINES = 14
 const MAX_LINE = 120
 
 function clip(text: string, max = MAX_LINE): string {
-  const flat = text.replace(/\s+/g, ' ').trim()
-  return flat.length > max ? `${flat.slice(0, max)}…` : flat
+  const parts = splitMath(text.trim())
+  let result = ''
+  for (const [i, part] of parts.entries()) {
+    const value = part.formula ? part.raw : part.raw.replace(/\s+/g, ' ')
+    const remaining = max - result.length
+    if (value.length > remaining) {
+      // 在公式中间截断会丢失定界符，卡片只显示反斜杠。允许当前公式单独超出摘要长度。
+      if (part.formula && remaining > 0) return result + value + (i + 1 < parts.length ? '…' : '')
+      return result + value.slice(0, Math.max(0, remaining)) + '…'
+    }
+    result += value
+  }
+  return result
 }
 
 function asArray(value: unknown): unknown[] {

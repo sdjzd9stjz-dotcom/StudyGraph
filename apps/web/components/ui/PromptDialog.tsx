@@ -1,5 +1,7 @@
 'use client'
 
+import { MathText } from '../MathText'
+
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 /**
@@ -149,12 +151,12 @@ function PromptModal({
         <h2 style={{ fontSize: 16, fontWeight: 700, margin: '0 0 6px' }}>{options.title}</h2>
         {state.kind === 'confirm' ? (
           <p style={{ fontSize: 13, color: '#475569', margin: '0 0 16px', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>
-            {state.options.message}
+            <MathText>{state.options.message}</MathText>
           </p>
         ) : (
           <>
             {state.options.description && (
-              <p style={{ fontSize: 12, color: '#64748b', margin: '0 0 8px' }}>{state.options.description}</p>
+              <p style={{ fontSize: 12, color: '#64748b', margin: '0 0 8px' }}><MathText>{state.options.description}</MathText></p>
             )}
             <input
               autoFocus

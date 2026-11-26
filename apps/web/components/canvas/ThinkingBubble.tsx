@@ -1,5 +1,7 @@
 'use client'
 
+import { MathText } from '../MathText'
+
 import { useEffect, useState } from 'react'
 
 /**
@@ -85,7 +87,7 @@ export function ThinkingBubble({ thinking, stage }: { thinking?: string | null; 
             fontSize: 11,
           }}
         >
-          {thinking}
+          <MathText>{thinking}</MathText>
         </div>
       )}
 

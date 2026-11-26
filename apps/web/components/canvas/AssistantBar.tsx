@@ -1,5 +1,7 @@
 'use client'
 
+import { MathText } from '../MathText'
+
 import { useEffect, useRef, useState } from 'react'
 
 import { ThinkingBubble } from './ThinkingBubble'
@@ -128,7 +130,7 @@ export function AssistantBar({canvasId, apiBaseUrl, token, onApplied, flushRef}:
       {open && (
         <div
           data-testid="assistant-thread"
-          style={{ maxHeight: 300, overflowY: 'auto', padding: '10px 14px', display: 'grid', gap: 10 }}
+          style={{ maxHeight: 300, overflowY: 'auto', padding: '10px 14px', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 10 }}
         >
           {thread.length === 0 && (
             <div style={{ fontSize: 12, color: '#94a3b8', lineHeight: 1.7 }}>
@@ -144,7 +146,7 @@ export function AssistantBar({canvasId, apiBaseUrl, token, onApplied, flushRef}:
               data-testid={`assistant-msg-${turn.role}`}
               style={{
                 justifySelf: turn.role === 'user' ? 'end' : 'start',
-                maxWidth: '86%',
+                minWidth: 0, maxWidth: '86%',
                 background: turn.role === 'user' ? '#eff6ff' : '#f8fafc',
                 border: `1px solid ${turn.role === 'user' ? '#bfdbfe' : '#e2e8f0'}`,
                 borderRadius: 10,
@@ -156,12 +158,12 @@ export function AssistantBar({canvasId, apiBaseUrl, token, onApplied, flushRef}:
                 {turn.role === 'user' ? '你' : 'AI'}
                 {turn.source === 'model' ? ` · 你的模型${turn.model ? `（${turn.model}）` : ''}` : ''}
               </div>
-              <div style={{ color: '#334155', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>{turn.text}</div>
+              <div style={{ color: '#334155', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}><MathText>{turn.text}</MathText></div>
 
               {turn.changes && turn.changes.length > 0 && (
                 <div data-testid={`assistant-changes-${turn.id}`} style={{ marginTop: 6, fontSize: 11, color: '#059669' }}>
                   ✓ 画布已改动 {turn.changes.length} 处：
-                  {turn.changes.map((change) => change.label).join('、')}
+                  <MathText>{turn.changes.map((change) => change.label).join('、')}</MathText>
                 </div>
               )}
             </div>

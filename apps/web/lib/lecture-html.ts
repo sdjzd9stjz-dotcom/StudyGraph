@@ -8,6 +8,9 @@
  * （讲义来自模型，模型输出属于不可信内容）。
  */
 
+import { splitMath } from '../../../packages/contracts/src/math-text.ts'
+import { typeset } from './math-html.ts'
+
 function escapeHtml(text: string): string {
   return text
     .replace(/&/g, '&amp;')
@@ -20,7 +23,7 @@ function inline(text: string): string {
   return escapeHtml(text)
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/\$([^$]+)\$/g, '<span class="math">$1</span>')
+
 }
 
 function renderMarkdown(markdown: string): string {
@@ -107,7 +110,17 @@ function renderMarkdown(markdown: string): string {
 }
 
 export function renderLectureHtml(title: string, markdown: string): string {
-  const body = renderMarkdown(markdown)
+  // 先隔离公式，Markdown 的换行、粗体和下划线才不会改写 TeX 或 MathML 标签。
+  let marker = 'SGMATH'
+  while (markdown.includes(marker)) marker += 'X'
+  const slots: string[] = []
+  const prose = splitMath(markdown).map(part => {
+    if (!part.formula) return part.raw
+    const index = slots.push(typeset(part, true) ?? escapeHtml(part.raw)) - 1
+    return marker + index + 'Z'
+  }).join('')
+  const body = renderMarkdown(prose).replace(new RegExp(marker + '(\\d+)Z', 'g'), (_, id) => slots[Number(id)]!)
+  const heading = splitMath(title).map(part => typeset(part, true) ?? escapeHtml(part.raw)).join('')
   const safeTitle = escapeHtml(title)
   return `<!doctype html>
 <html lang="zh-CN">
@@ -134,12 +147,13 @@ export function renderLectureHtml(title: string, markdown: string): string {
   blockquote { margin: 3mm 0; padding: 2mm 4mm; border-left: 3px solid #94a3b8; color: #475569; background: #f8fafc; }
   code { font-family: Consolas, "Courier New", monospace; background: #f1f5f9; padding: 0 1mm; border-radius: 2px; font-size: 10pt; }
   pre { background: #f8fafc; border: 1px solid #e2e8f0; padding: 3mm; white-space: pre-wrap; word-break: break-word; font-size: 10pt; }
-  .math { font-family: "Cambria Math", "Times New Roman", serif; font-style: italic; }
+  math { font-family: "Cambria Math", math; }
+  math[display="block"] { margin: 2mm 0; break-inside: avoid; }
   .footer { margin-top: 12mm; padding-top: 3mm; border-top: 1px solid #e2e8f0; font-size: 9pt; color: #94a3b8; }
 </style>
 </head>
 <body>
-  <h1>${safeTitle}</h1>
+  <h1>${heading}</h1>
   ${body}
   <div class="footer">由 StudyGraph 根据画布节点的产出与对话生成</div>
 </body>

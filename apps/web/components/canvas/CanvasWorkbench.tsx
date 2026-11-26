@@ -1,5 +1,7 @@
 'use client'
 
+import { MathText } from '../MathText'
+
 import {
   Background,
   BackgroundVariant,
@@ -1964,7 +1966,7 @@ function Inner({
               data-testid="canvas-toast"
               style={{ position: 'absolute', left: '50%', bottom: 16, transform: 'translateX(-50%)', background: '#0f172a', color: '#fff', padding: '7px 14px', borderRadius: 8, fontSize: 12, opacity: 0.94 }}
             >
-              {toast}
+              <MathText>{toast}</MathText>
             </div>
           )}
 

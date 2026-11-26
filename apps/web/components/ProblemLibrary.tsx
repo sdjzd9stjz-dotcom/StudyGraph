@@ -1,5 +1,7 @@
 'use client'
 
+import { MathText } from './MathText'
+
 import { useRouter } from 'next/navigation'
 import { useState } from 'react'
 
@@ -159,13 +161,13 @@ export function ProblemLibrary({
                 {problem.attempts > 0 && <span style={{ fontSize: 11, color: '#9ca3af' }}>已作答 {problem.attempts} 次</span>}
               </div>
 
-              <div style={{ fontSize: 13, color: '#1f2937', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>{problem.stem}</div>
+              <div style={{ fontSize: 13, color: '#1f2937', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}><MathText>{problem.stem}</MathText></div>
 
               {problem.concepts.length > 0 && (
                 <div style={{ marginTop: 6, display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                   {problem.concepts.map((concept) => (
                     <span key={concept.id} style={{ fontSize: 10, color: '#6366f1', background: '#eef2ff', borderRadius: 4, padding: '1px 6px' }}>
-                      {concept.name}
+                      <MathText>{concept.name}</MathText>
                     </span>
                   ))}
                 </div>

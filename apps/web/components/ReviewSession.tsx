@@ -1,5 +1,7 @@
 'use client'
 
+import { MathText } from './MathText'
+
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { useState } from 'react'
@@ -93,7 +95,7 @@ export function ReviewSession({ items, apiBaseUrl, token }: { items: DueItem[]; 
         <p style={{ color: '#6b7280', fontSize: 13, marginBottom: 12 }}>共复习 {done.length} 张。</p>
         <ul style={{ listStyle: 'none', padding: 0, fontSize: 13, display: 'grid', gap: 6 }}>
           {done.map((entry, i) => (
-            <li key={`${entry.name}-${i}`} style={{ display: 'flex', gap: 8 }}>
+            <li key={`$<MathText>{entry.name}</MathText>-${i}`} style={{ display: 'flex', gap: 8 }}>
               <span style={{ color: '#6b7280' }}>{entry.name}</span>
               <span style={{ color: '#9ca3af' }}>
                 {GRADES.find((g) => g.value === entry.grade)?.label} · {formatDays(entry.days)}后再见
@@ -128,7 +130,7 @@ export function ReviewSession({ items, apiBaseUrl, token }: { items: DueItem[]; 
             color: '#166534',
           }}
         >
-          上一张「{lastResult.name}」已记为 {GRADE_LABELS[lastResult.grade] ?? lastResult.grade} ·{' '}
+          上一张「<MathText>{lastResult.name}</MathText>」已记为 {GRADE_LABELS[lastResult.grade] ?? lastResult.grade} ·{' '}
           <strong>下次复习：{formatDays(lastResult.days)}后</strong>
         </div>
       )}
@@ -144,9 +146,9 @@ export function ReviewSession({ items, apiBaseUrl, token }: { items: DueItem[]; 
       </div>
 
       <h2 data-testid="review-name" style={{ fontSize: 22, fontWeight: 700, marginBottom: 10 }}>
-        {current.name}
+        <MathText>{current.name}</MathText>
       </h2>
-      <p style={{ fontSize: 15, lineHeight: 1.7, color: '#374151', marginBottom: 24 }}>{current.definition}</p>
+      <p style={{ fontSize: 15, lineHeight: 1.7, color: '#374151', marginBottom: 24 }}><MathText>{current.definition}</MathText></p>
 
       {error && (
         <p data-testid="review-error" style={{ fontSize: 13, color: '#dc2626', marginBottom: 12 }}>

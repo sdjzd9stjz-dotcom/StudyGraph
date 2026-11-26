@@ -38,3 +38,9 @@ body {
     background: #fff;
   }
 }
+
+/* 公式宽于气泡时可单独横向滚动，让节点和对话框保持原有宽度。 */
+.sg-math-block, .sg-math-inline { max-width: 100%; white-space: normal; }
+.sg-math-block { display: block; overflow-x: auto; overflow-y: hidden; padding: .15em 0; }
+.sg-math-block .katex-display { margin: .25em 0; }
+.sg-math-inline { display: inline-block; vertical-align: middle; overflow-x: auto; }

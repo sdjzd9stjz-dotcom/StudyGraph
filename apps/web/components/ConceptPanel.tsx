@@ -1,5 +1,7 @@
 'use client'
 
+import { MathText } from './MathText'
+
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import type { CanvasConcept } from '../lib/api'
@@ -238,7 +240,7 @@ export function ConceptPanel({ canvasId, apiBaseUrl, token, initialConcepts }: C
                 style={{ border: '1px solid #e5e7eb', borderRadius: 10, padding: '10px 12px', background: '#fff' }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                  <strong style={{ fontSize: 14 }}>{concept.name}</strong>
+                  <strong style={{ fontSize: 14 }}><MathText>{concept.name}</MathText></strong>
                   <span
                     data-testid="concept-status"
                     style={{ fontSize: 11, color: tone.color, background: tone.bg, borderRadius: 999, padding: '1px 8px' }}
@@ -272,7 +274,7 @@ export function ConceptPanel({ canvasId, apiBaseUrl, token, initialConcepts }: C
                     </span>
                   )}
                 </div>
-                <p style={{ fontSize: 13, color: '#374151', margin: '6px 0' }}>{concept.definition}</p>
+                <p style={{ fontSize: 13, color: '#374151', margin: '6px 0' }}><MathText>{concept.definition}</MathText></p>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                   {concept.citations.length === 0 ? (
@@ -390,7 +392,7 @@ export function ConceptPanel({ canvasId, apiBaseUrl, token, initialConcepts }: C
                 data-testid="drawer-quote"
                 style={{ margin: '4px 0 0', paddingLeft: 8, borderLeft: '3px solid #d1d5db', color: '#374151' }}
               >
-                {detail.quote}
+                <MathText>{detail.quote}</MathText>
               </blockquote>
             </div>
           )}

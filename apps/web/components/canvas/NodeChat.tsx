@@ -1,5 +1,7 @@
 'use client'
 
+import { MathText } from '../MathText'
+
 import { useEffect, useRef, useState } from 'react'
 
 import { ThinkingBubble } from './ThinkingBubble'
@@ -109,7 +111,7 @@ export function NodeChat({
       }}
     >
       <header style={{ padding: '10px 12px', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', gap: 8 }}>
-        <div style={{ fontSize: 13, fontWeight: 600 }}>{nodeTitle || nodeType}</div>
+        <div style={{ fontSize: 13, fontWeight: 600 }}><MathText>{nodeTitle || nodeType}</MathText></div>
         <span style={{ fontSize: 10, color: '#94a3b8' }}>节点对话</span>
         <button
           type="button"
@@ -121,7 +123,7 @@ export function NodeChat({
         </button>
       </header>
 
-      <div style={{ flex: 1, overflowY: 'auto', padding: '10px 12px', display: 'grid', gap: 10, alignContent: 'start' }}>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '10px 12px', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 10, alignContent: 'start' }}>
         {turns.length === 0 && (
           <p style={{ fontSize: 12, color: '#94a3b8', lineHeight: 1.7 }}>
             就这个节点里的内容提问。比如：
@@ -138,7 +140,7 @@ export function NodeChat({
             data-testid={`node-chat-${turn.role}`}
             style={{
               justifySelf: turn.role === 'user' ? 'end' : 'start',
-              maxWidth: '92%',
+              minWidth: 0, maxWidth: '92%',
               background: turn.role === 'user' ? '#eff6ff' : '#f8fafc',
               border: `1px solid ${turn.role === 'user' ? '#bfdbfe' : '#e2e8f0'}`,
               borderRadius: 10,
@@ -149,7 +151,7 @@ export function NodeChat({
               lineHeight: 1.6,
             }}
           >
-            {turn.text}
+            <MathText>{turn.text}</MathText>
           </div>
         ))}
         <div ref={bottom} />

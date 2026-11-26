@@ -1,5 +1,7 @@
 'use client'
 
+import { MathText } from '../MathText'
+
 import { useEffect, useState } from 'react'
 
 /**
@@ -77,7 +79,7 @@ export function GroupCreateDialog({ memberCount, outside, onCancel, onConfirm }:
             style={{ border: '1px solid #fde68a', background: '#fffbeb', borderRadius: 8, padding: '9px 11px', marginBottom: 16 }}
           >
             <p style={{ fontSize: 12, color: '#92400e', margin: '0 0 7px', lineHeight: 1.6 }}>
-              这些节点和组外有连线：{outside.slice(0, 5).join('、')}
+              这些节点和组外有连线：<MathText>{outside.slice(0, 5).join('、')}</MathText>
               {outside.length > 5 ? ` 等 ${outside.length} 个` : ''}。
               <br />
               不纳入的话，收起后这些连线会"看不见但还在"，上下游关系会变得难理解。

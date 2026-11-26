@@ -1,5 +1,7 @@
 'use client'
 
+import { MathText } from '../MathText'
+
 import { Handle, Position } from '@xyflow/react'
 import type { NodeProps } from '@xyflow/react'
 
@@ -232,7 +234,7 @@ function Header({ d, color, collapsed }: { d: SgGroupData; color: string; collap
         {collapsed ? '▸' : '▾'}
       </button>
 
-      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.title}</span>
+      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><MathText>{d.title}</MathText></span>
       <span style={{ color: '#94a3b8', fontWeight: 400, flexShrink: 0 }}>{d.memberCount} 个</span>
 
       <button

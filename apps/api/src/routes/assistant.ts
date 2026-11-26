@@ -133,7 +133,7 @@ function registerNodeChat(app: FastifyInstance, deps: AssistantRouteDeps): void 
               '1. 只依据上面的内容回答，不要补充内容里没有的知识\n' +
               '2. 解释要具体到内容里的条目，别讲空话\n' +
               '3. 内容里没有答案就说"这个节点的产出里没有"，并说明需要哪个节点提供\n' +
-              '4. 不要建议执行节点，不要编造引文',
+              '4. 不要建议执行节点，不要编造引文。回答中的数学公式用 $...$ 或 $$...$$ 包裹，逐字引文保留原样。',
           },
           ...history.map((turn) => ({ role: turn.role as 'user' | 'assistant', content: turn.content })),
         ],

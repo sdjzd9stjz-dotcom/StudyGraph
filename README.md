@@ -22,7 +22,7 @@ https://github.com/user-attachments/assets/eb32aac2-2529-4190-a0ff-404f53d9d2c4
 
 ## 当前状态
 
-**Windows 桌面版，当前本地安装包版本为 0.22.3。** 画布提供 19 种可运行的节点，覆盖课件解析、知识卡制作、练习、组卷和复习。
+**Windows 桌面版 0.25.6** 支持在画布和对话中离线显示 LaTeX 公式。画布提供 19 种可运行的节点，覆盖课件解析、知识卡制作、练习、组卷和复习。
 
 | 已交付 | 路径 |
 | --- | --- |
@@ -33,23 +33,33 @@ https://github.com/user-attachments/assets/eb32aac2-2529-4190-a0ff-404f53d9d2c4
 | PDF / PPTX / 纯图片 PDF（OCR）解析 | `apps/api/src/storage/` |
 | 概念拆分、一键整理布局 | `apps/api/src/domain/split-cards.ts`、`layout.ts` |
 | Next.js 界面：画布、复习、题库、错题看板、模型配置、**内置教程** | `apps/web/app/` |
-| 全量领域模型（46 表 / 33 枚举） | `packages/db/prisma/schema.prisma` |
-| 迁移（18 份，含物理约束与触发器） | `packages/db/prisma/migrations/` |
+| 全量领域模型（49 个模型 / 33 个枚举） | `packages/db/prisma/schema.prisma` |
+| 迁移（21 份，含物理约束与触发器） | `packages/db/prisma/migrations/` |
 | 使用说明书（Markdown + PDF，应用内 `/guide` 直接读它） | `docs/使用说明书.md` |
 | 架构决策与不变量 | `docs/architecture.md` |
 
-安装包：`dist-desktop/installer/StudyGraph-Setup-<版本>.exe`（目标机不需要装任何东西，
-不需要 Docker、不需要管理员权限，支持卸载时保留数据并在重装后自动接上）。
+[下载 Windows 64 位安装包](https://github.com/sdjzd9stjz-dotcom/StudyGraph/releases/download/v0.25.6/StudyGraph-Setup-0.25.6.exe) · [发布说明与 SHA-256 校验值](https://github.com/sdjzd9stjz-dotcom/StudyGraph/releases/tag/v0.25.6)。可按当前用户安装，所需运行环境已随包提供。卸载时可选择保留学习数据，重装后继续使用。
 
 ---
 
 ## 桌面版怎么用
 
-1. 双击安装包（**安装路径必须是纯英文**，PostgreSQL 在中文路径下起不来）
+1. 双击安装包。安装路径可以包含中文，首次启动时客户端会为 PostgreSQL 自动选择可写的纯英文路径。
 2. 打开后进「模型供应商」，填自己的密钥（DeepSeek / 通义 / Kimi / OpenAI / 自建 OpenAI 兼容端点都行）
 3. 新建画布 → 上传 PPTX 或 PDF → 从左侧拖节点、连端口
 4. 每个节点点 ▶ 运行；点 💬 就这个节点的内容提问
 5. 底部对话框直接说人话：`把课件做成知识卡并出题`、`把概念拆成知识卡`、`帮我整理一下`
+
+### 在画布和对话中阅读数学公式
+
+卡片外侧的标题和产出、节点对话、底部助手的消息和思考摘要都支持 LaTeX。概念卡、今日复习、题库，以及导出的讲义 PDF 也会排版公式。公式渲染可离线使用；重新打开已有对话时，带定界符的历史消息会自动排版。
+
+| 用法 | 可直接输入的示例 | 另一种写法 |
+| --- | --- | --- |
+| 行内公式，跟随正文 | `$\frac{a}{b}$` | `\(\frac{a}{b}\)` |
+| 独立公式，另起一行 | `$$\sum_{i=1}^{n} i$$` | `\[\sum_{i=1}^{n} i\]` |
+
+输入时可直接编辑 LaTeX 源码，发送后查看排版效果。反引号中的代码示例和未闭合的公式会保留原文。
 
 ### 用知识卡出题和复习
 
@@ -81,6 +91,9 @@ node packages/contracts/test/ports.test.ts
 # 出题题型约束（使用模拟模型，在仓库根目录运行）
 node --test apps/api/test/unit/quiz-type-constraint.test.ts apps/api/test/unit/quiz-executor-constraint.test.ts
 
+# LaTeX 定界符、代码示例和讲义打印
+node --test apps/web/test/math.test.ts
+
 # 集成测试需要真实 PostgreSQL（DATABASE_URL 指向可用的测试库）
 pnpm --filter @studygraph/api test:integration
 ```
@@ -105,7 +118,7 @@ studygraph/
 │  └─ desktop/    Electron 壳：内置库生命周期、preload、PDF 打印
 ├─ packages/
 │  ├─ contracts/  前后端共享：节点类型、端口矩阵、指纹、连线校验
-│  ├─ db/         Prisma schema + 18 份迁移 + 手写 SQL（递归 CTE、物理约束）
+│  ├─ db/         Prisma schema + 21 份迁移 + 手写 SQL（递归 CTE、物理约束）
 │  └─ ui/         设计令牌与共享原语
 ├─ scripts/       prisma CLI 启动器、打包、审计、验收
 ├─ vendor/pg16/   打包用的 PostgreSQL 16 + pgvector 运行时
@@ -141,8 +154,8 @@ studygraph/
    任一失败标 `REJECTED` 并附理由，不得入库。
 5. **每个干扰项必须诊断一个错因** —— 错误选项绑定 `ErrorTag`，禁止凑数选项。
 
-另有一条关于 AI 的边界：**底部 agent 提供 9 个画布工具**
-（查画布、读产出、建/改/删节点、建/删连线、拆卡、整理），
+另有一条关于 AI 的边界：**底部 agent 提供 13 个画布工具**
+（查画布、读产出、建/改/删节点、建/删连线、拆卡、整理布局，以及查看、创建、重命名和拆开分组），
 没有文件、网络、命令，也不能执行节点。
 
 设计理由与实现落点见 [docs/architecture.md](docs/architecture.md)。
@@ -163,7 +176,7 @@ studygraph/
 
 ## 技术栈
 
-Next.js 14 App Router · TypeScript · @xyflow/react · Fastify · Prisma 6 ·
+Next.js 14 App Router · TypeScript · @xyflow/react · KaTeX · Fastify · Prisma 6 ·
 PostgreSQL 16 + pgvector · Electron 33 · pdfjs-dist · tesseract.js（本机 OCR）
 
 不直连厂商 API（所有调用经 Gateway 收口）、不上 Neo4j、不用 OT —— 理由见

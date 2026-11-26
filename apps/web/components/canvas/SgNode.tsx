@@ -1,5 +1,7 @@
 'use client'
 
+import { MathText } from '../MathText'
+
 import { Handle, Position } from '@xyflow/react'
 import type { NodeProps } from '@xyflow/react'
 import { useRef, useState } from 'react'
@@ -547,7 +549,7 @@ export function SgNode({ id, data, selected }: NodeProps) {
 
       {/* 输出内容：常驻。跑过的节点显示成一张"带解释的卡片"，没跑过显示提示 */}
       <div style={{ padding: '7px 9px' }}>
-        {d.title && <div style={{ fontWeight: 600, marginBottom: 3 }}>{d.title}</div>}
+        {d.title && <div style={{ fontWeight: 600, marginBottom: 3 }}><MathText>{d.title}</MathText></div>}
         <div
           data-testid="node-output"
           data-has-content={d.outputSummary ? 'true' : 'false'}
@@ -565,7 +567,7 @@ export function SgNode({ id, data, selected }: NodeProps) {
             padding: d.outputSummary ? '6px 8px' : 0,
           }}
         >
-          {d.outputSummary ?? nodeHint(d.nodeType)}
+          <MathText>{d.outputSummary ?? nodeHint(d.nodeType)}</MathText>
         </div>
         {d.inputs.some((port) => port.external) && (
           <div style={{ marginTop: 5, border: '1px dashed #cbd5e1', borderRadius: 5, padding: '2px 6px', color: '#64748b', fontSize: 10 }}>
