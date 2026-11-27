@@ -9,6 +9,7 @@ import type {
   ToolCall,
   ToolSpec,
 } from '../types.ts'
+import { meteredUsage, readUsageFields } from './cache-usage.ts'
 import { assertUsageAndModel } from './validate.ts'
 
 /**
@@ -24,6 +25,8 @@ export interface ProviderCall {
   readonly messages: readonly Message[]
   readonly jsonSchema?: JSONSchema
   readonly maxTokens?: number
+  readonly effort?: string
+  readonly cacheConversation?: boolean
   readonly cachePrefix?: CachePrefix
 }
 
@@ -41,6 +44,7 @@ export interface OpenAICompatibleConfig {
   readonly baseUrl: string
   readonly fetchImpl?: typeof fetch
   /** DeepSeek 只支持 `json_object`；OpenAI 用 `json_schema` 强制结构 */
+  readonly routingKey?: string
   readonly jsonMode?: 'json_schema' | 'json_object'
 }
 
@@ -114,7 +118,7 @@ async function readSseAsPayload(response: Response): Promise<{
     message?: {
       content?: string
       reasoning_content?: string
-      tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }>
+      tool_calls?: Array<{ id?: string; extra_content?: Record<string, unknown>; function?: { name?: string; arguments?: string } }>
     }
     finish_reason?: string
   }>
@@ -126,7 +130,7 @@ async function readSseAsPayload(response: Response): Promise<{
   let finishReason: string | undefined
   let model: unknown
   let usage: unknown
-  const calls = new Map<number, { id?: string; name?: string; args: string }>()
+  const calls = new Map<number, { id?: string; name?: string; extra_content?: Record<string, unknown>; args: string }>()
 
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.trim()
@@ -141,7 +145,7 @@ async function readSseAsPayload(response: Response): Promise<{
         delta?: {
           content?: string | null
           reasoning_content?: string
-          tool_calls?: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }>
+          tool_calls?: Array<{ index?: number; id?: string; extra_content?: Record<string, unknown>; function?: { name?: string; arguments?: string } }>
         }
         finish_reason?: string | null
       }>
@@ -165,6 +169,7 @@ async function readSseAsPayload(response: Response): Promise<{
     for (const call of delta.tool_calls ?? []) {
       const index = typeof call.index === 'number' ? call.index : 0
       const slot = calls.get(index) ?? { args: '' }
+      if (call.extra_content) slot.extra_content = call.extra_content
       if (call.id) slot.id = call.id
       if (call.function?.name) slot.name = call.function.name
       if (call.function?.arguments) slot.args += call.function.arguments
@@ -187,6 +192,7 @@ async function readSseAsPayload(response: Response): Promise<{
                   .sort(([a], [b]) => a - b)
                   .map(([, call], index) => ({
                     id: call.id ?? `call_${index}`,
+                    extra_content: call.extra_content,
                     function: { name: call.name ?? '', arguments: call.args || '{}' },
                   })),
               }
@@ -228,9 +234,44 @@ function parseLooseJson(content: string): unknown {
   throw new Error('no-json')
 }
 
+function sumAttempts(last: TokenUsage, prior: ReturnType<typeof meteredUsage> | undefined): TokenUsage {
+  if (!prior) return last
+  return { tokensIn: last.tokensIn + prior.tokensIn, tokensOut: last.tokensOut + prior.tokensOut,
+    cachedTokens: last.cachedTokens + prior.cachedTokens,
+    cacheUsageComplete: last.cacheUsageComplete !== false && prior.cacheUsageComplete }
+}
+
+function generationParameters(model: string, budget: number, effort?: string) {
+  const deepseek = /^deepseek-(?:flash|v4-(?:pro|flash))$/.test(model)
+  return {
+    ...(/^(?:gpt-[56](?:[.-]|$)|o[134](?:-|$))/.test(model) ? { max_completion_tokens: budget } : { max_tokens: budget }),
+    ...(effort && (!deepseek || effort !== 'none') ? { reasoning_effort: effort } : {}),
+    ...(deepseek && effort ? { thinking: { type: effort === 'none' ? 'disabled' : 'enabled' } } : {}),
+  }
+}
+
+function compatiblePost(config: OpenAICompatibleConfig) {
+  const doFetch = config.fetchImpl ?? fetch
+  let acceptsKey = true
+  const send = (body: Record<string, unknown>) => doFetch(`${config.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${config.apiKey}` }, body: JSON.stringify(body),
+  })
+  return async (payload: Record<string, unknown>) => {
+    const { prompt_cache_key: explicitKey, ...body } = payload
+    const key = explicitKey ?? config.routingKey
+    if (config.provider !== 'openai' || !key || !acceptsKey) return send(body)
+    const response = await send({ ...body, prompt_cache_key: key })
+    if ([400, 422].includes(response.status) && /prompt_cache_key/i.test(await response.clone().text())) {
+      acceptsKey = false
+      return send(body)
+    }
+    return response
+  }
+}
+
 export function createOpenAICompatibleProvider(config: OpenAICompatibleConfig) {
   const jsonMode = config.jsonMode ?? 'json_schema'
-  const doFetch = config.fetchImpl ?? fetch
+  const post = compatiblePost(config)
 
   return async function call(input: ProviderCall): Promise<ProviderResult> {
     const prefixText = input.cachePrefix?.text?.trim()
@@ -253,7 +294,9 @@ export function createOpenAICompatibleProvider(config: OpenAICompatibleConfig) {
      * `label`、`from/to` 写成 `source/target`）。
      */
     if (input.jsonSchema) {
-      messages.push({
+      // 固定规则放在首条变化的消息之前，各批课件共享同一段前缀。
+      const firstDialogue = messages.findIndex(message => message.role !== 'system')
+      messages.splice(firstDialogue < 0 ? messages.length : firstDialogue, 0, {
         role: 'system',
         content:
           '只输出一个 JSON 对象（json），不要输出任何解释、不要用 Markdown 代码块。' +
@@ -261,16 +304,6 @@ export function createOpenAICompatibleProvider(config: OpenAICompatibleConfig) {
           JSON.stringify(input.jsonSchema),
       })
     }
-
-    const post = (payload: Record<string, unknown>) =>
-      doFetch(`${config.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${config.apiKey}`,
-        },
-        body: JSON.stringify(payload),
-      })
 
     /**
      * `response_format` 被拒时的降级阶梯：`json_schema` → `json_object` → 不带格式。
@@ -302,7 +335,6 @@ export function createOpenAICompatibleProvider(config: OpenAICompatibleConfig) {
           streamed = true
           current = {
             ...current,
-            ...(config.provider === 'deepseek' ? {} : {}),
             stream_options: { include_usage: true },
           }
           continue
@@ -327,12 +359,13 @@ export function createOpenAICompatibleProvider(config: OpenAICompatibleConfig) {
 
     let budget = Math.min(Math.max(input.maxTokens ?? DEFAULT_MAX_TOKENS, 512), HARD_MAX_TOKENS)
     let retriedForLength = false
+    let priorUsage: ReturnType<typeof meteredUsage> | undefined
 
     for (;;) {
       const body: Record<string, unknown> = {
         model: input.model,
         messages,
-        max_tokens: budget,
+        ...generationParameters(input.model, budget, input.effort),
       }
 
       if (input.jsonSchema) {
@@ -385,6 +418,7 @@ export function createOpenAICompatibleProvider(config: OpenAICompatibleConfig) {
        */
       const empty = typeof content !== 'string' || content.trim().length === 0
       if ((empty || finishReason === 'length') && !retriedForLength && budget < HARD_MAX_TOKENS) {
+        priorUsage = meteredUsage((payload.usage ?? {}) as Record<string, unknown>)
         retriedForLength = true
         budget = Math.min(budget * 2, HARD_MAX_TOKENS)
         continue
@@ -399,22 +433,8 @@ export function createOpenAICompatibleProvider(config: OpenAICompatibleConfig) {
         )
       }
 
-      const { modelVersion, usage } = assertUsageAndModel(config.provider, payload, (raw) => {
-        if (config.provider === 'deepseek') {
-          // DeepSeek 把缓存命中直接写在 usage 里（009 §3.1），最省事的一家
-          return {
-            tokensIn: raw.prompt_tokens,
-            tokensOut: raw.completion_tokens,
-            cachedTokens: raw.prompt_cache_hit_tokens,
-          }
-        }
-        const details = raw.prompt_tokens_details as { cached_tokens?: unknown } | undefined
-        return {
-          tokensIn: raw.prompt_tokens,
-          tokensOut: raw.completion_tokens,
-          cachedTokens: details?.cached_tokens,
-        }
-      })
+      const { modelVersion, usage: lastUsage } = assertUsageAndModel(config.provider, payload, readUsageFields)
+      const usage = sumAttempts(lastUsage, priorUsage)
 
       /**
        * 没要求 JSON 的调用**不解析内容**，原样当文本返回。
@@ -479,10 +499,11 @@ export interface AgentProviderCall {
   readonly messages: readonly AgentMessage[]
   readonly tools: readonly ToolSpec[]
   readonly maxTokens?: number
+  readonly effort?: string
 }
 
 export function createOpenAICompatibleAgent(config: OpenAICompatibleConfig) {
-  const doFetch = config.fetchImpl ?? fetch
+  const post = compatiblePost(config)
 
   const toWire = (message: AgentMessage): Record<string, unknown> => {
     if (message.role === 'tool') {
@@ -491,12 +512,14 @@ export function createOpenAICompatibleAgent(config: OpenAICompatibleConfig) {
     if (message.role === 'assistant') {
       return {
         role: 'assistant',
+        ...(message.reasoningContent !== undefined ? { reasoning_content: message.reasoningContent } : {}),
         content: message.content.length > 0 ? message.content : null,
         ...(message.toolCalls?.length
           ? {
               tool_calls: message.toolCalls.map((call) => ({
                 id: call.id,
                 type: 'function',
+                extra_content: call.extraContent,
                 function: { name: call.name, arguments: call.arguments },
               })),
             }
@@ -509,12 +532,13 @@ export function createOpenAICompatibleAgent(config: OpenAICompatibleConfig) {
   return async function chat(input: AgentProviderCall): Promise<AgentResult> {
     let budget = Math.min(Math.max(input.maxTokens ?? DEFAULT_MAX_TOKENS, 512), HARD_MAX_TOKENS)
     let retriedForLength = false
+    let priorUsage: ReturnType<typeof meteredUsage> | undefined
 
     for (;;) {
       const body = {
         model: input.model,
         messages: input.messages.map(toWire),
-        max_tokens: budget,
+        ...generationParameters(input.model, budget, input.effort),
         tools: input.tools.map((tool) => ({
           type: 'function',
           function: { name: tool.name, description: tool.description, parameters: tool.parameters },
@@ -528,20 +552,11 @@ export function createOpenAICompatibleAgent(config: OpenAICompatibleConfig) {
        * 会回 400 stream_required。工具调用同样必须能走这条路，
        * 否则"能聊天但不能改画布"—— 半残比不能更让人困惑。
        */
-      let response = await doFetch(`${config.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${config.apiKey}` },
-        body: JSON.stringify(body),
-      })
-
+      let response = await post(body)
       if (!response.ok) {
         const text = await response.clone().text().catch(() => '')
         if (needsStream(text)) {
-          response = await doFetch(`${config.baseUrl}/chat/completions`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json', authorization: `Bearer ${config.apiKey}` },
-            body: JSON.stringify({ ...body, stream: true, stream_options: { include_usage: true } }),
-          })
+          response = await post({ ...body, stream: true, stream_options: { include_usage: true } })
         }
         if (!response.ok) {
           const failure = await response.text()
@@ -556,7 +571,7 @@ export function createOpenAICompatibleAgent(config: OpenAICompatibleConfig) {
           message?: {
             content?: string | null
             reasoning_content?: string
-            tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }>
+            tool_calls?: Array<{ id?: string; extra_content?: Record<string, unknown>; function?: { name?: string; arguments?: string } }>
           }
           finish_reason?: string
         }>
@@ -570,6 +585,7 @@ export function createOpenAICompatibleAgent(config: OpenAICompatibleConfig) {
         .filter((call) => typeof call.function?.name === 'string')
         .map((call, index) => ({
           id: call.id ?? `call_${index}`,
+          ...(call.extra_content ? { extraContent: call.extra_content } : {}),
           name: call.function!.name!,
           arguments: call.function?.arguments ?? '{}',
         }))
@@ -580,6 +596,7 @@ export function createOpenAICompatibleAgent(config: OpenAICompatibleConfig) {
        */
       const emptyTurn = content.trim().length === 0 && toolCalls.length === 0
       if ((emptyTurn || finishReason === 'length') && !retriedForLength && budget < HARD_MAX_TOKENS) {
+        priorUsage = meteredUsage((payload.usage ?? {}) as Record<string, unknown>)
         retriedForLength = true
         budget = Math.min(budget * 2, HARD_MAX_TOKENS)
         continue
@@ -592,17 +609,8 @@ export function createOpenAICompatibleAgent(config: OpenAICompatibleConfig) {
         )
       }
 
-      const { modelVersion, usage } = assertUsageAndModel(config.provider, payload, (raw) => {
-        if (config.provider === 'deepseek') {
-          return {
-            tokensIn: raw.prompt_tokens,
-            tokensOut: raw.completion_tokens,
-            cachedTokens: raw.prompt_cache_hit_tokens,
-          }
-        }
-        const details = raw.prompt_tokens_details as { cached_tokens?: unknown } | undefined
-        return { tokensIn: raw.prompt_tokens, tokensOut: raw.completion_tokens, cachedTokens: details?.cached_tokens }
-      })
+      const { modelVersion, usage: lastUsage } = assertUsageAndModel(config.provider, payload, readUsageFields)
+      const usage = sumAttempts(lastUsage, priorUsage)
 
       const agentReasoning =
         typeof choice?.message?.reasoning_content === 'string' ? choice.message.reasoning_content.trim() : ''
@@ -612,6 +620,7 @@ export function createOpenAICompatibleAgent(config: OpenAICompatibleConfig) {
         usage,
         modelVersion,
         provider: config.provider,
+        ...(toolCalls.length && typeof choice?.message?.reasoning_content === 'string' ? { reasoningContent: choice.message.reasoning_content } : {}),
         ...(agentReasoning.length > 0 ? { thinking: clipThinking(agentReasoning) } : {}),
       }
     }

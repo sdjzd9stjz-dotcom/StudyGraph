@@ -1,3 +1,4 @@
+import { createVerifiedPaper, verifiedPaperPool } from '../../domain/verified-paper.ts'
 import type { NodeExecutor } from '../contract.ts'
 import { ZERO_USAGE } from '../contract.ts'
 
@@ -35,7 +36,7 @@ export const paperExecutor: NodeExecutor<PaperParams> = {
   promptVersion: 'no-prompt',
   inputs: {
     type: 'object',
-    properties: { problems: { type: 'array', description: '上游题目集合（可选，缺省则用画布已确认的题）' } },
+    properties: {},
     required: [],
   },
   outputs: {
@@ -53,17 +54,7 @@ export const paperExecutor: NodeExecutor<PaperParams> = {
       pointsPerProblem: ctx.params.pointsPerProblem ?? 1,
     }
 
-    // 只从**已通过三检**的题里挑：REJECTED / PENDING 的题不该进卷子
-    const candidates = await ctx.prisma.problem.findMany({
-      where: { canvasId: ctx.canvasId, status: { in: ['VERIFIED', 'PENDING'] } },
-      orderBy: [{ difficulty: 'asc' }, { createdAt: 'asc' }],
-      select: {
-        id: true,
-        type: true,
-        difficulty: true,
-        concepts: { select: { conceptId: true } },
-      },
-    })
+    const candidates = ctx.paperPool ?? await verifiedPaperPool(ctx.prisma, ctx.canvasId)
 
     // 按规格过滤：题型、知识点
     const filtered = candidates.filter((problem) => {
@@ -83,9 +74,15 @@ export const paperExecutor: NodeExecutor<PaperParams> = {
     const gaps: Array<{ what: string; wanted: number; got: number }> = []
 
     if (weightTotal > 0) {
-      for (const [difficultyText, weight] of Object.entries(weights)) {
-        const difficulty = Number(difficultyText)
-        const want = Math.round((weight / weightTotal) * targetCount)
+      // 先取整数题数，再按余数补齐，避免各难度独立四舍五入后漏报缺口。
+      const quotas = Object.entries(weights).map(([level, weight]) => {
+        const exact = weight / weightTotal * targetCount
+        return { difficulty: Number(level), want: Math.floor(exact), remainder: exact % 1 }
+      })
+      const remaining = targetCount - quotas.reduce((sum, quota) => sum + quota.want, 0)
+      const byRemainder = [...quotas].sort((a, b) => b.remainder - a.remainder)
+      for (const quota of byRemainder.slice(0, remaining)) quota.want += 1
+      for (const { difficulty, want } of quotas) {
         const pool = filtered.filter((problem) => problem.difficulty === difficulty && !picked.includes(problem))
         const take = pool.slice(0, want)
         picked.push(...take)
@@ -112,24 +109,11 @@ export const paperExecutor: NodeExecutor<PaperParams> = {
     }
 
     // 一道都没挑到时也要落一条记录：让用户看到"为什么出不来"，而不是报个空对象
-    const paper = await ctx.prisma.paper.create({
-      data: {
-        canvasId: ctx.canvasId,
-        title: ctx.params.title ?? `组卷 ${new Date().toLocaleDateString('zh-CN')}`,
-        spec: spec as object,
-        report: report as object,
-        durationMin: spec.durationMin ?? 60,
-        status: picked.length > 0 ? 'DRAFT' : 'DRAFT',
-        items: {
-          create: picked.map((problem, index) => ({
-            problemId: problem.id,
-            order: index + 1,
-            points: spec.pointsPerProblem ?? 1,
-          })),
-        },
-      },
-      select: { id: true, title: true },
-    })
+    const paper = await createVerifiedPaper(ctx.prisma, {
+      canvasId: ctx.canvasId,
+      title: ctx.params.title ?? `组卷 ${new Date().toLocaleDateString('zh-CN')}`,
+      spec: spec as object, report, durationMin: spec.durationMin ?? 60, status: 'DRAFT',
+    }, picked.map(problem => problem.id), spec.pointsPerProblem ?? 1)
 
     return {
       outputs: { paperId: paper.id, title: paper.title, report },

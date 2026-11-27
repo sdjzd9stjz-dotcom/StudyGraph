@@ -14,7 +14,7 @@ export const PRIMARY_NODES: Array<{
   color: string
 }> = [
   { type: 'SOURCE', label: '课件', hint: '上传 PPTX 或 PDF', color: '#0ea5e9' },
-  { type: 'CHUNK', label: '切片', hint: '按语义把长文切开', color: '#8b5cf6' },
+  { type: 'CHUNK', label: '切片', hint: '本地按页和字数切分课件', color: '#8b5cf6' },
   { type: 'EXTRACT', label: '概念', hint: '从原文里抽出知识点', color: '#f59e0b' },
   { type: 'CARD', label: '知识卡', hint: '每条概念一张可溯源的卡', color: '#10b981' },
   { type: 'PREREQ', label: '先修', hint: '推断知识之间的先后关系', color: '#ec4899' },
@@ -54,9 +54,7 @@ export const nodeLabel = (type: string): string =>
 /**
  * 每个节点要填哪些参数。
  *
- * 为什么需要这张表：有六个节点（题型识别、解法抽取、分步解法、变式、干扰项、
- * 质量闸门）处理的是**某一道具体的题**，题目原文没法从上游自动获得 ——
- * 不给填参数的地方，这六个节点在界面上就是死的，一运行就报"缺少 params.text"。
+ * 部分节点需要用户提供一道具体的题，质量闸门也可以直接检查出题节点最近生成的一批题。
  *
  * 字段类型：
  *   text/textarea  字符串
@@ -73,10 +71,10 @@ export interface ParamField {
 }
 
 export const NODE_PARAM_FIELDS: Partial<Record<NodeType, ParamField[]>> = {
-  CHUNK: [{ key: 'maxChars', label: '每片目标字数', type: 'number', placeholder: '留空按页切' }],
+  CHUNK: [{ key: 'maxChars', label: '每片目标字数', type: 'number', placeholder: '默认每片最多 800 个字符，按页分开' }],
   EXTRACT: [
     { key: 'batchSize', label: '每批段数', type: 'number', placeholder: '默认 15' },
-    { key: 'maxClaimsPerChunk', label: '每段最多几条', type: 'number', placeholder: '留空不限制' },
+    { key: 'maxClaimsPerChunk', label: '每段最多几条', type: 'number', placeholder: '默认每段最多 3 条' },
   ],
   REVIEW: [
     { key: 'limit', label: '一次排几张', type: 'number', placeholder: '默认 20' },
@@ -105,8 +103,8 @@ export const NODE_PARAM_FIELDS: Partial<Record<NodeType, ParamField[]>> = {
     { key: 'count', label: '几个干扰项', type: 'number', placeholder: '默认 3' },
   ],
   CHECK: [
-    { key: 'stem', label: '题干', type: 'textarea' },
-    { key: 'answer', label: '给定答案', type: 'text' },
+    { key: 'stem', label: '题干（单题预览）', type: 'textarea', placeholder: '检查题库时，直接连接出题节点，题干和答案均留空，再运行质量闸门。' },
+    { key: 'answer', label: '给定答案（单题预览）', type: 'text', placeholder: '手填题干和答案只预览三检结果' },
   ],
   PAPER: [
     { key: 'title', label: '卷子标题', type: 'text', placeholder: '留空用默认标题' },

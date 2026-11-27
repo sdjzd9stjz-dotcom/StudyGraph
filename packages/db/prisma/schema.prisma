@@ -418,6 +418,7 @@ model Canvas {
   nodeGroups   NodeGroup[]
   /// 这块画布自己的模型选择（覆盖用户的全局"按任务指定模型"）
   modelPrefs   CanvasModelPref[]
+  reasoningPrefs CanvasReasoningPref[]
 
   @@index([ownerId])
   @@index([visibility, isTemplate])
@@ -1166,6 +1167,8 @@ model UsageRecord {
   tokensOut    Int @default(0)
   /// 命中前缀缓存的输入 token（不计费或折扣计费）
   cachedTokens Int @default(0)
+  /// false 表示至少一次响应未提供命中数；历史记录为 null，保留已知命中量。
+  cacheUsageComplete Boolean?
   costUsd      Decimal? @db.Decimal(12, 6)
 
   createdAt DateTime @default(now())
@@ -1286,6 +1289,17 @@ model UserCredential {
 /// 没配才回落到用户全局的那张表，再没有就走内置默认路由。
 /// 独立成表而不是给 UserModelPref 加 canvasId 可空列：
 /// 后者会让唯一约束变成三态（user+canvas+task 有四种组合），查询永远要判空。
+model CanvasReasoningPref {
+  canvasId String
+  scope    String
+  provider String
+  model    String
+  effort   String
+  canvas   Canvas @relation(fields: [canvasId], references: [id], onDelete: Cascade)
+
+  @@id([canvasId, scope])
+}
+
 model CanvasModelPref {
   id           String         @id @default(cuid())
   canvasId     String

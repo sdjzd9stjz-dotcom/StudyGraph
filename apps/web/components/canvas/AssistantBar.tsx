@@ -1,5 +1,7 @@
 'use client'
 
+import { ModelControls, useModelControls } from './CanvasAiConfig'
+
 import { MathText } from '../MathText'
 
 import { useEffect, useRef, useState } from 'react'
@@ -76,6 +78,7 @@ export function AssistantBar({canvasId, apiBaseUrl, token, onApplied, flushRef}:
   }, [endpoint, token, attempt])
   useEffect(() => { bottomRef.current?.scrollIntoView({block:'nearest'}) }, [thread])
   flushRef.current = async () => { await sending.current; await persist() }
+  const { flush: flushModel } = useModelControls()
   function submit() {
     if (!ready || sending.current) return
     sending.current = send().finally(() => { sending.current = null })
@@ -93,6 +96,7 @@ export function AssistantBar({canvasId, apiBaseUrl, token, onApplied, flushRef}:
     update((prev) => [...prev, { id: `u-${Date.now()}`, role: 'user', text: message }])
 
     try {
+      await flushModel()
       const response = await fetch(`${apiBaseUrl}/v1/canvases/${canvasId}/assistant`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
@@ -173,6 +177,7 @@ export function AssistantBar({canvasId, apiBaseUrl, token, onApplied, flushRef}:
         </div>
       )}
 
+      <ModelControls task="assistant" scope="assistant" label="助手模型" />
       <div style={{ display: 'flex', gap: 8, padding: '8px 12px', alignItems: 'center' }}>
         <button
           type="button"

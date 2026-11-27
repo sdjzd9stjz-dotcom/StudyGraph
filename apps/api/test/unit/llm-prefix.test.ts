@@ -132,3 +132,14 @@ test('旧调用方只给 cachePrefixKey 也能工作（key 进 OpenAI 的缓存�
   const body = JSON.parse(bodies[0] ?? '{}') as { prompt_cache_key?: string }
   assert.equal(body.prompt_cache_key, 'legacy:1')
 })
+
+
+test('Anthropic 节点对话为当前问题设置复用边界，单次调用仅保留系统前缀', async () => {
+  const { bodies, call } = anthropicBodies()
+  const messages = [{ role: 'system' as const, content: '固定材料' }, { role: 'user' as const, content: '追问' }]
+  for (const chat of [true, false]) await call({ model: 'test', messages, cacheConversation: chat })
+  const [chat, single] = bodies.map(s => JSON.parse(s))
+  assert.deepEqual(chat.messages[0].content, [{ type: 'text', text: '追问', cache_control: { type: 'ephemeral' } }])
+  assert.equal(single.messages[0].content, '追问')
+  assert.deepEqual(chat.system, single.system)
+})

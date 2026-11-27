@@ -15,6 +15,7 @@ export interface ProblemItem {
   difficulty: number
   bloom: string
   status: string
+  rejectReason?: string | null
   checkResult: unknown
   attempts: number
   concepts: Array<{ id: string; name: string }>
@@ -40,8 +41,7 @@ const STATUS_COLOR: Record<string, string> = {
 /**
  * 题库列表 + 勾选组卷。
  *
- * 只有通过质检（VERIFIED）或待定（PENDING）的题可选；
- * REJECTED 的题灰掉且不可勾选 —— 它自己都没过三检，进卷子只会浪费学生时间。
+ * 题库保留各状态供查看，只有 VERIFIED 可以提交组卷。
  */
 export function ProblemLibrary({
   canvasId,
@@ -69,20 +69,23 @@ export function ProblemLibrary({
     })
   }
 
+  const eligible = new Set(problems.filter(problem => problem.status === 'VERIFIED').map(problem => problem.id))
+  const selectedIds = [...selected].filter(id => eligible.has(id))
   async function assemble() {
-    if (selected.size === 0) return
+    if (selectedIds.length === 0) return
     setBusy(true)
     setMessage(null)
     try {
       const response = await fetch(`${apiBaseUrl}/v1/papers/assemble`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-        body: JSON.stringify({ problemIds: [...selected], title: `手工组卷 ${new Date().toLocaleDateString('zh-CN')}` }),
+        body: JSON.stringify({ problemIds: selectedIds, title: `手工组卷 ${new Date().toLocaleDateString('zh-CN')}` }),
       })
       const body = (await response.json().catch(() => null)) as
         | { id?: string; itemCount?: number; totalPoints?: number; error?: { message?: string } }
         | null
       if (!response.ok) {
+        router.refresh()
         setMessage({ ok: false, text: body?.error?.message ?? `组卷失败：HTTP ${response.status}` })
         return
       }
@@ -99,7 +102,7 @@ export function ProblemLibrary({
   if (problems.length === 0) {
     return (
       <div data-testid="problems-empty" style={{ border: '1px dashed #d1d5db', borderRadius: 8, padding: 24, color: '#9ca3af', fontSize: 13 }}>
-        这张画布还没有题。在画布上跑「出题」节点，题目会通过三检后进入题库。
+        这张画布还没有题。在画布上跑「出题」节点，新题会以待质检状态进入题库。
       </div>
     )
   }
@@ -107,20 +110,20 @@ export function ProblemLibrary({
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
-        <span style={{ fontSize: 12, color: '#6b7280' }}>已选 {selected.size} 道</span>
+        <span style={{ fontSize: 12, color: '#6b7280' }}>仅 VERIFIED 题目可组卷 · 已选 {selectedIds.length} 道</span>
         <button
           type="button"
           data-testid="assemble-paper"
-          disabled={busy || selected.size === 0}
+          disabled={busy || selectedIds.length === 0}
           onClick={() => void assemble()}
           style={{
             padding: '5px 14px',
             borderRadius: 6,
             border: 'none',
-            background: selected.size === 0 ? '#cbd5e1' : '#2563eb',
+            background: selectedIds.length === 0 ? '#cbd5e1' : '#2563eb',
             color: '#fff',
             fontSize: 13,
-            cursor: selected.size === 0 ? 'not-allowed' : 'pointer',
+            cursor: selectedIds.length === 0 ? 'not-allowed' : 'pointer',
           }}
         >
           {busy ? '组卷中…' : '用选中的题组卷'}
@@ -134,8 +137,8 @@ export function ProblemLibrary({
 
       <div style={{ display: 'grid', gap: 8 }}>
         {problems.map((problem) => {
-          const selectable = problem.status !== 'REJECTED'
-          const checked = selected.has(problem.id)
+          const selectable = eligible.has(problem.id)
+          const checked = selectable && selected.has(problem.id)
           return (
             <div
               key={problem.id}
@@ -162,6 +165,10 @@ export function ProblemLibrary({
               </div>
 
               <div style={{ fontSize: 13, color: '#1f2937', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}><MathText>{problem.stem}</MathText></div>
+
+              {problem.status === 'REJECTED' && problem.rejectReason && (
+                <div style={{ marginTop: 6, fontSize: 12, color: '#991b1b' }}>驳回理由：<MathText>{problem.rejectReason}</MathText></div>
+              )}
 
               {problem.concepts.length > 0 && (
                 <div style={{ marginTop: 6, display: 'flex', gap: 4, flexWrap: 'wrap' }}>

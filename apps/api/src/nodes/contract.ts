@@ -15,6 +15,8 @@ import type { BoundSkill } from './skills.ts'
  * `prisma / canvasId / nodeId / objectStore`——executor 必须能读库、落产物、写对象存储。
  * 这些是**新增字段**，规格里已有的字段名一个没动。
  */
+export type QuizQuestionRef = { id: string; sourceNodeId: string }
+
 export interface NodeExecutorRunCtx<P = unknown> {
   readonly params: P
   readonly inputs: Record<string, unknown>
@@ -24,6 +26,8 @@ export interface NodeExecutorRunCtx<P = unknown> {
   readonly prisma: PrismaClient
   readonly canvasId: string
   readonly nodeId: string
+  readonly quizBatch?: QuizQuestionRef[]
+  readonly paperPool?: Awaited<ReturnType<typeof import('../domain/verified-paper.ts').verifiedPaperPool>>
   readonly objectStore: ObjectStore
   /** F2：显式绑定到该节点的 skill（已按 slug 排序、已过滤 enabled=false） */
   readonly skills: readonly BoundSkill[]

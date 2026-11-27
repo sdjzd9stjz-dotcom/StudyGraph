@@ -8,6 +8,7 @@ import { logServerError } from './lib/error-log.ts'
 import { AppError, invalidJson, validationFailed } from './lib/errors.ts'
 import { createGuard } from './plugins/auth.ts'
 import { createApiKeyResolver, createTargetResolver } from './llm/credentials.ts'
+import { checkEffort } from './llm/reasoning.ts'
 import { createGateway } from './llm/gateway.ts'
 import { registerBuiltinExecutors } from './nodes/executors/index.ts'
 import { assertRegistryReady } from './nodes/registry.ts'
@@ -214,10 +215,16 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   const llm = createGateway({
     resolveApiKey,
     resolveTarget,
+    async resolveEffort(canvasId, scope, provider, model) {
+      const pref = await prisma.canvasReasoningPref.findUnique({ where: { canvasId_scope: { canvasId, scope } } })
+      if (!pref || pref.provider !== provider || pref.model !== model) return undefined
+      await checkEffort(prisma, provider, model, pref.effort)
+      return pref.effort
+    },
     logger: { debug: (obj, msg) => app.log.debug(obj, msg) },
   })
 
-  registerCanvasRoutes(app, { prisma, guard, objectStore })
+  registerCanvasRoutes(app, { prisma, guard, objectStore, llm })
   registerNodeRoutes(app, { prisma, guard })
   registerEdgeRoutes(app, { prisma, guard })
   registerCanvasEdits(app, { prisma, guard })

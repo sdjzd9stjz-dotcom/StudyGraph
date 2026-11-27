@@ -65,7 +65,7 @@ export function ContextMenu({
   selectedIds: string[]
   onPackGroup: () => void
   /** 按概念拆分知识卡（只有概念抽取节点有这一项） */
-  onSplitCards?: (nodeId: string) => void
+  onSplitCards?: (nodeId: string, preview?: boolean) => void
   /** 右键点中的节点类型：决定菜单里显示哪些专属项 */
   nodeType?: string | null
   /** 多选时整批运行（按依赖顺序，上游先跑） */
@@ -116,6 +116,8 @@ export function ContextMenu({
                 onClick={() => { onSplitCards(menu.nodeId!); onClose() }}
               />
             )}
+            {nodeType === 'EXTRACT' && onSplitCards && <Item label="查看拆分明细" testId="menu-split-report"
+              onClick={() => { onSplitCards(menu.nodeId!, true); onClose() }} />}
             <Item label="重命名" onClick={() => { onRename(menu.nodeId!); onClose() }} />
             <Item label="复制节点" onClick={() => { onDuplicate(menu.nodeId!); onClose() }} />
             <Divider />

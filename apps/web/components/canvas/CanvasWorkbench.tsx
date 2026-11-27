@@ -24,7 +24,10 @@ import type { NodeType } from '../../../../packages/contracts/src/client'
 import { ADVANCED_NODES, PRIMARY_NODES, nodeLabel, nodeColor } from '../../lib/canvas-meta'
 import { renderLectureHtml } from '../../lib/lecture-html'
 import { decideGate } from '../../lib/api'
+import { CanvasModelProvider, useModelControls } from './CanvasAiConfig'
 import { AssistantBar } from './AssistantBar'
+import { SplitReportDialog } from './SplitReportDialog'
+import type { SplitReportView } from './SplitReportDialog'
 import { ContextMenu } from './ContextMenu'
 import { useCanvasEditing } from './use-canvas-editing'
 import type { MenuContext } from './ContextMenu'
@@ -138,6 +141,7 @@ function Inner({
   skills: SkillView[]
   nodeSkills: Record<string, string[]>
 }) {
+  const { flush: flushModel } = useModelControls()
   const skillsByNode = useMemo(() => {
     const map = new Map<string, string[]>()
     for (const [nodeId, names] of Object.entries(nodeSkills)) map.set(nodeId, names)
@@ -264,6 +268,7 @@ function Inner({
     /** 拖线起点的节点类型（组节点为 null）：组节点据此判断自己能不能被接上 */
     fromType: NodeType | null
   } | null>(null)
+  const [splitReport, setSplitReport] = useState<SplitReportView | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   /** 重命名 / 起名 / 拒绝理由：Electron 没有 window.prompt，统一用应用内弹窗 */
   const { prompt, confirm, dialog } = usePrompt()
@@ -664,28 +669,16 @@ function Inner({
    * 拆完后重新拉一次画布，新节点才能带着连线和位置回来。
    */
   const splitCards = useCallback(
-    async (nodeId: string) => {
-      const response = await fetch(`${apiBaseUrl}/v1/nodes/${nodeId}/split-cards`, { method: 'POST', headers })
-      const payload = (await response.json().catch(() => null)) as
-        | { created?: Array<unknown>; skipped?: Array<{ name: string; reason: string }>; error?: { message?: string } }
-        | null
-      if (!response.ok) {
-        notify(payload?.error?.message ?? `拆分失败：${response.status}`)
-        return
-      }
-      const created = payload?.created?.length ?? 0
-      const skipped = payload?.skipped ?? []
-      if (created === 0) {
-        // 全被跳过要说清楚原因，否则用户以为按钮坏了
-        const reason = skipped[0] ? `（${skipped[0].name}：${skipped[0].reason}）` : ''
-        notify(`没有新建知识卡${reason}`)
-        return
-      }
-      notify(`已拆出 ${created} 张知识卡${skipped.length > 0 ? `，跳过 ${skipped.length} 个概念` : ''}`)
-      // 新节点与新连线由服务端返回的 props 带回来（见上方同步 effect）
-      router.refresh()
+    async (nodeId: string, preview = false) => {
+      try {
+        const response = await fetch(`${apiBaseUrl}/v1/nodes/${nodeId}/split-cards`, { method: preview ? 'GET' : 'POST', headers, cache: 'no-store' })
+        const payload = await response.json() as SplitReportView & { error?: { message?: string } }
+        if (!response.ok) throw new Error(payload.error?.message ?? `拆分失败：${response.status}`)
+        setSplitReport({ report: payload.report, skipped: payload.skipped, preview })
+        if (!preview && payload.report.newNodes) router.refresh()
+      } catch (error) { notify(error instanceof Error ? error.message : '无法读取拆分结果') }
     },
-    [apiBaseUrl, headers, notify, router, token],
+    [apiBaseUrl, headers, notify, router],
   )
 
   const renameNode = useCallback(
@@ -707,6 +700,7 @@ function Inner({
     async (nodeId: string) => {
       setNodes((current) => current.map((node) => (node.id === nodeId ? { ...node, data: { ...node.data, running: true } } : node)))
       try {
+        try { await flushModel() } catch (error) { notify(String(error)); return }
         const response = await fetch(`${apiBaseUrl}/v1/nodes/${nodeId}/run`, { method: 'POST', headers })
         const body = (await response.json().catch(() => null)) as { status?: string; error?: { message?: string; code?: string } } | null
         if (!response.ok) {
@@ -732,7 +726,7 @@ function Inner({
         setNodes((current) => current.map((node) => (node.id === nodeId ? { ...node, data: { ...node.data, running: false } } : node)))
       }
     },
-    [apiBaseUrl, notify, setEdges, setNodes, token],
+    [apiBaseUrl, flushModel, notify, setEdges, setNodes, token],
   )
 
   /**
@@ -754,6 +748,7 @@ function Inner({
       }
 
       for (const nodeId of ordered) {
+        try { await flushModel() } catch (error) { notify(String(error)); return }
         const response = await fetch(`${apiBaseUrl}/v1/nodes/${nodeId}/run`, { method: 'POST', headers })
         if (!response.ok) {
           const body = (await response.json().catch(() => null)) as { error?: { message?: string } } | null
@@ -765,7 +760,7 @@ function Inner({
       notify(`已按依赖顺序运行 ${ordered.length} 个节点`)
       router.refresh()
     },
-    [apiBaseUrl, edges, headers, nodes, notify, router, token],
+    [apiBaseUrl, edges, flushModel, headers, nodes, notify, router, token],
   )
 
   /** 批量删除选中的节点：删前确认，逐个走接口（服务端会连带删连线） */
@@ -1149,6 +1144,7 @@ function Inner({
         notify('至少要两个节点才能成组')
         return
       }
+      try { await flushModel() } catch (error) { notify(String(error)); return }
       setPackDraft(null)
 
       const response = await fetch(`${apiBaseUrl}/v1/canvases/${canvasId}/groups`, {
@@ -1183,7 +1179,7 @@ function Inner({
         })
         .catch(() => undefined)
     },
-    [apiBaseUrl, canvasId, headers, nodes, notify],
+    [apiBaseUrl, canvasId, flushModel, headers, nodes, notify],
   )
 
   const unpackGroup = useCallback(
@@ -1444,6 +1440,7 @@ function Inner({
   const assistantFlush = useRef<() => Promise<void>>(async () => {})
   const chatFailures = useRef(new Map<string,() => Promise<void>>())
   const exitDialog = useCanvasExit([
+    { label: '画布模型与推理强度', run: flushModel },
     { label: '节点坐标、组位置与开合', run: () => writer.current.flush(write) },
     { label: '节点参数', run: async () => {
       await Promise.all([...paramWrites.current]);
@@ -2006,7 +2003,7 @@ function Inner({
           selectedCount={menu.selectedIds.length}
           selectedIds={menu.selectedIds}
           onPackGroup={() => void packGroup(menu.selectedIds)}
-          onSplitCards={(nodeId) => void splitCards(nodeId)}
+          onSplitCards={(nodeId, preview) => void splitCards(nodeId, preview)}
           onRunSelected={(ids) => void runSelectedInOrder(ids)}
           onDeleteSelected={(ids) => void deleteSelected(ids)}
           nodeType={
@@ -2096,6 +2093,7 @@ function Inner({
 
       {dialog}
 
+      {splitReport && <SplitReportDialog view={splitReport} onClose={() => setSplitReport(null)} />}
       {exitDialog}
       <AssistantBar
         canvasId={canvasId}
@@ -2119,8 +2117,8 @@ export function CanvasWorkbench(props: {
   nodeSkills: Record<string, string[]>
 }) {
   return (
-    <ReactFlowProvider>
-      <Inner {...props} />
-    </ReactFlowProvider>
+    <CanvasModelProvider key={props.canvasId} canvasId={props.canvasId} apiBaseUrl={props.apiBaseUrl} token={props.token}>
+      <ReactFlowProvider><Inner {...props} /></ReactFlowProvider>
+    </CanvasModelProvider>
   )
 }

@@ -1,3 +1,4 @@
+import { forOperation } from '../llm/reasoning.ts'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 
@@ -194,7 +195,8 @@ export function registerGroupRoutes(app: FastifyInstance, deps: GroupRouteDeps):
       .join('\n')
 
     try {
-      const result = await deps.llm.complete({
+      const model = await forOperation(deps.llm, 'method', { ...auth.user, canvasId: group.canvasId }, 'group-name')
+      const result = await model.complete({
         taskType: 'method',
         messages: [
           {

@@ -1,6 +1,6 @@
 {
   "name": "@studygraph/desktop",
-  "version": "0.25.6",
+  "version": "0.25.11",
   "private": true,
   "description": "StudyGraph 桌面客户端：Electron 外壳 + 本机 Fastify + 内置 PostgreSQL",
   "main": "main.cjs",

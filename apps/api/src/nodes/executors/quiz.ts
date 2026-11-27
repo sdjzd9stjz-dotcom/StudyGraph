@@ -179,7 +179,7 @@ interface RawProblem {
 export const quizExecutor: NodeExecutor<QuizParams> = {
   type: 'QUIZ',
   artifactKind: 'PROBLEM_DRAFT',
-  promptVersion: 'quiz-v2',
+  promptVersion: 'quiz-v3',
   inputs: {
     type: 'object',
     properties: {
@@ -288,7 +288,11 @@ export const quizExecutor: NodeExecutor<QuizParams> = {
         { role: 'system', content: composeSystemPrompt(HARD_RULE_SUMMARY, ctx.skills, SYSTEM_PROMPT) },
         {
           role: 'user',
-          content: `请根据下面这些概念出 ${count} 道题。\n\n${listing}${typeHint}${difficultyHint}`,
+          content: `可引用的概念：\n${listing}`,
+        },
+        {
+          role: 'user',
+          content: `请根据这些概念出 ${count} 道题。${typeHint}${difficultyHint}`,
         },
       ],
       jsonSchema: outputSchema,

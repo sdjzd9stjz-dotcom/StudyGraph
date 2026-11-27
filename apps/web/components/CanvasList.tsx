@@ -4,7 +4,7 @@ import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-import { TASK_LABELS, TASK_TYPE_KEYS } from '../../../packages/contracts/src/client'
+import { TASK_LABELS, MODEL_TASK_KEYS } from '../../../packages/contracts/src/client'
 import { recordVisit } from '../lib/nav-trail'
 import { usePrompt } from './ui/PromptDialog'
 
@@ -403,7 +403,7 @@ export function CanvasList({
               data-testid="create-canvas-prefs"
               style={{ maxHeight: 216, overflowY: 'auto', border: '1px solid #e2e8f0', borderRadius: 8, padding: '8px 10px', marginBottom: 18, display: 'grid', gap: 7 }}
             >
-              {TASK_TYPE_KEYS.map((taskType) => (
+              {MODEL_TASK_KEYS.map((taskType) => (
                 <div key={taskType} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                   <span style={{ width: 132, fontSize: 12, color: '#475569' }}>{TASK_LABELS[taskType] ?? taskType}</span>
                   <select

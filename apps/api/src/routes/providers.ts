@@ -5,6 +5,7 @@ import { z } from 'zod'
  * 能力要求表来自 contracts：全局配置与画布配置共用同一份，
  * 否则会出现"全局拒绝、画布接受"的不一致。
  */
+import { listedReasoningLevels } from '../../../../packages/contracts/src/reasoning.ts'
 import { REQUIRED_CAPABILITY } from '../../../../packages/contracts/src/index.ts'
 import type { PrismaClient } from '../../../../packages/db/src/index.ts'
 import { decryptSecret, encryptSecret, last4 } from '../llm/byok.ts'
@@ -66,7 +67,7 @@ export function registerProviderRoutes(app: FastifyInstance, deps: ProviderRoute
   app.get('/v1/providers', { preHandler: guard('RUN_EXECUTE') }, async (request) => {
     const auth = getAuth(request)
 
-    const [providers, credentials, prefs] = await Promise.all([
+    const [providers, credentials, prefs, recentUsage] = await Promise.all([
       prisma.provider.findMany({
         where: { OR: [{ isCustom: false }, { ownerId: auth.user.id }] },
         orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
@@ -86,9 +87,12 @@ export function registerProviderRoutes(app: FastifyInstance, deps: ProviderRoute
         select: { id: true, providerId: true, label: true, last4: true, status: true, baseUrlOverride: true, createdAt: true },
       }),
       prisma.userModelPref.findMany({ where: { userId: auth.user.id } }),
+      prisma.usageRecord.findMany({ where: { userId: auth.user.id }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 12,
+        select: { id: true, model: true, tokensIn: true, cachedTokens: true, cacheUsageComplete: true, createdAt: true } }),
     ])
 
     return {
+      recentUsage,
       encryptionReady: Boolean(deps.masterKey),
       providers: providers.map((provider) => ({
         id: provider.id,
@@ -219,7 +223,7 @@ export function registerProviderRoutes(app: FastifyInstance, deps: ProviderRoute
     if (provider.protocol === 'ANTHROPIC') {
       headers['x-api-key'] = apiKey
       headers['anthropic-version'] = '2023-06-01'
-      url = `${baseUrl}/v1/models`
+      url = `${baseUrl.replace(/\/v1$/, '')}/v1/models`
     } else if (provider.protocol === 'GEMINI') {
       url = `${baseUrl}/v1beta/models?key=${encodeURIComponent(apiKey)}`
     } else {
@@ -246,12 +250,14 @@ export function registerProviderRoutes(app: FastifyInstance, deps: ProviderRoute
     }
 
     // 三家返回结构不同：OpenAI 是 { data: [{ id }] }，Anthropic 同形，Gemini 是 { models: [{ name: 'models/x' }] }
-    const raw = payload as { data?: Array<{ id?: unknown }>; models?: Array<{ name?: unknown; displayName?: unknown }> }
-    const discovered: Array<{ modelId: string; displayName: string }> = []
+    const raw = payload as { data?: Array<{ id?: unknown } & Parameters<typeof listedReasoningLevels>[1]>; models?: Array<{ name?: unknown; displayName?: unknown }> }
+    const discovered: Array<{ modelId: string; displayName: string; levels?: string[] }> = []
 
     if (Array.isArray(raw.data)) {
       for (const item of raw.data) {
-        if (typeof item?.id === 'string' && item.id.trim()) discovered.push({ modelId: item.id.trim(), displayName: item.id.trim() })
+        if (typeof item?.id !== 'string' || !item.id.trim()) continue
+        const levels = listedReasoningLevels(item.id.trim(), item)
+        discovered.push({ modelId: item.id.trim(), displayName: item.id.trim(), levels })
       }
     } else if (Array.isArray(raw.models)) {
       for (const item of raw.models) {
@@ -272,13 +278,14 @@ export function registerProviderRoutes(app: FastifyInstance, deps: ProviderRoute
     for (const item of discovered) {
       const existing = await prisma.providerModel.findUnique({
         where: { providerId_modelId: { providerId: id, modelId: item.modelId } },
-        select: { id: true },
+        select: { id: true, capabilities: true },
       })
       if (existing) {
-        await prisma.providerModel.update({ where: { id: existing.id }, data: { displayName: item.displayName } })
+        const capabilities = { ...(existing.capabilities as Record<string, never> | null), reasoningLevels: item.levels }
+        await prisma.providerModel.update({ where: { id: existing.id }, data: { displayName: item.displayName, capabilities } })
       } else {
         await prisma.providerModel.create({
-          data: { providerId: id, modelId: item.modelId, displayName: item.displayName, contextWindow: 0, capabilities: {} },
+          data: { providerId: id, modelId: item.modelId, displayName: item.displayName, contextWindow: 0, capabilities: item.levels ? { reasoningLevels: item.levels } : {} },
         })
         added += 1
       }
@@ -417,7 +424,7 @@ export function registerProviderRoutes(app: FastifyInstance, deps: ProviderRoute
       const caps = (model.capabilities ?? {}) as Record<string, unknown>
       // 厂商没声明能力时允许选（打 UNTESTED，首次失败再给提示）；
       // 明确声明了但不满足，就在这里拒绝 —— 不要等整条链路跑完才让用户发现产物作废。
-      const declared = Object.keys(caps).length > 0
+      const declared = Object.keys(caps).some(key => key !== 'reasoningLevels')
       if (declared && caps[needed] !== true) {
         throw new AppError(
           400,

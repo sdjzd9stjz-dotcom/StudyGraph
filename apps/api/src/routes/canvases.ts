@@ -1,6 +1,10 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 
+import { nodeModelTask } from '../../../../packages/contracts/src/reasoning.ts'
+import { TASK_ROUTING } from '../llm/routing.ts'
+import { checkEffort } from '../llm/reasoning.ts'
+import type { LLMGateway, TaskType } from '../llm/types.ts'
 import { REQUIRED_CAPABILITY, isTaskType } from '../../../../packages/contracts/src/index.ts'
 import type { PrismaClient } from '../../../../packages/db/src/index.ts'
 import { summarizeArtifact } from '../domain/artifact-text.ts'
@@ -18,6 +22,7 @@ const createBody = z.object({
 })
 
 export interface CanvasRouteDeps {
+  readonly llm?: LLMGateway
   readonly prisma: PrismaClient
   readonly guard: Guard
   readonly objectStore: ObjectStore
@@ -143,17 +148,46 @@ export function registerCanvasRoutes(app: FastifyInstance, deps: CanvasRouteDeps
     const { id } = request.params as { id: string }
     await requireCanvasWrite(prisma, id, auth.user.id)
 
-    const [canvasPrefs, globalPrefs] = await Promise.all([
+    const [canvasPrefs, globalPrefs, efforts] = await Promise.all([
       prisma.canvasModelPref.findMany({
         where: { canvasId: id },
-        select: { taskType: true, credentialId: true, modelId: true },
+        select: { taskType: true, credentialId: true, modelId: true, credential: { select: { isActive: true, provider: { select: { slug: true, protocol: true } } } } },
       }),
       prisma.userModelPref.findMany({
         where: { userId: auth.user.id },
-        select: { taskType: true, credentialId: true, modelId: true },
+        select: { taskType: true, credentialId: true, modelId: true, credential: { select: { isActive: true, provider: { select: { slug: true, protocol: true } } } } },
       }),
+      prisma.canvasReasoningPref.findMany({ where: { canvasId: id }, select: { scope: true, provider: true, model: true, effort: true } }),
     ])
-    return { canvasPrefs, globalPrefs }
+    return { canvasPrefs, globalPrefs, defaults: TASK_ROUTING, efforts }
+  })
+
+  app.put('/v1/canvases/:id/reasoning/:scope', { preHandler: guard('CANVAS_WRITE') }, async (request, reply) => {
+    const { id: canvasId } = request.params as { id: string }
+    const { scope } = parse(z.object({ scope: z.string().regex(/^(assistant|group-name|draft|(?:run|chat):[\w-]{1,128})$/) }), request.params)
+    const user = { ...getAuth(request).user, canvasId }
+    await requireCanvasWrite(prisma, canvasId, user.id)
+    const body = parse(z.object({ task: z.string(), provider: z.string(), model: z.string(), effort: z.string().min(1).max(40).nullable() }), request.body)
+    if (!isTaskType(body.task)) throw new AppError(400, 'TASK_TYPE_UNKNOWN', '未知模型任务')
+    const [kind, nodeId] = scope.split(':')
+    const node = nodeId ? await prisma.node.findFirst({ where: { id: nodeId, canvasId }, select: { type: true } }) : null
+    if (nodeId && !node) throw new AppError(404, 'NODE_NOT_FOUND', '这张卡片已不在当前画布')
+    const expectedTask = kind === 'assistant' ? 'assistant' : kind === 'run' && node ? nodeModelTask(node.type) : 'method'
+    if (body.task !== expectedTask) throw new AppError(400, 'TASK_TYPE_UNKNOWN', '任务与当前入口不匹配')
+    const task = body.task as TaskType
+    const route = await (deps.llm?.selectedRoute?.(task, user) ?? TASK_ROUTING[task])
+    if (route.provider !== body.provider || route.model !== body.model) {
+      throw new AppError(409, 'CONFLICT', '模型选择已经改变，请按当前模型重新选择档位')
+    }
+    if (body.effort === null) {
+      await prisma.canvasReasoningPref.deleteMany({ where: { canvasId, scope } })
+    } else {
+      await checkEffort(prisma, route.provider, route.model, body.effort)
+      const settings = { provider: route.provider, model: route.model, effort: body.effort }
+      await prisma.canvasReasoningPref.upsert({ where: { canvasId_scope: { canvasId, scope } },
+        create: { canvasId, scope, ...settings }, update: settings })
+    }
+    return reply.status(204).send()
   })
 
   app.put('/v1/canvases/:id/model-prefs/:taskType', { preHandler: guard('CANVAS_WRITE') }, async (request, reply) => {
@@ -183,7 +217,7 @@ export function registerCanvasRoutes(app: FastifyInstance, deps: CanvasRouteDeps
     const needed = REQUIRED_CAPABILITY[taskType]
     if (needed && model) {
       const caps = (model.capabilities ?? {}) as Record<string, unknown>
-      const declared = Object.keys(caps).length > 0
+      const declared = Object.keys(caps).some(key => key !== 'reasoningLevels')
       if (declared && caps[needed] !== true) {
         throw new AppError(
           400,
@@ -242,7 +276,7 @@ export function registerCanvasRoutes(app: FastifyInstance, deps: CanvasRouteDeps
       const needed = REQUIRED_CAPABILITY[pref.taskType]
       if (needed && model) {
         const caps = (model.capabilities ?? {}) as Record<string, unknown>
-        if (Object.keys(caps).length > 0 && caps[needed] !== true) {
+        if (Object.keys(caps).some(key => key !== 'reasoningLevels') && caps[needed] !== true) {
           throw new AppError(
             400,
             'MODEL_CAPABILITY_MISMATCH',

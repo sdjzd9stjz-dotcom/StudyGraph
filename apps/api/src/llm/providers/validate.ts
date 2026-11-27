@@ -35,12 +35,12 @@ export function assertUsageAndModel(
     ['usage.tokensIn', usage.tokensIn],
     ['usage.tokensOut', usage.tokensOut],
   ] as const) {
-    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) invalid.push(name)
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) invalid.push(name)
   }
   if (provider === 'deepseek' && usage.cachedTokens === undefined) invalid.push('usage.prompt_cache_hit_tokens')
   if (
     usage.cachedTokens !== undefined &&
-    (typeof usage.cachedTokens !== 'number' || !Number.isFinite(usage.cachedTokens) || usage.cachedTokens < 0)
+    (typeof usage.cachedTokens !== 'number' || !Number.isSafeInteger(usage.cachedTokens) || usage.cachedTokens < 0)
   ) {
     invalid.push('usage.cachedTokens')
   }
@@ -51,6 +51,7 @@ export function assertUsageAndModel(
     usage: {
       tokensIn: usage.tokensIn as number,
       tokensOut: usage.tokensOut as number,
+      ...(usage.cachedTokens === undefined ? { cacheUsageComplete: false } : {}),
       cachedTokens: (usage.cachedTokens as number | undefined) ?? 0,
     },
   }

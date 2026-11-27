@@ -1,4 +1,4 @@
-import type { JSONSchema } from '../../llm/types.ts'
+import type { JSONSchema, TokenUsage } from '../../llm/types.ts'
 import { buildContextKey, refreshMethodProficiency } from '../../domain/proficiency.ts'
 import { composeSystemPrompt, HARD_RULE_SUMMARY } from '../skills.ts'
 import type { NodeExecutor, NodeExecutorRunCtx } from '../contract.ts'
@@ -154,7 +154,7 @@ export const gradeExecutor: NodeExecutor<GradeParams> = {
     let pendingRubric = 0
     let tokensIn = 0
     let tokensOut = 0
-    const usageRecords: Array<{ provider: string; model: string; tokensIn: number; tokensOut: number; cachedTokens: number }> = []
+    const usageRecords: Array<({ provider: string; model: string } & TokenUsage)> = []
 
     for (const item of items) {
       const problem = await ctx.prisma.problem.findFirst({
@@ -180,7 +180,7 @@ export const gradeExecutor: NodeExecutor<GradeParams> = {
 
       let isCorrect = verdict.isCorrect
       let detail: Record<string, unknown> = verdict.detail
-      let modelUsage: { provider: string; model: string; tokensIn: number; tokensOut: number; cachedTokens: number } | null = null
+      let modelUsage: ({ provider: string; model: string } & TokenUsage) | null = null
 
       // RUBRIC 才调模型；确定性规则走本地
       if (isCorrect === null) {
@@ -270,7 +270,8 @@ export const gradeExecutor: NodeExecutor<GradeParams> = {
         // 跳过必须可见：静默少批几道，学生会以为全批过了
         skipped,
       },
-      usage: { tokensIn, tokensOut, cachedTokens: 0 },
+      usage: { tokensIn, tokensOut, cachedTokens: usageRecords.reduce((sum, record) => sum + record.cachedTokens, 0),
+        cacheUsageComplete: usageRecords.every(record => record.cacheUsageComplete !== false) },
       usageRecords,
     }
   },

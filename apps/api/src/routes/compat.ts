@@ -9,6 +9,8 @@ import { AppError } from '../lib/errors.ts'
 import { parse } from '../lib/validate.ts'
 import { getAuth } from '../plugins/auth.ts'
 import type { Guard } from '../plugins/auth.ts'
+import { anthropicMessagesUrl } from '../llm/providers/anthropic.ts'
+import { forwardMeteredStream, meteredUsage } from '../llm/providers/cache-usage.ts'
 import { TASK_ROUTING } from '../llm/routing.ts'
 
 /**
@@ -30,6 +32,7 @@ const chatBody = z.object({
   stream: z.boolean().optional(),
   max_tokens: z.number().int().positive().max(32000).optional(),
   temperature: z.number().optional(),
+  prompt_cache_key: z.string().max(64).optional(),
   // 明确接受但**忽略**：规格要求调用方不能指定凭据与端点
   apiKey: z.unknown().optional(),
   api_key: z.unknown().optional(),
@@ -38,6 +41,8 @@ const chatBody = z.object({
 })
 
 const messagesBody = z.object({
+  cache_control: z.object({ type: z.literal('ephemeral'), ttl: z.enum(['5m', '1h']).optional() }).optional(),
+  system: z.union([z.string(), z.array(z.object({ type: z.literal('text'), text: z.string(), cache_control: z.object({ type: z.literal('ephemeral'), ttl: z.enum(['5m', '1h']).optional() }).optional() }))]).optional(),
   model: z.string().optional(),
   messages: z.array(z.object({ role: z.string(), content: z.unknown() })).min(1),
   stream: z.boolean().optional(),
@@ -104,6 +109,37 @@ export function registerCompatRoutes(app: FastifyInstance, deps: CompatRouteDeps
     return { ...fallback, credentialId: null as string | null }
   }
 
+  async function requestChat(target: NonNullable<Awaited<ReturnType<typeof pickTarget>>>, body: {
+    messages: Array<{ role: string; content?: unknown }>; system?: unknown; stream?: boolean | undefined
+    prompt_cache_key?: string | undefined; cache_control?: unknown; temperature?: number | undefined; max_tokens?: number | undefined
+  }) {
+    const anthropic = target.protocol === 'ANTHROPIC'
+    const { messages, system, prompt_cache_key, cache_control, temperature, max_tokens, stream } = body
+    const upstream: Record<string, unknown> = { model: target.model, messages }
+    if (temperature !== undefined) upstream.temperature = temperature
+    if (max_tokens !== undefined) upstream.max_tokens = max_tokens
+    if (stream) upstream.stream = true
+    if (anthropic) {
+      const systemText = messages.filter(m => m.role === 'system').map(m => flattenContent(m.content)).join('\n')
+      const instruction = system ?? systemText
+      if (instruction) upstream.system = instruction
+      if (cache_control) upstream.cache_control = cache_control
+      upstream.messages = messages.filter(m => m.role !== 'system')
+      upstream.max_tokens ??= 2048
+    } else {
+      if (system) upstream.messages = [{ role: 'system', content: flattenContent(system) }, ...messages.filter(m => m.role !== 'system')]
+      if (prompt_cache_key) upstream.prompt_cache_key = prompt_cache_key
+      if (stream) upstream.stream_options = { include_usage: true }
+    }
+    const endpoint = anthropic ? anthropicMessagesUrl(target.baseUrl) : target.baseUrl.replace(/\/+$/, '') + '/chat/completions'
+    const headers = new Headers({ 'content-type': 'application/json' })
+    if (anthropic) {
+      headers.set('x-api-key', target.apiKey)
+      headers.set('anthropic-version', '2023-06-01')
+    } else headers.set('authorization', 'Bearer ' + target.apiKey)
+    return fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(upstream) })
+  }
+
   /** `GET /v1/models`：当前路由表实际可用的模型，不含任何凭据信息。 */
   app.get('/v1/models', { preHandler: guard('RUN_EXECUTE') }, async (request) => {
     const auth = getAuth(request)
@@ -135,22 +171,7 @@ export function registerCompatRoutes(app: FastifyInstance, deps: CompatRouteDeps
     const target = await pickTarget(auth.user, body.model)
     if (!target) throw new AppError(400, 'NO_MODEL_CONFIGURED', '没有可用的模型，请先在设置里配置供应商密钥')
 
-    const messages = body.messages.map((m) => ({ role: m.role, content: flattenContent(m.content) }))
-    const upstreamBody: Record<string, unknown> = {
-      model: target.model,
-      messages,
-      ...(body.max_tokens ? { max_tokens: body.max_tokens } : {}),
-      ...(body.temperature !== undefined ? { temperature: body.temperature } : {}),
-      ...(body.stream ? { stream: true, stream_options: { include_usage: true } } : {}),
-    }
-
-    const headers: Record<string, string> =
-      target.protocol === 'ANTHROPIC'
-        ? { 'content-type': 'application/json', 'x-api-key': target.apiKey, 'anthropic-version': '2023-06-01' }
-        : { 'content-type': 'application/json', authorization: `Bearer ${target.apiKey}` }
-
-    const endpoint = target.protocol === 'ANTHROPIC' ? `${target.baseUrl}/v1/messages` : `${target.baseUrl}/chat/completions`
-    const response = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(upstreamBody) })
+    const response = await requestChat(target, body)
 
     if (!response.ok) {
       const text = await response.text()
@@ -168,9 +189,7 @@ export function registerCompatRoutes(app: FastifyInstance, deps: CompatRouteDeps
           surface: 'CHAT_COMPLETIONS',
           provider: target.providerSlug,
           model: target.model,
-          tokensIn: payload.usage?.prompt_tokens ?? 0,
-          tokensOut: payload.usage?.completion_tokens ?? 0,
-          cachedTokens: 0,
+          ...meteredUsage(payload.usage ?? {}),
         },
       })
       return reply.status(200).send(payload)
@@ -186,46 +205,11 @@ export function registerCompatRoutes(app: FastifyInstance, deps: CompatRouteDeps
       'x-accel-buffering': 'no',
     })
 
-    const reader = response.body?.getReader()
-    if (!reader) {
-      res.end()
-      return
-    }
-    const decoder = new TextDecoder()
-    let usage = { tokensIn: 0, tokensOut: 0 }
-    let tail = ''
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      const text = decoder.decode(value, { stream: true })
-      res.write(text)
-      tail += text
-      // 只在最后一段里找 usage，避免每块都做一次正则
-      if (tail.length > 4000) tail = tail.slice(-4000)
-      const match = /"usage"\s*:\s*\{[^}]*\}/.exec(tail)
-      if (match) {
-        const inMatch = /"prompt_tokens"\s*:\s*(\d+)/.exec(match[0])
-        const outMatch = /"completion_tokens"\s*:\s*(\d+)/.exec(match[0])
-        if (inMatch) usage.tokensIn = Number(inMatch[1])
-        if (outMatch) usage.tokensOut = Number(outMatch[1])
-      }
-    }
-    res.end()
-
-    await prisma.usageRecord
-      .create({
-        data: {
-          userId: auth.user.id,
-          surface: 'CHAT_COMPLETIONS',
-          provider: target.providerSlug,
-          model: target.model,
-          tokensIn: usage.tokensIn,
-          tokensOut: usage.tokensOut,
-          cachedTokens: 0,
-        },
-      })
-      .catch(() => undefined)
+    try {
+      const usage = await forwardMeteredStream(response, bytes => { res.write(bytes) })
+      await prisma.usageRecord.create({ data: { userId: auth.user.id, surface: 'CHAT_COMPLETIONS',
+        provider: target.providerSlug, model: target.model, ...usage } })
+    } finally { res.end() }
   })
 
   /** `POST /v1/messages`：Anthropic 兼容。 */
@@ -235,29 +219,7 @@ export function registerCompatRoutes(app: FastifyInstance, deps: CompatRouteDeps
     const target = await pickTarget(auth.user, body.model)
     if (!target) throw new AppError(400, 'NO_MODEL_CONFIGURED', '没有可用的模型，请先在设置里配置供应商密钥')
 
-    const system = body.messages
-      .filter((m) => m.role === 'system')
-      .map((m) => flattenContent(m.content))
-      .join('\n')
-    const messages = body.messages
-      .filter((m) => m.role !== 'system')
-      .map((m) => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: flattenContent(m.content) }))
-
-    const upstreamBody: Record<string, unknown> = {
-      model: target.model,
-      max_tokens: body.max_tokens ?? 2048,
-      messages,
-      ...(system ? { system } : {}),
-      ...(body.stream ? { stream: true } : {}),
-    }
-
-    const headers: Record<string, string> =
-      target.protocol === 'ANTHROPIC'
-        ? { 'content-type': 'application/json', 'x-api-key': target.apiKey, 'anthropic-version': '2023-06-01' }
-        : { 'content-type': 'application/json', authorization: `Bearer ${target.apiKey}` }
-
-    const endpoint = target.protocol === 'ANTHROPIC' ? `${target.baseUrl}/v1/messages` : `${target.baseUrl}/chat/completions`
-    const response = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(upstreamBody) })
+    const response = await requestChat(target, body)
 
     if (!response.ok) {
       const text = await response.text()
@@ -272,9 +234,7 @@ export function registerCompatRoutes(app: FastifyInstance, deps: CompatRouteDeps
           surface: 'CHAT_COMPLETIONS',
           provider: target.providerSlug,
           model: target.model,
-          tokensIn: payload.usage?.input_tokens ?? payload.usage?.prompt_tokens ?? 0,
-          tokensOut: payload.usage?.output_tokens ?? payload.usage?.completion_tokens ?? 0,
-          cachedTokens: 0,
+          ...meteredUsage(payload.usage ?? {}),
         },
       })
       return reply.status(200).send(payload)
@@ -288,16 +248,11 @@ export function registerCompatRoutes(app: FastifyInstance, deps: CompatRouteDeps
       connection: 'keep-alive',
       'x-accel-buffering': 'no',
     })
-    const reader = response.body?.getReader()
-    if (reader) {
-      const decoder = new TextDecoder()
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        res.write(decoder.decode(value, { stream: true }))
-      }
-    }
-    res.end()
+    try {
+      const usage = await forwardMeteredStream(response, bytes => { res.write(bytes) })
+      await prisma.usageRecord.create({ data: { userId: auth.user.id, surface: 'CHAT_COMPLETIONS',
+        provider: target.providerSlug, model: target.model, ...usage } })
+    } finally { res.end() }
   })
 
   /**
@@ -331,7 +286,7 @@ export function registerCompatRoutes(app: FastifyInstance, deps: CompatRouteDeps
         model: target.model,
         tokensIn: payload.usage?.prompt_tokens ?? 0,
         tokensOut: 0,
-        cachedTokens: 0,
+        cacheUsageComplete: false, cachedTokens: 0,
       },
     })
 

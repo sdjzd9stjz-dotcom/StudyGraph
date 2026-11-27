@@ -162,6 +162,7 @@ export interface ProviderPrefView {
 }
 
 export interface ProvidersPayload {
+  recentUsage?: Array<{ id: string; model: string; tokensIn: number; cachedTokens: number; cacheUsageComplete: boolean | null; createdAt: string }>
   encryptionReady: boolean
   providers: ProviderView[]
   preferences: ProviderPrefView[]
@@ -353,6 +354,7 @@ export interface ProblemSummary {
   difficulty: number
   bloom: string
   status: string
+  rejectReason?: string | null
   checkResult: unknown
   attempts: number
   concepts: Array<{ id: string; name: string }>

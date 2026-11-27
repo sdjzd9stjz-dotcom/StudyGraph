@@ -1,3 +1,4 @@
+import { forOperation } from '../llm/reasoning.ts'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 
@@ -101,14 +102,16 @@ export function registerDraftRoutes(app: FastifyInstance, deps: DraftRouteDeps):
     const body = parse(createBody, request.body)
     await requireCanvasWrite(prisma, canvasId, auth.user.id)
 
-    const result = await llm.complete({
+    const user = { ...auth.user, canvasId }
+    const draftModel = await forOperation(llm, 'method', user, 'draft')
+    const result = await draftModel.complete({
       taskType: 'method',
       messages: [
         { role: 'system', content: SYSTEM },
         { role: 'user', content: body.request },
       ],
       jsonSchema: PROPOSAL_SCHEMA,
-      user: auth.user,
+      user,
     })
 
     const raw = result.data as { nodes?: ProposalNode[]; edges?: ProposalEdge[] }
@@ -129,6 +132,7 @@ export function registerDraftRoutes(app: FastifyInstance, deps: DraftRouteDeps):
         tokensIn: result.usage.tokensIn,
         tokensOut: result.usage.tokensOut,
         cachedTokens: result.usage.cachedTokens,
+        cacheUsageComplete: result.usage.cacheUsageComplete !== false,
       },
     })
 

@@ -4,9 +4,9 @@ import { z } from 'zod'
 import { NODE_TYPES, isNodeType } from '../../../../packages/contracts/src/index.ts'
 import type { PrismaClient } from '../../../../packages/db/src/index.ts'
 import { collectDownstream } from '../domain/graph/dag.ts'
-import { splitCardsForConcepts } from '../domain/split-cards.ts'
+import { inspectSplit, splitCardsForConcepts } from '../domain/split-cards.ts'
 import type { EdgeLike } from '../domain/graph/dag.ts'
-import { requireCanvasWrite } from '../lib/access.ts'
+import { findCanvasForUser, requireCanvasWrite } from '../lib/access.ts'
 import { AppError } from '../lib/errors.ts'
 import { nodeNotFound, nodeParamsInvalid, nodeTypeInvalid } from '../lib/errors.ts'
 import { parse } from '../lib/validate.ts'
@@ -123,6 +123,14 @@ export function registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDeps): v
       markdown: typeof data?.markdown === 'string' ? data.markdown : '',
       outline: Array.isArray(data?.outline) ? data.outline : [],
     }
+  })
+
+  app.get('/v1/nodes/:id/split-cards', { preHandler: guard('CANVAS_READ') }, async request => {
+    const { id } = request.params as { id: string }
+    const node = await prisma.node.findUnique({ where: { id }, select: { canvasId: true } })
+    if (!node) throw nodeNotFound(id)
+    await findCanvasForUser(prisma, node.canvasId, getAuth(request).user.id)
+    return inspectSplit(prisma, { canvasId: node.canvasId, extractNodeId: id })
   })
 
   app.post('/v1/nodes/:id/split-cards', { preHandler: guard('CANVAS_WRITE') }, async (request, reply) => {

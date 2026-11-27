@@ -1,12 +1,14 @@
+import { createHash } from 'node:crypto'
 import { AppError, llmCredentialMissing, llmProviderError } from '../lib/errors.ts'
 import type { ApiKeyResolver, TargetResolver } from './credentials.ts'
 import { normalizeCredential } from './credentials.ts'
-import { createAnthropicProvider } from './providers/anthropic.ts'
+import { createAnthropicAgent, createAnthropicProvider } from './providers/anthropic.ts'
 import { createDeepSeekProvider } from './providers/deepseek.ts'
 import { createOpenAICompatibleAgent, createOpenAICompatibleProvider } from './providers/openai-compatible.ts'
 import { createOpenAIProvider } from './providers/openai.ts'
 import { TASK_ROUTING } from './routing.ts'
 import type { ModelRoute } from './routing.ts'
+import type { UserCtx } from './user.ts'
 import type { LLMCompleteRequest, LLMGateway, TaskType } from './types.ts'
 
 export interface GatewayDeps {
@@ -14,6 +16,7 @@ export interface GatewayDeps {
    * 取密钥：`(provider, user)` → 先查 BYOK（ProviderCredential 解密），再退回 .env；
    * 都没有返回 null（SG-SUP-005 缺陷 E：签名必须能拿到用户身份）。
    */
+  readonly resolveEffort?: (canvasId: string, scope: string, provider: string, model: string) => Promise<string | undefined>
   readonly resolveApiKey: ApiKeyResolver
   /** 完整目标解析：协议 + baseUrl + 模型（多供应商）。不传则退回旧的三家分派。 */
   readonly resolveTarget?: TargetResolver
@@ -32,16 +35,50 @@ export interface GatewayDeps {
  * 那是最难查的一类 bug。适配器抛出的 AppError（如 PROVIDER_RESPONSE_INVALID）
  * 原样上抛，不被重新包成"厂商调用失败"。
  */
-export function createGateway(deps: GatewayDeps): LLMGateway {
+function compatibleUrl(target: { baseUrl: string; protocol: string }) {
+  if (target.protocol !== 'GEMINI') return target.baseUrl
+  return target.baseUrl.replace(/\/+$/, '').replace(/(?:\/v1beta)?(?:\/openai)?$/, '/v1beta/openai')
+}
+
+function routingKey(userId: string, task: TaskType, model: string, conversationId?: string) {
+  return 'sg-' + createHash('sha256').update(JSON.stringify(conversationId ? [userId, task, model, conversationId] : [userId, task, model])).digest('hex').slice(0, 32)
+}
+
+export function createGateway(deps: GatewayDeps, effort?: string): LLMGateway {
   const routing = deps.routing ?? TASK_ROUTING
 
+  async function credentialsFor(task: TaskType, user: UserCtx) {
+    const route = routing[task]
+    if (deps.resolveTarget) {
+      const target = await deps.resolveTarget(task, user, route)
+      if (!target) throw llmCredentialMissing(route.provider)
+      return { target, apiKey: target.apiKey }
+    }
+    const resolved = normalizeCredential(await deps.resolveApiKey(route.provider, user))
+    if (!resolved) throw llmCredentialMissing(route.provider)
+    return { target: null, apiKey: resolved.apiKey }
+  }
+
   return {
+    effort,
+    async forOperation(task, user, scope) {
+      const route = routing[task]
+      const target = await deps.resolveTarget?.(task, user, route)
+      const selected = user.canvasId && deps.resolveEffort
+        ? await deps.resolveEffort(user.canvasId, scope, target?.providerSlug ?? route.provider, target?.model ?? route.model)
+        : undefined
+      return createGateway({ ...deps, ...(deps.resolveTarget ? { resolveTarget: async () => target ?? null } : {}) }, selected)
+    },
+    async selectedRoute(task, user) {
+      const route = routing[task]
+      const target = await deps.resolveTarget?.(task, user, route)
+      if (!target || (target.providerSlug === route.provider && target.model === route.model)) return route
+      return { provider: target.providerSlug, model: target.model }
+    },
     routeFor: (task) => routing[task],
     async complete(request: LLMCompleteRequest) {
       const route = routing[request.taskType]
-      const resolved = normalizeCredential(await deps.resolveApiKey(route.provider, request.user))
-      if (!resolved) throw llmCredentialMissing(route.provider)
-      const apiKey = resolved.apiKey
+      const { target, apiKey } = await credentialsFor(request.taskType, request.user)
 
       // 新接口用 cachePrefix（key + text）；老调用方只给 key 时退化成 { key, text: '' }
       const cachePrefix =
@@ -56,26 +93,20 @@ export function createGateway(deps: GatewayDeps): LLMGateway {
         )
       }
 
-      // 有完整目标解析器就用它（支持自定义端点与按任务的模型偏好）；
-      // 没有则退回旧的三家分派，保证现有调用方与测试不受影响。
-      const target = deps.resolveTarget
-        ? await deps.resolveTarget(request.taskType, request.user, route)
-        : null
-
-      if (deps.resolveTarget && !target) throw llmCredentialMissing(route.provider)
-
       // 有目标就按**协议**分派，而不是按厂商标识 —— 自定义 OpenAI 兼容端点
       // （校园网关、本地 Ollama、中转站）没有固定的厂商标识，只能靠协议认。
       const model = target?.model ?? route.model
       const providerLabel = target?.providerSlug ?? route.provider
       const call =
         target?.protocol === 'ANTHROPIC'
-          ? createAnthropicProvider({ apiKey: target.apiKey, fetchImpl: deps.fetchImpl })
+          ? createAnthropicProvider({ apiKey: target.apiKey, baseUrl: target.baseUrl, fetchImpl: deps.fetchImpl })
           : target
             ? createOpenAICompatibleProvider({
-                provider: 'openai',
+                provider: providerLabel === 'deepseek' ? 'deepseek' : 'openai',
+                routingKey: routingKey(request.user.id, request.taskType, model, request.conversationId),
+                jsonMode: providerLabel === 'deepseek' ? 'json_object' : 'json_schema',
                 apiKey: target.apiKey,
-                baseUrl: target.baseUrl,
+                baseUrl: compatibleUrl(target),
                 fetchImpl: deps.fetchImpl,
               })
             : route.provider === 'openai'
@@ -90,7 +121,9 @@ export function createGateway(deps: GatewayDeps): LLMGateway {
           messages: request.messages,
           jsonSchema: request.jsonSchema,
           maxTokens: request.maxTokens,
-          cachePrefix,
+          effort,
+          cacheConversation: Boolean(request.conversationId),
+          cachePrefix: cachePrefix ?? { key: routingKey(request.user.id, request.taskType, model, request.conversationId), text: '' },
         })
         return { ...result, provider: providerLabel }
       } catch (error) {
@@ -100,35 +133,20 @@ export function createGateway(deps: GatewayDeps): LLMGateway {
       }
     },
 
-    /**
-     * 带工具的一轮对话。
-     *
-     * 只支持 OpenAI 兼容协议（DeepSeek 与自建中转都属于这一类）。
-     * Anthropic 的工具协议形态不同，没有实现就不假装支持 ——
-     * 直接报 LLM_TOOLS_UNSUPPORTED，让上层把"这个模型不能当 agent"说清楚，
-     * 而不是悄悄退化成关键词匹配。
-     */
     async chatWithTools(request) {
       const route = routing[request.taskType]
-      const resolved = normalizeCredential(await deps.resolveApiKey(route.provider, request.user))
-      if (!resolved) throw llmCredentialMissing(route.provider)
-
-      const target = deps.resolveTarget
-        ? await deps.resolveTarget(request.taskType, request.user, route)
-        : null
-      if (deps.resolveTarget && !target) throw llmCredentialMissing(route.provider)
+      const { target, apiKey } = await credentialsFor(request.taskType, request.user)
 
       const model = target?.model ?? route.model
       const providerLabel = target?.providerSlug ?? route.provider
-      if (target?.protocol === 'ANTHROPIC') {
-        throw new AppError(501, 'LLM_TOOLS_UNSUPPORTED', `模型 ${providerLabel} 使用 Anthropic 协议，暂不支持工具调用`)
-      }
-
-      const agent = createOpenAICompatibleAgent({
-        provider: 'openai',
-        apiKey: target?.apiKey ?? resolved.apiKey,
+      const agent = (target?.protocol === 'ANTHROPIC' || (!target && route.provider === 'anthropic'))
+        ? createAnthropicAgent({ apiKey, baseUrl: target?.baseUrl, fetchImpl: deps.fetchImpl })
+        : createOpenAICompatibleAgent({
+        provider: providerLabel === 'deepseek' ? 'deepseek' : 'openai',
+        routingKey: routingKey(request.user.id, request.taskType, model, request.conversationId),
+        apiKey,
         baseUrl:
-          target?.baseUrl ??
+          target ? compatibleUrl(target) :
           (route.provider === 'deepseek' ? 'https://api.deepseek.com' : 'https://api.openai.com/v1'),
         fetchImpl: deps.fetchImpl,
       })
@@ -139,6 +157,7 @@ export function createGateway(deps: GatewayDeps): LLMGateway {
           messages: request.messages,
           tools: request.tools,
           maxTokens: request.maxTokens,
+          effort,
         })
         return { ...result, provider: providerLabel }
       } catch (error) {

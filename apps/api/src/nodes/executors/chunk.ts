@@ -5,25 +5,37 @@ import { ZERO_USAGE } from '../contract.ts'
 import { nodeInputMissing } from '../../lib/errors.ts'
 
 interface ChunkParams {
-  /** 单个切片的目标字符数；超过就按页切开（M2 一页一片，不做跨页合并） */
+  /** 每片最多包含的 Unicode 码点数；不同原文片段分别切分，便于回查出处。 */
   maxChars?: number
 }
 
-/**
- * `chunk` 节点：原文 → 语义切片。
- *
- * M2 的实现是**确定性**的（不调模型）：一个非空页/幻灯片 = 一个切片，
- * 切片的 `spanIds` 就是该页的 span。这样做的好处是：
- *
- * - 切片与原文的对应关系是 1:1 可验证的，没有"模型切歪了"的可疑空间
- * - 之后把切片策略换成模型/规则混合时，指纹会把旧产物自然淘汰
- *
- * 空文本页没有 span，因此也不会产出切片（不凭空造内容）。
- */
+/** maxChars 按 Unicode 码点计数，切片位置仍沿用原文的 UTF-16 偏移。 */
+export function splitSpanText(text: string, maxChars: number): string[] {
+  if (!Number.isSafeInteger(maxChars) || maxChars < 1) throw new Error('maxChars 必须是正整数')
+  if (text.length <= maxChars) return [text]
+
+  const pieces: string[] = []
+  let start = 0
+  let end = 0
+  let count = 0
+  // 数学斜体字母等字符占两个 UTF-16 码元。按字符移动才能让每一片独立写入 JSON。
+  for (const character of text) {
+    end += character.length
+    count += 1
+    if (count === maxChars) {
+      pieces.push(text.slice(start, end))
+      start = end
+      count = 0
+    }
+  }
+  if (start < end) pieces.push(text.slice(start))
+  return pieces
+}
+
 export const chunkExecutor: NodeExecutor<ChunkParams> = {
   type: 'CHUNK',
   artifactKind: 'CHUNKS',
-  promptVersion: 'no-prompt',
+  promptVersion: 'chunk-unicode-v2',
   inputs: { type: 'object', properties: { sourceDoc: { type: 'object' } }, required: ['sourceDoc'] },
   outputs: { type: 'object', properties: { chunkSet: { type: 'object' } }, required: ['chunkSet'] },
 
@@ -32,7 +44,6 @@ export const chunkExecutor: NodeExecutor<ChunkParams> = {
     if (!sourceDoc?.sourceId) throw nodeInputMissing('chunk 节点缺少上游 sourceDoc')
 
     const maxChars = ctx.params.maxChars ?? 800
-    if (!Number.isSafeInteger(maxChars) || maxChars < 1) throw new Error('maxChars 必须是正整数')
 
     const spans = await ctx.prisma.span.findMany({
       where: { sourceId: sourceDoc.sourceId },
@@ -58,21 +69,9 @@ export const chunkExecutor: NodeExecutor<ChunkParams> = {
     }> = []
 
     for (const span of spans) {
-      if (span.text.length <= maxChars) {
-        chunks.push({
-          id: `chunk-${chunks.length + 1}`,
-          order: chunks.length,
-          text: span.text,
-          spanIds: [span.id],
-          pageStart: span.page,
-          pageEnd: span.page,
-          estimatedTokens: Math.ceil(span.text.length / 2),
-        })
-        continue
-      }
-
-      for (let offset = 0; offset < span.text.length; offset += maxChars) {
-        const piece = span.text.slice(offset, offset + maxChars)
+      const pieces = splitSpanText(span.text, maxChars)
+      if (pieces.join('') !== span.text) throw new Error(`chunk 拼接校验失败（span ${span.id}）：切片丢字符`)
+      for (const piece of pieces) {
         chunks.push({
           id: `chunk-${chunks.length + 1}`,
           order: chunks.length,
@@ -82,17 +81,6 @@ export const chunkExecutor: NodeExecutor<ChunkParams> = {
           pageEnd: span.page,
           estimatedTokens: Math.ceil(piece.length / 2),
         })
-      }
-    }
-
-    // 自检：拼回去必须与原文逐字符相等，否则宁可不产出
-    for (const span of spans) {
-      const joined = chunks
-        .filter((chunk) => chunk.spanIds[0] === span.id)
-        .map((chunk) => chunk.text)
-        .join('')
-      if (joined !== span.text) {
-        throw new Error(`chunk 拼接校验失败（span ${span.id}）：切片丢字符`)
       }
     }
 

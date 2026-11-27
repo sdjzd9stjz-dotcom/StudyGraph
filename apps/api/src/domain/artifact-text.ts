@@ -22,7 +22,8 @@ function clip(text: string, max = MAX_LINE): string {
     if (value.length > remaining) {
       // 在公式中间截断会丢失定界符，卡片只显示反斜杠。允许当前公式单独超出摘要长度。
       if (part.formula && remaining > 0) return result + value + (i + 1 < parts.length ? '…' : '')
-      return result + value.slice(0, Math.max(0, remaining)) + '…'
+      // 摘要也可能正好截到数学字符的前半个码元；省略整字，保证预览可独立传输。
+      return result + value.slice(0, Math.max(0, remaining)).replace(/[\uD800-\uDBFF]$/u, '') + '…'
     }
     result += value
   }
@@ -253,6 +254,11 @@ export function summarizeArtifact(kind: string, structured: unknown): string {
     }
 
     case 'CHECK_VERDICT': {
+      const result = data.result as Record<string, unknown> | undefined
+      if (typeof result?.verified === 'number' && typeof result.rejected === 'number') {
+        lines.push(`题库质检：通过 ${result.verified} 道，驳回 ${result.rejected} 道`)
+        break
+      }
       lines.push(data.passed === true ? '✅ 三检通过' : '❌ 三检未通过')
       for (const check of asArray((data.result as Record<string, unknown>)?.checks).slice(0, 4)) {
         const record = check as Record<string, unknown>
@@ -264,10 +270,11 @@ export function summarizeArtifact(kind: string, structured: unknown): string {
     case 'PAPER_SPEC': {
       const report = (data.report ?? {}) as Record<string, unknown>
       const items = asArray(data.items ?? report.problems)
-      lines.push(`📝 组卷：${num(data.itemCount) ?? items.length} 道`)
-      if (num(report.pickedCount) !== null) lines.push(`实取 ${num(report.pickedCount)} 道`)
+      lines.push(`📝 组卷：${num(report.pickedCount) ?? num(data.itemCount) ?? items.length} 道`)
       for (const gap of asArray(report.gaps).slice(0, 5)) {
-        lines.push(`⚠ 缺口：${clip(str(gap), 80)}`)
+        const detail = gap as { what?: string; wanted?: number; got?: number } | null
+        const text = detail?.what ? `${detail.what}，需要 ${detail.wanted} 道，实取 ${detail.got} 道` : str(gap)
+        if (text) lines.push(`⚠ 缺口：${clip(text, 80)}`)
       }
       break
     }

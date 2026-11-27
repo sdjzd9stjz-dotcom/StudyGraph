@@ -1,5 +1,8 @@
 'use client'
 
+import { nodeModelTask } from '../../../../packages/contracts/src/reasoning'
+import { ModelControls } from './CanvasAiConfig'
+
 import { MathText } from '../MathText'
 
 import { Handle, Position } from '@xyflow/react'
@@ -81,6 +84,7 @@ export function SgNode({ id, data, selected }: NodeProps) {
   const [pinned, setPinned] = useState(false)
   const rootRef = useRef<HTMLDivElement | null>(null)
   const [hoverPort, setHoverPort] = useState<{ side: 'in' | 'out'; name: string; type: string; top: number } | null>(null)
+  const task = nodeModelTask(d.nodeType)
   const color = nodeColor(d.nodeType)
 
   /**
@@ -450,6 +454,7 @@ export function SgNode({ id, data, selected }: NodeProps) {
         }}
       >
         <div style={{ padding: '7px 9px', maxHeight: 292, overflowY: 'auto' }}>
+            {task && <ModelControls task={task} scope={`run:${id}`} label="运行模型" />}
           {/* ① 参数：这六个节点处理的是某一道具体的题，原文没法从上游拿 */}
           {fields.length > 0 && (
             <div style={{ marginBottom: 8 }}>

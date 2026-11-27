@@ -22,7 +22,13 @@ https://github.com/user-attachments/assets/eb32aac2-2529-4190-a0ff-404f53d9d2c4
 
 ## 当前状态
 
-**Windows 桌面版 0.25.6** 支持在画布和对话中离线显示 LaTeX 公式。画布提供 19 种可运行的节点，覆盖课件解析、知识卡制作、练习、组卷和复习。
+**Windows 桌面版 0.25.11** · [下载安装包（64 位）](https://github.com/sdjzd9stjz-dotcom/StudyGraph/releases/download/v0.25.11/StudyGraph-Setup-0.25.11.exe) · [发布说明与 SHA-256](https://github.com/sdjzd9stjz-dotcom/StudyGraph/releases/tag/v0.25.11)
+
+- **按任务选择模型。** 在画布助手、卡片追问和自动命名对话框中直接选模型。在卡片参数区设置节点运行模型和推理强度，追问可单独设置。
+- **核对拆卡结果。** 课件在本地按完整的 Unicode 字符切片，保留数学字母和生僻汉字。概念抽取使用画布或全局配置的模型，右键抽取节点可查看哪些概念没有建卡，以及原因。
+- **查看缓存用量。** 设置页显示供应商报告的缓存用量和输入命中率。长课件抽取、画布追问和调整出题数量时，会尽可能复用已有材料。
+
+画布提供 19 种可运行的节点，覆盖课件解析、知识卡制作、练习、组卷和复习。画布、对话和导出的讲义 PDF 均支持离线 LaTeX 排版。
 
 | 已交付 | 路径 |
 | --- | --- |
@@ -33,12 +39,12 @@ https://github.com/user-attachments/assets/eb32aac2-2529-4190-a0ff-404f53d9d2c4
 | PDF / PPTX / 纯图片 PDF（OCR）解析 | `apps/api/src/storage/` |
 | 概念拆分、一键整理布局 | `apps/api/src/domain/split-cards.ts`、`layout.ts` |
 | Next.js 界面：画布、复习、题库、错题看板、模型配置、**内置教程** | `apps/web/app/` |
-| 全量领域模型（49 个模型 / 33 个枚举） | `packages/db/prisma/schema.prisma` |
-| 迁移（21 份，含物理约束与触发器） | `packages/db/prisma/migrations/` |
+| 全量领域模型（50 个模型 / 33 个枚举） | `packages/db/prisma/schema.prisma` |
+| 迁移（23 份，含物理约束与触发器） | `packages/db/prisma/migrations/` |
 | 使用说明书（Markdown + PDF，应用内 `/guide` 直接读它） | `docs/使用说明书.md` |
 | 架构决策与不变量 | `docs/architecture.md` |
 
-[下载 Windows 64 位安装包](https://github.com/sdjzd9stjz-dotcom/StudyGraph/releases/download/v0.25.6/StudyGraph-Setup-0.25.6.exe) · [发布说明与 SHA-256 校验值](https://github.com/sdjzd9stjz-dotcom/StudyGraph/releases/tag/v0.25.6)。可按当前用户安装，所需运行环境已随包提供。卸载时可选择保留学习数据，重装后继续使用。
+可按当前用户安装，所需运行环境已随包提供。卸载时可选择保留学习数据，重装后继续使用。
 
 ---
 
@@ -118,7 +124,7 @@ studygraph/
 │  └─ desktop/    Electron 壳：内置库生命周期、preload、PDF 打印
 ├─ packages/
 │  ├─ contracts/  前后端共享：节点类型、端口矩阵、指纹、连线校验
-│  ├─ db/         Prisma schema + 21 份迁移 + 手写 SQL（递归 CTE、物理约束）
+│  ├─ db/         Prisma schema + 23 份迁移 + 手写 SQL（递归 CTE、物理约束）
 │  └─ ui/         设计令牌与共享原语
 ├─ scripts/       prisma CLI 启动器、打包、审计、验收
 ├─ vendor/pg16/   打包用的 PostgreSQL 16 + pgvector 运行时
@@ -150,8 +156,7 @@ studygraph/
 2. **执行必须显式触发** —— 上游变更只把下游标 `STALE`，绝不自动重跑；
    连底部 agent 也只能摆放节点，运行必须由用户点 ▶。
 3. **写作类节点只给骨架** —— `Outline` / `Draft` 输出结构与证据槽位，不生成成段正文。
-4. **出题必须过质量闸门** —— 可解性 / 判分确定性 / 无歧义三检，
-   任一失败标 `REJECTED` 并附理由，不得入库。
+4. **只有通过质检的题目可以组卷。** 新题以 `PENDING` 进入题库。将「出题」直连「质量闸门」，留空题干和答案并运行，系统逐题检查可解性、答案正确性和干扰项有效性。三项全部通过后标为 `VERIFIED`，任一项未通过则记为 `REJECTED` 并保存理由。手动与自动组卷均只接受本画布的 `VERIFIED` 题目，自动组卷会报告合格题的缺口。
 5. **每个干扰项必须诊断一个错因** —— 错误选项绑定 `ErrorTag`，禁止凑数选项。
 
 另有一条关于 AI 的边界：**底部 agent 提供 13 个画布工具**

@@ -55,9 +55,9 @@ test('上下文默认包含每个节点的产出内容，而不只是标题', as
     }),
   )
 
-  assert.match(context.text, /上确界/)
-  assert.match(context.text, /它是上界，且任何更小的数都不是上界/)
-  assert.match(context.text, /尚未运行，没有产物/, '没跑过的节点也要说明，别让模型以为它没内容')
+  assert.match(context.materials, /上确界/)
+  assert.match(context.materials, /它是上界，且任何更小的数都不是上界/)
+  assert.match(context.materials, /尚未运行，没有产物/, '没跑过的节点也要说明，别让模型以为它没内容')
   assert.equal(context.nodeCount, 2)
 })
 
@@ -72,9 +72,9 @@ test('节点对话也进上下文（下游/助手能引用学生问过的问题�
     }),
   )
 
-  assert.match(context.text, /为什么 ε 要取任意正数/)
-  assert.match(context.text, /用户：/)
-  assert.match(context.text, /助手：/)
+  assert.match(context.activity, /为什么 ε 要取任意正数/)
+  assert.match(context.activity, /用户：/)
+  assert.match(context.activity, /助手：/)
 })
 
 test('连线也写进上下文，模型才知道谁是谁的下游', async () => {
@@ -86,7 +86,7 @@ test('连线也写进上下文，模型才知道谁是谁的下游', async () =>
       edges: [{ fromNodeId: 'a', toNodeId: 'b' }],
     }),
   )
-  assert.match(context.text, /切片 → 概念抽取/)
+  assert.match(context.materials, /切片 → 概念抽取/)
 })
 
 test('内容总量超出预算时按节点截断，并明确告诉模型可以读全文（不悄悄丢）', async () => {
@@ -113,13 +113,25 @@ test('内容总量超出预算时按节点截断，并明确告诉模型可以�
 
   const context = await buildCanvasContext(depsOf({ nodes, artifacts }))
 
-  assert.ok(context.text.length <= 20_000, `上下文必须被预算约束，实际 ${context.text.length}`)
+  assert.ok((context.materials.length + context.activity.length) <= 20_000, `上下文必须被预算约束，实际 ${(context.materials.length + context.activity.length)}`)
   assert.ok(context.truncated >= 1, '裁剪发生时必须计数')
-  assert.match(context.text, /已截断|read_node_output/)
+  assert.match(context.materials + context.activity, /已截断|read_node_output/)
 })
 
 test('空画布明确说明，而不是给一段空字符串', async () => {
   const context = await buildCanvasContext(depsOf({ nodes: [] }))
-  assert.equal(context.text, '（空画布）')
+  assert.equal(context.materials, '（空画布）')
   assert.equal(context.nodeCount, 0)
+})
+
+
+test('修改早期卡片的对话和状态时，其余材料保持为同一条完整消息', async () => {
+  const node = { id: 'card-1', type: 'CARD', title: '上确界', status: 'READY' }
+  const before = await buildCanvasContext(depsOf({ nodes: [node], artifacts: [cardArtifact] }))
+  const after = await buildCanvasContext(depsOf({ nodes: [{ ...node, status: 'STALE' }], artifacts: [cardArtifact],
+    messages: [{nodeId: node.id, role: 'user', content: '最新的问题'}] }))
+  assert.equal(after.materials, before.materials)
+  assert.match(after.activity, /STALE/)
+  assert.match(after.activity, /最新的问题/)
+  assert.doesNotMatch(after.activity, /READY/)
 })

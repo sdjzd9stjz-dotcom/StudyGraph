@@ -4,7 +4,6 @@ import { ReadSection } from '../../../components/ReadSection'
 import { CanvasWorkbench } from '../../../components/canvas/CanvasWorkbench'
 import { ConceptPanel } from '../../../components/ConceptPanel'
 import { BackLink } from '../../../components/BackLink'
-import { CanvasAiConfig } from '../../../components/canvas/CanvasAiConfig'
 import { SourceUploader } from '../../../components/SourceUploader'
 import { API_BASE_URL, fetchCanvas, fetchCanvasConcepts, fetchCanvasSkills, fetchGroups, serverToken } from '../../../lib/api'
 
@@ -98,7 +97,6 @@ export default async function CanvasPage({ params }: { params: { canvasId: strin
         * 放在画布下方而不是侧栏：确认概念是"出题之前"的一次性动作，
         * 不需要常驻视线，但找不到就会卡住整条链路（真实反馈：出题一直失败）。
         */}
-      <CanvasAiConfig canvasId={canvas.id} apiBaseUrl={API_BASE_URL} token={serverToken()} />
 
       <details data-testid="concept-panel-wrapper" style={{ borderTop: '1px solid #e2e8f0', background: '#fff' }}>
         <summary style={{ cursor: 'pointer', padding: '8px 16px', fontSize: 13, color: '#334155' }}>

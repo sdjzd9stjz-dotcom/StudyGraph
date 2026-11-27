@@ -23,6 +23,9 @@ export const REQUIRED_CAPABILITY: Readonly<Record<string, 'jsonObject' | null>> 
 
 export const TASK_TYPE_KEYS = Object.keys(REQUIRED_CAPABILITY)
 
+/** 切片是本地确定性操作，保留旧配置的读取兼容。 */
+export const MODEL_TASK_KEYS = TASK_TYPE_KEYS.filter(task => task !== 'chunk')
+
 /** 任务类型的中文名：全局配置页与画布配置页共用，避免两处措辞不一致 */
 export const TASK_LABELS: Readonly<Record<string, string>> = {
   assistant: '底部对话',

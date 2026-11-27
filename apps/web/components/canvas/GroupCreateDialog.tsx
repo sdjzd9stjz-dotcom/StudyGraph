@@ -1,5 +1,7 @@
 'use client'
 
+import { ModelControls } from './CanvasAiConfig'
+
 import { MathText } from '../MathText'
 
 import { useEffect, useState } from 'react'
@@ -72,6 +74,8 @@ export function GroupCreateDialog({ memberCount, outside, onCancel, onConfirm }:
           }}
           style={{ width: '100%', boxSizing: 'border-box', border: '1px solid #cbd5e1', borderRadius: 8, padding: '8px 10px', fontSize: 13, marginBottom: 14 }}
         />
+
+        <ModelControls task="method" scope="group-name" label="自动命名模型" />
 
         {outside.length > 0 ? (
           <div

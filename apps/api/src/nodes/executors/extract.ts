@@ -34,13 +34,22 @@ const SYSTEM_PROMPT = [
   '6. definition 必须以 name 的完整字样开头，紧跟谓词再陈述内容，可套用这些句式：',
   '   「<name>是指……」「<name>是……」「<name>表示……」「<name>定义为……」「<name>满足……」。',
   '   不要写成省略主语的句子（如「在其定义域内是连续的」），也不要只写名称本身。',
+  '外文课件的 name、definition 和 quote 均使用原文语言，同一语言校验定义和引文。原文确实给出完整定义时优先照录；英文用原文的谓词（如 is、means、denotes），上面的中文句式仅用于中文材料。',
   '7. 只有当原文确实给出了该概念的实质内容时才输出；',
   '   若某个标题下只有名称、没有说明（如「…的注记」「…的适用条件」），跳过它，不要为凑数而输出。',
   '8. 只输出一个 json 对象，形如 {"claims":[{"chunk":0,"name":"...","definition":"...","quote":"..."}]}。',
   '9. 没有可抽取的概念时输出 {"claims":[]}。',
 ].join('\n')
 
-export const EXTRACT_PROMPT_VERSION = createHash('sha256').update(SYSTEM_PROMPT).digest('hex').slice(0, 12)
+// 长课件容易跨片段或跨语言误引。各批共用同一组判例，模型仍须逐条引用本批原文。
+const EVIDENCE_EXAMPLES = [
+  '跨片段核对示例（只解释判定方法，示例内容不能进入输出）：',
+  '英文片段若写 “A bridge is an edge whose removal increases the number of connected components.”，name 取原词 bridge；quote 完整照录英文原句，definition 也用英文。若另一页只有 “See the bridge example.”，那一页不能充当定义的出处。',
+  '数学片段若写「点属于集合的内部，当且仅当该点存在一个完全包含在该集合中的邻域」，定义要保留「存在」与包含方向。若片段恰好断在「当且仅当」，下一个片段只有公式右端，不要跨片段拼出看似完整的引文。',
+  '同一页出现页眉、目录、证明和定义时，逐句核对概念所在的片段编号。不能因为标题包含术语，就借用证明中另一个对象的性质作为这个术语的定义。',
+].join('\n')
+
+export const EXTRACT_PROMPT_VERSION = createHash('sha256').update(SYSTEM_PROMPT + '\n' + EVIDENCE_EXAMPLES).digest('hex').slice(0, 12)
 
 interface ExtractParams {
   /** 每批送多少个 chunk（默认 15） */
@@ -88,8 +97,14 @@ export const extractExecutor: NodeExecutor<ExtractParams> = {
     let tokensIn = 0
     let tokensOut = 0
     let cachedTokens = 0
-    const usageRecords = new Map<string, { provider: string; model: string; tokensIn: number; tokensOut: number; cachedTokens: number }>()
+    const usageRecords = new Map<string, { provider: string; model: string; tokensIn: number; tokensOut: number; cachedTokens: number; cacheUsageComplete: boolean }>()
 
+    const basePrompt = composeSystemPrompt(HARD_RULE_SUMMARY, ctx.skills, SYSTEM_PROMPT)
+    const examplePrompt = basePrompt + '\n' + EVIDENCE_EXAMPLES
+    const canTryExamples = Math.ceil(chunks.length / batchSize) >= 5
+    let useExamples = false
+    let exampleBatches = 0
+    let lowHitBatches = 0
     for (let start = 0; start < chunks.length; start += batchSize) {
       const batch = chunks.slice(start, start + batchSize)
       const userContent = batch
@@ -100,7 +115,7 @@ export const extractExecutor: NodeExecutor<ExtractParams> = {
         taskType: 'extract',
         messages: [
           // F2：硬约束 → skill（按 slug 排序）→ 节点 prompt，顺序固定且进前缀缓存
-          { role: 'system', content: composeSystemPrompt(HARD_RULE_SUMMARY, ctx.skills, SYSTEM_PROMPT) },
+          { role: 'system', content: useExamples ? examplePrompt : basePrompt },
           { role: 'user', content: userContent },
         ],
         jsonSchema: {
@@ -133,6 +148,17 @@ export const extractExecutor: NodeExecutor<ExtractParams> = {
         user: ctx.user,
       })
 
+      // 先用原提示测一次热缓存。已有命中或缺少用量证据时，保留更短的输入。
+      if (canTryExamples && start === batchSize) {
+        useExamples = result.usage.cacheUsageComplete !== false && result.usage.cachedTokens === 0
+      } else if (useExamples) {
+        exampleBatches++
+        // 新前缀的首批也可能冷启动。后续连续两批未命中完整前缀时停止试用。
+        if (exampleBatches > 1) {
+          lowHitBatches = result.usage.cachedTokens >= 1024 ? 0 : lowHitBatches + 1
+          if (lowHitBatches >= 2) useExamples = false
+        }
+      }
       tokensIn += result.usage.tokensIn
       tokensOut += result.usage.tokensOut
       cachedTokens += result.usage.cachedTokens
@@ -144,10 +170,11 @@ export const extractExecutor: NodeExecutor<ExtractParams> = {
         model: result.modelVersion,
         tokensIn: 0,
         tokensOut: 0,
-        cachedTokens: 0,
+        cachedTokens: 0, cacheUsageComplete: true,
       }
       record.tokensIn += result.usage.tokensIn
       record.tokensOut += result.usage.tokensOut
+      record.cacheUsageComplete &&= result.usage.cacheUsageComplete !== false
       record.cachedTokens += result.usage.cachedTokens
       usageRecords.set(key, record)
 
@@ -210,7 +237,7 @@ export const extractExecutor: NodeExecutor<ExtractParams> = {
 
     return {
       outputs: { conceptClaims },
-      usage: { tokensIn, tokensOut, cachedTokens },
+      usage: { tokensIn, tokensOut, cachedTokens, cacheUsageComplete: [...usageRecords.values()].every(record => record.cacheUsageComplete) },
       usageRecords: [...usageRecords.values()],
     }
   },

@@ -16,6 +16,7 @@ export interface TokenUsage {
   readonly tokensIn: number
   readonly tokensOut: number
   /** 命中前缀缓存的输入 token（厂商返回的 cached_tokens） */
+  readonly cacheUsageComplete?: boolean
   readonly cachedTokens: number
 }
 
@@ -69,6 +70,7 @@ export interface ToolSpec {
 }
 
 export interface ToolCall {
+  readonly extraContent?: Record<string, unknown>
   readonly id: string
   readonly name: string
   /** 模型给的 JSON 字符串，可能不合法；由执行方解析并拒绝 */
@@ -77,10 +79,11 @@ export interface ToolCall {
 
 export type AgentMessage =
   | { readonly role: 'system' | 'user'; readonly content: string }
-  | { readonly role: 'assistant'; readonly content: string; readonly toolCalls?: readonly ToolCall[] }
+  | { readonly role: 'assistant'; readonly content: string; readonly toolCalls?: readonly ToolCall[]; readonly reasoningContent?: string; readonly nativeContent?: readonly Record<string, unknown>[] }
   | { readonly role: 'tool'; readonly toolCallId: string; readonly content: string }
 
 export interface AgentRequest {
+  readonly conversationId?: string
   readonly taskType: TaskType
   readonly messages: readonly AgentMessage[]
   readonly tools: readonly ToolSpec[]
@@ -89,6 +92,8 @@ export interface AgentRequest {
 }
 
 export interface AgentResult {
+  readonly nativeContent?: readonly Record<string, unknown>[]
+  readonly reasoningContent?: string
   readonly content: string
   readonly toolCalls: readonly ToolCall[]
   readonly usage: TokenUsage
@@ -97,6 +102,8 @@ export interface AgentResult {
 }
 
 export interface LLMCompleteRequest {
+  /** 同一会话复用路由；仅在网关内部参与哈希。 */
+  readonly conversationId?: string
   readonly taskType: TaskType
   readonly messages: readonly Message[]
   readonly jsonSchema?: JSONSchema
@@ -123,6 +130,9 @@ export interface LLMCompleteResult {
 }
 
 export interface LLMGateway {
+  readonly effort?: string
+  forOperation?(task: TaskType, user: UserCtx, scope: string): Promise<LLMGateway>
+  selectedRoute?(task: TaskType, user: UserCtx): Promise<{ provider: string; model: string; expectedVersion?: string }>
   routeFor(task: TaskType): import('./routing.ts').ModelRoute
   complete(req: LLMCompleteRequest): Promise<LLMCompleteResult & { provider: import('./routing.ts').ProviderId }>
   /** 带工具的一轮对话（agent 循环的每一步） */

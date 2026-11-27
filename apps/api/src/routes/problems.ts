@@ -4,6 +4,7 @@ import { z } from 'zod'
 import type { PrismaClient } from '../../../../packages/db/src/index.ts'
 import { requireCanvasWrite } from '../lib/access.ts'
 import { AppError } from '../lib/errors.ts'
+import { createVerifiedPaper } from '../domain/verified-paper.ts'
 import { parse } from '../lib/validate.ts'
 import { getAuth } from '../plugins/auth.ts'
 import type { Guard } from '../plugins/auth.ts'
@@ -66,6 +67,7 @@ export function registerProblemRoutes(app: FastifyInstance, deps: ProblemRouteDe
         bloom: true,
         status: true,
         checkResult: true,
+        rejectReason: true,
         createdAt: true,
         concepts: { select: { conceptId: true, concept: { select: { name: true } } } },
         _count: { select: { attempts: true } },
@@ -84,6 +86,7 @@ export function registerProblemRoutes(app: FastifyInstance, deps: ProblemRouteDe
         bloom: problem.bloom,
         status: problem.status,
         checkResult: problem.checkResult,
+        rejectReason: problem.rejectReason,
         attempts: problem._count.attempts,
         concepts: problem.concepts.map((link) => ({ id: link.conceptId, name: link.concept.name })),
         createdAt: problem.createdAt,
@@ -134,7 +137,7 @@ export function registerProblemRoutes(app: FastifyInstance, deps: ProblemRouteDe
 
     const problems = await prisma.problem.findMany({
       where: { id: { in: body.problemIds } },
-      select: { id: true, canvasId: true, status: true },
+      select: { id: true, canvasId: true },
     })
     if (problems.length !== new Set(body.problemIds).size) {
       throw new AppError(400, 'PROBLEM_NOT_FOUND', '包含不存在的题目')
@@ -147,39 +150,13 @@ export function registerProblemRoutes(app: FastifyInstance, deps: ProblemRouteDe
     const canvasId = problems[0]!.canvasId
     await requireCanvasWrite(prisma, canvasId, auth.user.id)
 
-    // 已驳回到的题不进卷子：那题自己都没过三检
-    const rejected = problems.filter((problem) => problem.status === 'REJECTED')
-    if (rejected.length > 0) {
-      throw new AppError(400, 'PROBLEM_REJECTED', `有 ${rejected.length} 道题未通过质检，不能组卷`)
-    }
-
-    // 按传入顺序排：学生挑的顺序就是他想放的位置
-    const order = new Map(body.problemIds.map((id, index) => [id, index]))
-
-    const paper = await prisma.paper.create({
-      data: {
-        canvasId,
-        title: body.title,
-        spec: { source: 'manual', problemIds: body.problemIds } as object,
-        report: {
-          pickedCount: problems.length,
-          problems: [
-            '同题不同画布混排会让权限判定失效',
-            '题库里没有的题',
-            '未通过质检的题',
-          ].slice(0, 0),
-        } as object,
-        durationMin: body.durationMin,
-        status: 'DRAFT',
-        createdById: auth.user.id,
-        items: {
-          create: problems
-            .sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0))
-            .map((problem, index) => ({ problemId: problem.id, order: index + 1, points: body.pointsPerProblem })),
-        },
-      },
-      select: { id: true, title: true, durationMin: true },
-    })
+    // Set 保留首次勾选的题序，同一题只计分一次。
+    const ids = [...new Set(body.problemIds)]
+    const paper = await createVerifiedPaper(prisma, {
+      canvasId, title: body.title, spec: { source: 'manual', problemIds: ids },
+      report: { pickedCount: ids.length, problems: [] }, durationMin: body.durationMin,
+      status: 'DRAFT', createdById: auth.user.id,
+    }, ids, body.pointsPerProblem)
 
     return reply.status(201).send({
       id: paper.id,

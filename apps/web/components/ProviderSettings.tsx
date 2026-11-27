@@ -5,17 +5,14 @@ import { useState } from 'react'
 
 import type { ProviderView, ProvidersPayload } from '../lib/api'
 
-const TASK_LABELS: Record<string, string> = {
-  extract: '课件抽取',
-  chunk: '切片',
-  judge: '判题',
-  quiz: '出题',
-  check: '三检',
-  variant: '变式',
-  probe: '探查',
-  method: '方法',
-  solve: '解题',
-  assistant: '底部对话',
+import { MODEL_TASK_KEYS, TASK_LABELS } from '../../../packages/contracts/src/client'
+
+function cacheRate(row: { tokensIn: number; cachedTokens: number; cacheUsageComplete: boolean | null }) {
+  if (row.cacheUsageComplete === null || row.tokensIn <= 0 || row.cachedTokens > row.tokensIn) return '—'
+  if (row.cacheUsageComplete === false && row.cachedTokens === 0) return '—'
+  const pct = row.cachedTokens / row.tokensIn * 100
+  // 部分上报时向下取整，避免显示一个高于已知命中比例的下限。
+  return row.cacheUsageComplete ? pct.toFixed(1) + '%' : '至少 ' + (Math.floor(pct * 10) / 10).toFixed(1) + '%'
 }
 
 /**
@@ -169,6 +166,14 @@ export function ProviderSettings({ data, apiBaseUrl, token }: { data: ProvidersP
         </p>
       )}
 
+      {!!data.recentUsage?.length && <details data-testid="model-cache-usage">
+        <summary>最近的模型缓存用量</summary>
+        <table><thead><tr><th>时间</th><th>模型</th><th>输入 token</th><th>已命中 token</th><th>输入命中率</th></tr></thead>
+          <tbody>{data.recentUsage.map(row => <tr key={row.id}>
+            <td>{new Date(row.createdAt).toLocaleString('zh-CN')}</td><td>{row.model}</td><td>{row.tokensIn}</td>
+            <td>{row.cacheUsageComplete === true ? row.cachedTokens : row.cachedTokens > 0 ? `至少 ${row.cachedTokens}` : row.cacheUsageComplete === false ? '未上报' : '历史记录未知'}</td><td>{cacheRate(row)}</td>
+          </tr>)}</tbody></table>
+      </details>}
       {message && (
         <p data-testid="provider-message" style={{ fontSize: 13, color: message.ok ? '#059669' : '#dc2626' }}>
           {message.text}
@@ -506,7 +511,7 @@ function TaskPreferences({
     <section data-testid="task-preferences" style={{ border: '1px solid #e5e7eb', borderRadius: 8, padding: 16 }}>
       <h2 style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>各任务用哪个模型</h2>
       <p style={{ fontSize: 12, color: '#6b7280', marginBottom: 12 }}>
-        不选就走默认路由。抽取这类机械任务建议用便宜的模型，推理任务用强一点的。
+        这里配置需要模型的任务。课件切片和按概念拆卡在本机完成。
       </p>
 
       {options.length === 0 && (
@@ -524,11 +529,11 @@ function TaskPreferences({
       )}
 
       <div style={{ display: 'grid', gap: 8 }}>
-        {Object.keys(TASK_LABELS).map((taskType) => {
+        {MODEL_TASK_KEYS.map((taskType) => {
           const need = requiredCapabilities[taskType]
           const value = currentValue(taskType)
           const selected = options.find((option) => option.value === value)
-          const missing = need && selected && Object.keys(selected.capability).length > 0 && selected.capability[need] !== true
+          const missing = need && selected && Object.keys(selected.capability).some(key => key !== 'reasoningLevels') && selected.capability[need] !== true
 
           return (
             <div key={taskType} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>

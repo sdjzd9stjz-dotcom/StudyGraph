@@ -84,8 +84,10 @@ test('提示词要求证明题 → 计算题被丢弃，证明题保留', async 
   assert.ok(dropped.some((item) => /题型 COMPUTATION 不在限定范围/.test(item.reason)))
 
   // 请求里必须真的把约束写给模型
-  const userMessage = requests[0].messages.find((m: any) => m.role === 'user').content as string
-  assert.match(userMessage, /只允许 PROOF/)
+  const [material, instruction] = requests[0].messages.filter((m: any) => m.role === 'user')
+  assert.match(material.content, /线性空间的维数/)
+  assert.match(instruction.content, /出 2 道题/)
+  assert.match(instruction.content, /只允许 PROOF/)
 })
 
 test('参数栏限定题型时，同样会丢弃其它题型', async () => {

@@ -1,3 +1,8 @@
+import { nodeModelTask } from '../../../../packages/contracts/src/reasoning.ts'
+import { forOperation } from '../llm/reasoning.ts'
+import type { CheckParams } from './executors/check.ts'
+import type { QuizQuestionRef } from './contract.ts'
+import { verifiedPaperPool } from '../domain/verified-paper.ts'
 import { createHash } from 'node:crypto'
 
 import { computeFingerprint } from '../../../../packages/contracts/src/index.ts'
@@ -72,7 +77,7 @@ async function collectInputs(
   prisma: PrismaClient,
   canvasId: string,
   nodeId: string,
-): Promise<{ inputs: Record<string, unknown>; hashes: string[] }> {
+): Promise<{ inputs: Record<string, unknown>; hashes: string[]; quizBatch: QuizQuestionRef[] }> {
   const edges = await prisma.edge.findMany({
     where: { canvasId, toNodeId: nodeId, kind: 'DERIVED_FROM' },
     select: { fromNodeId: true, toPort: true },
@@ -98,7 +103,7 @@ async function collectInputs(
     ...groupLinks.flatMap((link) => link.group.members.map((member) => member.nodeId)),
   ]
 
-  if (upstreamNodeIds.length === 0) return { inputs: {}, hashes: [] }
+  if (upstreamNodeIds.length === 0) return { inputs: {}, hashes: [], quizBatch: [] }
 
   // 去重 + 排序：产物合并与指纹都不能随数据库返回顺序抖动
   const uniqueUpstreamIds = [...new Set(upstreamNodeIds)].filter((id) => id !== nodeId).sort()
@@ -139,6 +144,7 @@ async function collectInputs(
   const artifacts: UpstreamArtifact[] = []
   const inputs: Record<string, unknown> = {}
   const upstreamContext: UpstreamContextEntry[] = []
+  const quizBatch: QuizQuestionRef[] = []
 
   for (const upstreamId of uniqueUpstreamIds) {
     const artifact = latestArtifact.get(upstreamId)
@@ -152,6 +158,11 @@ async function collectInputs(
       })
       const structured = artifact.structured as Record<string, unknown> | null
       if (structured && typeof structured === 'object') Object.assign(inputs, structured)
+      if (portByNode.has(upstreamId) && nodeById.get(upstreamId)?.type === 'QUIZ' && artifact.kind === 'PROBLEM_DRAFT' && Array.isArray(structured?.created)) {
+        for (const question of structured.created) {
+          if (typeof question?.id === 'string') quizBatch.push({ id: question.id, sourceNodeId: upstreamId })
+        }
+      }
     }
 
     /**
@@ -193,7 +204,7 @@ async function collectInputs(
     .filter((entry) => entry.conversation.length > 0)
     .map((entry) => createHash('sha256').update(`${entry.nodeId}\n${entry.conversation}`).digest('hex'))
 
-  return { inputs, hashes: [...artifacts.map((artifact) => artifact.hash), ...conversationHashes] }
+  return { inputs, quizBatch, hashes: [...artifacts.map((artifact) => artifact.hash), ...conversationHashes] }
 }
 
 export async function executeNode(
@@ -210,7 +221,11 @@ export async function executeNode(
   // 未实现 → 501（由 registry 决定，这里不吞）
   const executor = getExecutor(node.type)
 
-  const { inputs, hashes } = await collectInputs(deps.prisma, node.canvasId, node.id)
+  const { inputs, hashes, quizBatch } = await collectInputs(deps.prisma, node.canvasId, node.id)
+
+  // 组卷读取整张画布的可用题库；上下游节点没有变化时，题目也可能刚刚通过质检或被降级。
+  const paperPool = node.type === 'PAPER' ? await verifiedPaperPool(deps.prisma, node.canvasId) : undefined
+  if (paperPool) hashes.push(createHash('sha256').update(JSON.stringify(paperPool)).digest('hex'))
 
   // 指纹输入：默认是 params；source 这类执行器会把文件内容摘要并进来（SG-SUP-008 §1）
   const fingerprintParams = executor.prepareFingerprintParams
@@ -224,7 +239,10 @@ export async function executeNode(
   const skills = withNodePrompt(boundSkills, (node.params as { prompt?: unknown } | null)?.prompt)
   const skillPayload = skillFingerprintPayload(skills)
 
-  const route = node.type === 'EXTRACT' ? deps.llm.routeFor('extract') : null
+  const user = { ...deps.user, canvasId: node.canvasId }
+  const task = nodeModelTask(node.type)
+  const llm = task ? await forOperation(deps.llm, task, user, `run:${node.id}`) : deps.llm
+  const route = task ? await (llm.selectedRoute?.(task, user) ?? llm.routeFor(task)) : null
   const modelUsed = route ? `${route.provider}/${route.model}` : null
   // An alias alone cannot prove which provider snapshot will answer the next request.
   const expectedVersion = route?.expectedVersion ?? route?.model ?? 'rule-based-v1'
@@ -233,13 +251,17 @@ export async function executeNode(
     // skill 的 slug+version 进指纹：绑了新 skill 或改了正文都必须让缓存失效。
     // 只放 slug+version 而不是全文 —— 正文改了 version 就会 +1，没必要把正文也塞进来。
     params: route
-      ? { params: fingerprintParams, modelUsed, skills: skillPayload }
+      ? { params: fingerprintParams, modelUsed, skills: skillPayload, ...(llm.effort ? { effort: llm.effort } : {}) }
       : { params: fingerprintParams, skills: skillPayload },
     modelVersion: version,
     promptVersion: executor.promptVersion,
   })
   let fingerprint = fingerprintFor(expectedVersion)
-  const cacheHit = node.fingerprint === fingerprint &&
+  // 联机质检要重新读取每道题的现态；已经给过结论的题不会重复调用模型。
+  const checkParams = node.params as CheckParams | null
+  const checksStoredQuestions = node.type === 'CHECK' && quizBatch.length > 0 &&
+    !checkParams?.stem?.trim() && !checkParams?.answer?.trim()
+  const cacheHit = node.fingerprint === fingerprint && !checksStoredQuestions &&
     (node.type !== 'CARD' || await cardCacheIsCurrent(deps.prisma, node.id, node.canvasId))
 
   if (options.dryRun) {
@@ -294,14 +316,16 @@ export async function executeNode(
   try {
     const result = await executor.run({
       params: node.params,
+      quizBatch,
+      paperPool,
       inputs,
-      llm: deps.llm,
+      llm,
       spans: {
         resolve: async () => null,
         pageText: async () => undefined,
         verify: async () => ({ ok: false, reason: 'PAGE_MISSING', detail: '执行器未提供 span 解析' }),
       },
-      user: deps.user,
+      user,
       prisma: deps.prisma,
       skills,
       canvasId: node.canvasId,
@@ -324,13 +348,14 @@ export async function executeNode(
           tokensIn: record.tokensIn,
           tokensOut: record.tokensOut,
           cachedTokens: record.cachedTokens,
+          cacheUsageComplete: record.cacheUsageComplete !== false,
         })),
       })
     }
     const versions = [...new Set(result.usageRecords?.map(record => record.model))]
-    if (route && versions.length !== 1) throw new Error('一次运行需要唯一可核验的模型版本')
-    const modelVersion = route ? versions[0]! : expectedVersion
-    fingerprint = fingerprintFor(modelVersion)
+    if (node.type === 'EXTRACT' && versions.length !== 1) throw new Error('一次运行需要唯一可核验的模型版本')
+    const modelVersion = versions.length === 1 ? versions[0]! : expectedVersion
+    fingerprint = fingerprintFor(node.type === 'EXTRACT' ? modelVersion : expectedVersion)
     const hash = computeFingerprint({
       upstreamArtifactHashes: [],
       params: structured,

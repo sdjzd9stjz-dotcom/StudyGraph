@@ -1,5 +1,7 @@
 'use client'
 
+import { ModelControls, useModelControls } from './CanvasAiConfig'
+
 import { MathText } from '../MathText'
 
 import { useEffect, useRef, useState } from 'react'
@@ -62,6 +64,7 @@ export function NodeChat({
     void load().catch(e => { if (active) setError(String(e)) }); return () => {active=false}
   }, [nodeId,apiBaseUrl,token,attempt])
   useEffect(() => { bottom.current?.scrollIntoView({block:'nearest'}) }, [turns])
+  const { flush: flushModel } = useModelControls()
   async function send() {
     const message = input.trim()
     if (!message || busy || !ready) return
@@ -71,6 +74,7 @@ export function NodeChat({
     setTurns((prev) => [...prev, { role: 'user', text: message }])
     const turnId = crypto.randomUUID()
     const deliver = async () => {
+      await flushModel()
       // 历史由服务端从库里取：客户端再传一份只会和真正用于下游的版本分叉
       const response = await fetch(`${apiBaseUrl}/v1/nodes/${nodeId}/chat`, {
         method: 'POST',
@@ -157,6 +161,7 @@ export function NodeChat({
         <div ref={bottom} />
       </div>
 
+      <ModelControls task="method" scope={`chat:${nodeId}`} label="对话模型" />
       <div style={{ display: 'flex', gap: 6, padding: 10, borderTop: '1px solid #e2e8f0' }}>
         <input
           data-testid="node-chat-input"

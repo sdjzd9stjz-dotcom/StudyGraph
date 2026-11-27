@@ -1,3 +1,4 @@
+import { forOperation } from '../llm/reasoning.ts'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 
@@ -95,7 +96,7 @@ function registerNodeChat(app: FastifyInstance, deps: AssistantRouteDeps): void 
     const saveAnswer = (content:string) => prisma.nodeMessage.create({data:{id:turn ? turn+':a' : undefined,nodeId:id,role:'assistant',content}})
     const recent = await prisma.nodeMessage.findMany({
       where: { nodeId: id },
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: 20,
       select: { role: true, content: true },
     })
@@ -121,19 +122,20 @@ function registerNodeChat(app: FastifyInstance, deps: AssistantRouteDeps): void 
     }
 
     try {
-      const result = await llm.complete({
+      const chat = await forOperation(llm, 'method', { ...auth.user, canvasId: node.canvasId }, `chat:${id}`)
+      const result = await chat.complete({
         taskType: 'method',
+        conversationId: id,
         messages: [
           {
             role: 'system',
             content:
-              `你在和用户讨论他画布上「${label}」这个节点的内容。下面就是这个节点最近一次运行的产出：\n\n` +
-              `${card.slice(0, 12_000)}\n\n` +
-              '规则：\n' +
-              '1. 只依据上面的内容回答，不要补充内容里没有的知识\n' +
+              '你在和用户讨论画布上一个节点的内容。规则：\n' +
+              '1. 只依据下面的节点产出回答，不要补充内容里没有的知识\n' +
               '2. 解释要具体到内容里的条目，别讲空话\n' +
               '3. 内容里没有答案就说"这个节点的产出里没有"，并说明需要哪个节点提供\n' +
-              '4. 不要建议执行节点，不要编造引文。回答中的数学公式用 $...$ 或 $$...$$ 包裹，逐字引文保留原样。',
+              '4. 不要建议执行节点，不要编造引文。回答中的数学公式用 $...$ 或 $$...$$ 包裹，逐字引文保留原样。\n\n' +
+              `节点「${label}」最近一次运行的产出：\n${card.slice(0, 12_000)}`,
           },
           ...history.map((turn) => ({ role: turn.role as 'user' | 'assistant', content: turn.content })),
         ],
@@ -150,6 +152,7 @@ function registerNodeChat(app: FastifyInstance, deps: AssistantRouteDeps): void 
           tokensIn: result.usage.tokensIn,
           tokensOut: result.usage.tokensOut,
           cachedTokens: result.usage.cachedTokens,
+          cacheUsageComplete: result.usage.cacheUsageComplete !== false,
         },
       })
 
@@ -246,7 +249,7 @@ export function registerAssistantRoutes(app: FastifyInstance, deps: AssistantRou
     await requireCanvasWrite(prisma, canvasId, auth.user.id)
 
     const result = await runCanvasAgent(
-      llm,
+      await forOperation(llm, 'assistant', { ...auth.user, canvasId }, 'assistant'),
       { prisma, canvasId, userId: auth.user.id },
       { message: body.message, history: body.history ?? [] },
     )

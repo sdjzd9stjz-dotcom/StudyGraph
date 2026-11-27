@@ -291,7 +291,11 @@ export async function executeCanvasTool(
           ok: true,
           created: outcome.created.length,
           skipped: outcome.skipped.length,
-          concepts: outcome.created.map((node) => node.conceptName),
+          ...outcome.report,
+          primaryReasons: outcome.report.primaryReasons.slice(0, 12).map(({ reason, count }) => ({ reason: reason.slice(0, 70), count })),
+          otherBlocked: outcome.report.primaryReasons.slice(12).reduce((sum, group) => sum + group.count, 0),
+          concepts: outcome.created.slice(0, 5).map(node => Array.from(node.conceptName).slice(0, 45).join('')),
+          note: '原因按每条的首项计数，样例最多五个。右键抽取节点可查看完整拆分明细。拆分只处理已抽取条目，全文证明覆盖情况需另行核对。',
         },
         ...(outcome.created.length > 0
           ? {
@@ -712,8 +716,8 @@ const PER_NODE_CONVERSATION = 800
 const CONTEXT_BUDGET = 16_000
 
 export interface CanvasContext {
-  /** 给模型的完整上下文（节点清单 + 产出内容 + 对话 + 连线） */
-  readonly text: string
+  readonly materials: string
+  readonly activity: string
   readonly nodeCount: number
   /** 有内容被截断的节点数：截断时提示模型可以调 read_node_output 看全文 */
   readonly truncated: number
@@ -733,26 +737,27 @@ export async function buildCanvasContext(deps: AgentDeps): Promise<CanvasContext
   const [nodes, edges] = await Promise.all([
     deps.prisma.node.findMany({
       where: { canvasId: deps.canvasId },
-      orderBy: { createdAt: 'asc' },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       select: { id: true, type: true, title: true, status: true },
     }),
     deps.prisma.edge.findMany({
       where: { canvasId: deps.canvasId },
+      orderBy: [{ fromNodeId: 'asc' }, { toNodeId: 'asc' }],
       select: { fromNodeId: true, toNodeId: true },
     }),
   ])
-  if (nodes.length === 0) return { text: '（空画布）', nodeCount: 0, truncated: 0 }
+  if (nodes.length === 0) return { materials: '（空画布）', activity: '', nodeCount: 0, truncated: 0 }
 
   const ids = nodes.map((node) => node.id)
   const [artifacts, messages] = await Promise.all([
     deps.prisma.artifact.findMany({
       where: { nodeId: { in: ids } },
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       select: { nodeId: true, kind: true, structured: true },
     }),
     deps.prisma.nodeMessage.findMany({
       where: { nodeId: { in: ids } },
-      orderBy: { createdAt: 'asc' },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       select: { nodeId: true, role: true, content: true },
     }),
   ])
@@ -772,6 +777,8 @@ export async function buildCanvasContext(deps: AgentDeps): Promise<CanvasContext
   const perNode = Math.max(400, Math.min(PER_NODE_SUMMARY, Math.floor(CONTEXT_BUDGET / nodes.length) - 300))
   const nameOf = new Map(nodes.map((node) => [node.id, node.title ?? node.type]))
   const blocks: string[] = []
+  const statuses: string[] = []
+  const conversations: string[] = []
   let budget = CONTEXT_BUDGET
   let truncated = 0
 
@@ -779,22 +786,26 @@ export async function buildCanvasContext(deps: AgentDeps): Promise<CanvasContext
     const artifact = latest.get(node.id)
     const summary = artifact ? summarizeArtifact(artifact.kind, artifact.structured) : ''
     const clippedSummary = summary.length > perNode ? `${summary.slice(0, perNode)}…（已截断，可调 read_node_output 看全文）` : summary
-    if (summary.length > perNode) truncated += 1
 
     const talk = (conversation.get(node.id) ?? []).slice(-PER_NODE_MESSAGES).join('\n')
     const clippedTalk = talk.length > PER_NODE_CONVERSATION ? `${talk.slice(0, PER_NODE_CONVERSATION)}…` : talk
 
-    const block =
-      `### ${node.type}｜${node.title ?? node.type}｜${node.status}｜id=${node.id}\n` +
-      (artifact ? `产物（${artifact.kind}）：\n${clippedSummary || '（空）'}\n` : '尚未运行，没有产物\n') +
-      (clippedTalk ? `对话：\n${clippedTalk}\n` : '')
-
-    if (budget - block.length < 0) {
-      truncated += 1
+    // 状态和追问更常变。放在产物之后，修改早期卡片的对话也能复用后面各卡的产物。
+    const ref = '[' + (blocks.length + 1) + ']'
+    const block = `### ${ref} ${node.type}｜${node.title ?? node.type}｜id=${node.id}\n` +
+      (artifact ? `产物（${artifact.kind}）：\n${clippedSummary || '（空）'}\n` : '尚未运行，没有产物\n')
+    const status = ref + ' ' + node.status
+    const talkBlock = clippedTalk ? ref + ' 对话：\n' + clippedTalk : ''
+    const size = block.length + status.length + talkBlock.length + 3
+    if (size > budget) {
+      truncated += nodes.length - blocks.length
       break
     }
-    budget -= block.length
+    if (summary.length > perNode || talk.length > PER_NODE_CONVERSATION) truncated++
+    budget -= size
     blocks.push(block)
+    statuses.push(status)
+    if (talkBlock) conversations.push(talkBlock)
   }
 
   const edgeLines = edges.map(
@@ -802,9 +813,12 @@ export async function buildCanvasContext(deps: AgentDeps): Promise<CanvasContext
   )
 
   return {
-    text:
-      `节点与内容（共 ${nodes.length} 个）：\n\n${blocks.join('\n')}\n` +
-      (edgeLines.length > 0 ? `连线：\n${edgeLines.join('\n')}\n` : '连线：无\n') +
+    materials:
+      `节点与内容：\n${blocks.join('\n')}\n` +
+      (edgeLines.length > 0 ? `连线：\n${edgeLines.join('\n')}\n` : '连线：无\n'),
+    activity:
+      `节点状态（共 ${nodes.length} 个节点）：\n${statuses.join('\n')}\n` +
+      (conversations.length ? conversations.join('\n') + '\n' : '') +
       (truncated > 0 ? `\n（有 ${truncated} 个节点的内容因长度被截断；需要细节时调 read_node_output 读全文）` : ''),
     nodeCount: nodes.length,
     truncated,
@@ -829,6 +843,7 @@ const SYSTEM_RULES = [
   '3. 只有用户明确要求删除时才调用 delete_node / delete_edge。',
   '4. 不要重复创建用户已经有的节点类型，除非用户明确要求。',
   '4a. 用户要"知识卡"时，如果画布上已有概念抽取节点且跑过，**必须**用 split_cards 按概念拆成一概念一节点；不要建一个塞满所有卡的单节点。',
+  '4a-0. 拆卡后按工具的总数、新建、已有同名和未通过数汇报，列明 primaryReasons 中的首要原因及数量。切片和拆卡不调用模型，概念抽取调用模型。',
   '4a-1. 只有在 split_cards 不可用（没有抽取节点）时才用 create_node 建 CARD，并且**每个节点都要填 conceptName**，一个节点只做一个概念。',
   '4a-2. 没填 conceptName 的 CARD 节点会把上游所有概念都做成卡，几张卡内容就一模一样 —— 这是真实报障，不要这样建。',
   '4b. DEEPEN（深入理解）只接受知识卡与题目的连线；LECTURE（导出讲义）接受任意节点产出，用来汇总成讲义。',
@@ -857,7 +872,9 @@ export async function runCanvasAgent(
   // 全部节点及其产出、对话一起交给模型：这是"以全部卡片及其内容为上下文"的落点
   const context = await buildCanvasContext(deps)
   const messages: AgentMessage[] = [
-    { role: 'system', content: `${SYSTEM_RULES}\n\n当前画布（含全部节点内容）：\n${context.text}` },
+    { role: 'system', content: SYSTEM_RULES },
+    { role: 'user', content: '当前画布材料（供引用）：\n' + context.materials },
+    ...(context.activity ? [{ role: 'user' as const, content: context.activity }] : []),
     ...input.history.slice(-6).map((turn) => ({ role: turn.role, content: turn.text }) as AgentMessage),
     { role: 'user', content: input.message },
   ]
@@ -871,6 +888,7 @@ export async function runCanvasAgent(
     const result = await llm.chatWithTools({
       // 独立的任务类型：学生在「模型供应商」里能单独给底部对话指定模型
       taskType: 'assistant',
+      conversationId: deps.canvasId,
       messages,
       tools: CANVAS_TOOLS,
       user: { id: deps.userId, canvasId: deps.canvasId } as never,
@@ -887,6 +905,7 @@ export async function runCanvasAgent(
         tokensIn: result.usage.tokensIn,
         tokensOut: result.usage.tokensOut,
         cachedTokens: result.usage.cachedTokens,
+        cacheUsageComplete: result.usage.cacheUsageComplete !== false,
       },
     })
 
@@ -906,7 +925,7 @@ export async function runCanvasAgent(
       }
     }
 
-    messages.push({ role: 'assistant', content: result.content, toolCalls: result.toolCalls })
+    messages.push({ role: 'assistant', content: result.content, toolCalls: result.toolCalls, reasoningContent: result.reasoningContent, nativeContent: result.nativeContent })
 
     for (const call of result.toolCalls) {
       const outcome = await executeCanvasTool(deps, call.name, call.arguments)

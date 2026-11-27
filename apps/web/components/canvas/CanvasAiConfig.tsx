@@ -1,149 +1,115 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
+import { reasoningLevels } from '../../../../packages/contracts/src/reasoning'
+import { TASK_LABELS } from '../../../../packages/contracts/src/task-capabilities'
 
-/**
- * 画布自己的 AI 配置（用户 2026-11-23 要求：AI 配置每块画布独立）。
- *
- * 优先级在服务端实现：画布配置 → 用户全局配置 → 内置默认路由。
- * 这里只负责让人看清"这块画布现在用的是什么"，并能改。
- *
- * 为什么每一行都显示"当前生效"：只显示下拉选了什么，用户在全局改了之后
- * 会以为这块画布也跟着变（或者相反）。真正的答案必须来自服务端的合并结果。
- */
-const TASKS: Array<{ key: string; label: string; hint: string }> = [
-  { key: 'assistant', label: '底部对话', hint: '读画布内容、改画布结构' },
-  { key: 'extract', label: '概念抽取', hint: '从课件里抽知识点' },
-  { key: 'quiz', label: '出题', hint: '生成练习题' },
-  { key: 'method', label: '方法 / 深入理解 / 讲义', hint: '推理型任务' },
-]
-
-interface ModelOption {
-  credentialId: string
-  provider: string
-  modelId: string
+interface Model { modelId: string; enabled: boolean; capabilities: unknown }
+interface Provider { slug: string; name: string; protocol: string; credentials: { id: string; label: string }[]; models: Model[] }
+interface Preference { taskType: string; credentialId: string; modelId: string; credential?: { isActive: boolean; provider: { slug: string; protocol: string } } }
+interface Route { provider: string; model: string }
+interface Effort extends Route { scope: string; effort: string }
+interface Settings {
+  canvasPrefs: Preference[]; globalPrefs: Preference[]; defaults: Record<string, Route>; efforts: Effort[]; providers: Provider[]
+}
+interface Controls {
+  settings?: Settings; error: string; reload: () => void; flush: () => Promise<void>
+  setModel: (task: string, pref?: Preference) => void
+  setEffort: (task: string, scope: string, route: Route, effort: string | null) => void
+}
+const Context = createContext<Controls | null>(null)
+export function useModelControls() {
+  const controls = useContext(Context)
+  if (!controls) throw Error('画布模型设置尚未挂载')
+  return controls
 }
 
-export function CanvasAiConfig({ canvasId, apiBaseUrl, token }: { canvasId: string; apiBaseUrl: string; token: string }) {
-  const [options, setOptions] = useState<ModelOption[]>([])
-  const [canvasPrefs, setCanvasPrefs] = useState<Record<string, { modelId: string; credentialId: string }>>({})
-  const [globalPrefs, setGlobalPrefs] = useState<Record<string, { modelId: string }>>({})
-  const [busy, setBusy] = useState<string | null>(null)
-  const [toast, setToast] = useState<string | null>(null)
-
-  const headers = { 'content-type': 'application/json', authorization: `Bearer ${token}` }
-
+export function CanvasModelProvider({ apiBaseUrl, canvasId, token, children }: {
+  apiBaseUrl: string; canvasId: string; token: string; children: ReactNode
+}) {
+  const [settings, setSettings] = useState<Settings>()
+  const [error, setError] = useState('')
+  const pending = useRef(Promise.resolve())
+  const revision = useRef(0)
+  const endpoint = `${apiBaseUrl}/v1/canvases/${canvasId}`
+  const request = useCallback(async (url: string, method = 'GET', body?: unknown) => {
+    const response = await fetch(url, { method, cache: 'no-store', headers: { authorization: `Bearer ${token}`, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined })
+    if (!response.ok) throw Error((await response.json().catch(() => null))?.error?.message ?? `模型设置读写失败（${response.status}）`)
+    return response
+  }, [token])
   const load = useCallback(async () => {
-    const [providersResponse, prefsResponse] = await Promise.all([
-      fetch(`${apiBaseUrl}/v1/providers`, { headers: { authorization: `Bearer ${token}` } }),
-      fetch(`${apiBaseUrl}/v1/canvases/${canvasId}/model-prefs`, { headers: { authorization: `Bearer ${token}` } }),
-    ])
-
-    if (providersResponse.ok) {
-      const payload = (await providersResponse.json()) as {
-        providers: Array<{ name: string; credentials: Array<{ id: string }>; models: Array<{ modelId: string; enabled: boolean }> }>
-      }
-      const list: ModelOption[] = []
-      for (const provider of payload.providers) {
-        for (const credential of provider.credentials) {
-          for (const model of provider.models.filter((item) => item.enabled)) {
-            list.push({ credentialId: credential.id, provider: provider.name, modelId: model.modelId })
-          }
-        }
-      }
-      setOptions(list)
-    }
-
-    if (prefsResponse.ok) {
-      const payload = (await prefsResponse.json()) as {
-        canvasPrefs: Array<{ taskType: string; credentialId: string; modelId: string }>
-        globalPrefs: Array<{ taskType: string; modelId: string }>
-      }
-      setCanvasPrefs(Object.fromEntries(payload.canvasPrefs.map((pref) => [pref.taskType, pref])))
-      setGlobalPrefs(Object.fromEntries(payload.globalPrefs.map((pref) => [pref.taskType, pref])))
-    }
-  }, [apiBaseUrl, canvasId, token])
-
+    const stamp = ++revision.current
+    await pending.current.catch(() => {})
+    try {
+      const [catalog, prefs] = await Promise.all([request(`${apiBaseUrl}/v1/providers`).then(r => r.json()), request(`${endpoint}/model-prefs`).then(r => r.json())])
+      if (stamp === revision.current) { setSettings({ ...prefs, providers: catalog.providers }); pending.current = Promise.resolve(); setError('') }
+    } catch (e) { if (stamp === revision.current) setError(String(e)) }
+  }, [apiBaseUrl, endpoint, request])
   useEffect(() => {
-    void load()
+    void load(); window.addEventListener('focus', load)
+    return () => { revision.current++; window.removeEventListener('focus', load) }
   }, [load])
+  const flush = useCallback(() => pending.current, [])
+  function save(update: (s: Settings) => Settings, write: () => Promise<Response>) {
+    if (error) { void load(); return }
+    revision.current++
+    setSettings(s => s && update(s)); setError('')
+    const operation = pending.current.then(write).then(() => {})
+    pending.current = operation
+    void operation.catch(e => { setError(`保存失败。${String(e)}。请重新读取后再试。`) })
+  }
+  const controls: Controls = { settings, error, flush, reload: () => {
+    // 重新读取意味着放弃失败的本地选择；下一次运行使用已存的设置。
+    pending.current = pending.current.catch(() => {}); void load()
+  }, setModel(task, pref) {
+    save(s => ({ ...s, canvasPrefs: [...s.canvasPrefs.filter(p => p.taskType !== task), ...(pref ? [pref] : [])] }),
+      () => request(`${endpoint}/model-prefs/${task}`, pref ? 'PUT' : 'DELETE', pref))
+  }, setEffort(task, scope, route, effort) {
+    save(s => ({ ...s, efforts: [...s.efforts.filter(p => p.scope !== scope), ...(effort ? [{ ...route, scope, effort }] : [])] }),
+      () => request(`${endpoint}/reasoning/${encodeURIComponent(scope)}`, 'PUT', { task, ...route, effort }))
+  } }
+  return <Context.Provider value={controls}>{children}</Context.Provider>
+}
 
-  const setPref = useCallback(
-    async (taskType: string, value: string) => {
-      setBusy(taskType)
-      try {
-        if (value === '') {
-          // 清空 = 回落到全局配置（不是"不配置"）
-          const response = await fetch(`${apiBaseUrl}/v1/canvases/${canvasId}/model-prefs/${taskType}`, {
-            method: 'DELETE',
-            headers: { authorization: `Bearer ${token}` },
-          })
-          if (!response.ok && response.status !== 204) {
-            setToast(`清除失败：${response.status}`)
-            return
-          }
-          setToast('已改为跟随全局配置')
-        } else {
-          const [credentialId, modelId] = value.split('::')
-          const response = await fetch(`${apiBaseUrl}/v1/canvases/${canvasId}/model-prefs/${taskType}`, {
-            method: 'PUT',
-            headers,
-            body: JSON.stringify({ credentialId, modelId }),
-          })
-          if (!response.ok) {
-            const body = (await response.json().catch(() => null)) as { error?: { message?: string } } | null
-            setToast(body?.error?.message ?? `保存失败：${response.status}`)
-            return
-          }
-          setToast('已保存到这块画布')
-        }
-        await load()
-      } finally {
-        setBusy(null)
-        window.setTimeout(() => setToast(null), 2400)
-      }
-    },
-    [apiBaseUrl, canvasId, headers, load, token],
-  )
-
-  return (
-    <section data-testid="canvas-ai-config" style={{ borderTop: '1px solid #e2e8f0', background: '#fff' }}>
-      <details>
-        <summary style={{ cursor: 'pointer', padding: '8px 16px', fontSize: 13, color: '#334155' }}>
-          AI 配置（这块画布独立设置）
-        </summary>
-        <div style={{ padding: '0 16px 16px', display: 'grid', gap: 10 }}>
-          <p style={{ fontSize: 12, color: '#64748b', margin: 0 }}>
-            只影响这块画布；留空则跟随「模型供应商」里的全局设置。
-          </p>
-          {TASKS.map((task) => {
-            const canvasPref = canvasPrefs[task.key]
-            const value = canvasPref ? `${canvasPref.credentialId}::${canvasPref.modelId}` : ''
-            const effective = canvasPref?.modelId ?? globalPrefs[task.key]?.modelId ?? '内置默认'
-            return (
-              <div key={task.key} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12 }}>
-                <span style={{ width: 170, color: '#334155' }}>{task.label}</span>
-                <select
-                  data-testid={`canvas-model-${task.key}`}
-                  disabled={busy === task.key}
-                  value={value}
-                  onChange={(event) => void setPref(task.key, event.target.value)}
-                  style={{ flex: 1, maxWidth: 320, border: '1px solid #cbd5e1', borderRadius: 7, padding: '5px 8px', fontSize: 12 }}
-                >
-                  <option value="">跟随全局</option>
-                  {options.map((option) => (
-                    <option key={`${option.credentialId}::${option.modelId}`} value={`${option.credentialId}::${option.modelId}`}>
-                      {option.provider} · {option.modelId}
-                    </option>
-                  ))}
-                </select>
-                <span style={{ color: '#94a3b8' }}>当前：{effective}</span>
-              </div>
-            )
-          })}
-          {toast && <span data-testid="canvas-ai-toast" style={{ fontSize: 12, color: '#0f766e' }}>{toast}</span>}
-        </div>
-      </details>
-    </section>
-  )
+const fieldStyle = { fontSize: 12, color: '#334155', display: 'grid', gap: 4 } as const
+export function ModelControls({ task, scope, label }: { task: string; scope: string; label: string }) {
+  const [expanded, setExpanded] = useState(false)
+  const { settings, error, reload, setModel, setEffort } = useModelControls()
+  const providers = settings?.providers ?? []
+  const active = (pref: Preference) => pref.credential?.isActive ?? providers.some(p => p.credentials.some(c => c.id === pref.credentialId))
+  const own = settings?.canvasPrefs.find(p => p.taskType === task && active(p))
+  const pref = own ?? settings?.globalPrefs.find(p => p.taskType === task && active(p))
+  const fallback = settings?.defaults[task]
+  const provider = pref ? providers.find(p => p.slug === pref.credential?.provider.slug || p.credentials.some(c => c.id === pref.credentialId)) : providers.find(p => p.slug === fallback?.provider)
+  const model = pref?.modelId ?? fallback?.model
+  const slug = provider?.slug ?? pref?.credential?.provider.slug ?? fallback?.provider
+  const levels = model ? reasoningLevels(model, provider?.protocol ?? pref?.credential?.provider.protocol ?? (slug === 'anthropic' ? 'ANTHROPIC' : 'OPENAI'), provider?.models.find(m => m.modelId === model)?.capabilities) : []
+  const selected = settings?.efforts.find(p => p.scope === scope && p.model === model && p.provider === slug)?.effort
+  const index = selected ? levels.indexOf(selected) + 1 : 0
+  const text = selected && !index ? `档位已失效（${selected}）` : selected ?? '模型默认'
+  const key = (credentialId: string, modelId: string) => JSON.stringify([credentialId, modelId])
+  return <details onToggle={e => setExpanded(e.currentTarget.open)} data-model-scope={scope} className="nodrag nopan nowheel" style={{ margin: '3px 8px', fontSize: 12, minWidth: 0, color: '#475569' }}>
+    <summary style={{ cursor: 'pointer', overflowWrap: 'anywhere', padding: '4px 0' }}>{label} · {model ?? '读取中'}{model && ` · ${text}`}{error && ' · 设置异常'}</summary>
+    {expanded && <div style={{ display: 'grid', gap: 8, padding: '5px 2px 8px', maxWidth: 440 }}>
+      {error && <div role="alert">{error} <button type="button" onClick={reload}>重新读取</button></div>}
+      <label style={fieldStyle}>画布模型 · {TASK_LABELS[task]}
+        <select aria-label={`${label}选择`} disabled={!settings || Boolean(error)} style={{ minWidth: 0, width: '100%' }} value={own ? key(own.credentialId, own.modelId) : ''} onChange={e => {
+          const pair = e.target.value ? JSON.parse(e.target.value) as [string, string] : null
+          setModel(task, pair ? { taskType: task, credentialId: pair[0], modelId: pair[1] } : undefined)
+        }}>
+          <option value="">跟随全局设置</option>
+          {own && !providers.some(p => p.credentials.some(c => c.id === own.credentialId) && p.models.some(m => m.modelId === own.modelId)) && <option value={key(own.credentialId, own.modelId)}>{own.modelId}</option>}
+          {providers.flatMap(p => p.credentials.flatMap(c => p.models.filter(m => m.enabled || (own?.modelId === m.modelId && c.id === own.credentialId)).map(m =>
+            <option key={key(c.id, m.modelId)} value={key(c.id, m.modelId)} disabled={!m.enabled}>{p.name} · {m.modelId}{p.credentials.length > 1 && `（${c.label}）`}</option>)))}
+        </select>
+      </label>
+      {levels.length > 0 && model && slug ? <label style={fieldStyle}>推理强度 · {text}
+        <input type="range" disabled={Boolean(error)} min={0} max={levels.length} step={1} value={index} aria-label={`${label}推理强度`} aria-valuetext={text} style={{ width: '100%', margin: 0, accentColor: '#2563eb' }}
+          onChange={e => setEffort(task, scope, { model, provider: slug }, levels[Number(e.target.value) - 1] ?? null)} />
+        <span aria-hidden="true" style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, gap: 2, color: '#64748b' }}>{['默认', ...levels].map(l => <span key={l}>{l}</span>)}</span>
+      </label> : model && <span>推理强度由模型决定，当前型号未提供可调档位。</span>}
+      {selected && !index && model && slug && <button type="button" onClick={() => setEffort(task, scope, { model, provider: slug }, null)}>恢复模型默认</button>}
+    </div>}
+  </details>
 }
